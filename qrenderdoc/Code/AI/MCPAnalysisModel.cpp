@@ -1057,7 +1057,7 @@ QJsonObject PerformanceReportToJson(const PerformanceReport &report)
 QString PerformanceReportToMarkdown(const PerformanceReport &report)
 {
   QStringList lines;
-  lines << QStringLiteral("# RenderDoc Performance Report");
+  lines << QStringLiteral("# RenderMax Performance Report");
   lines << QString();
   lines << QStringLiteral("- Capture: %1").arg(
       report.capturePath.isEmpty() ? QStringLiteral("(unknown)") : report.capturePath);
@@ -1545,7 +1545,7 @@ QJsonObject EventBrowserContextToJson(const EventBrowserContext &context)
 QString EventBrowserContextToText(const EventBrowserContext &context)
 {
   QStringList lines;
-  lines << QStringLiteral("RenderDoc event context: %1 filtered event(s) of %2.")
+  lines << QStringLiteral("RenderMax event context: %1 filtered event(s) of %2.")
                .arg(context.matchedEvents)
                .arg(context.totalEvents);
   lines << QStringLiteral("Capture: %1 (API %2, frame %3)")
@@ -1900,7 +1900,7 @@ QJsonObject InvestigationReportToJson(const InvestigationReport &report)
 QString InvestigationReportToMarkdown(const InvestigationReport &report)
 {
   QStringList lines;
-  lines << QStringLiteral("# RenderDoc Investigation Report");
+  lines << QStringLiteral("# RenderMax Investigation Report");
   lines << QString();
 
   lines << QStringLiteral("- Generated: %1").arg(
@@ -2005,7 +2005,7 @@ QString InvestigationReportToMarkdown(const InvestigationReport &report)
 QString BookmarkSidecarToText(const BookmarkSidecar &sidecar)
 {
   QStringList lines;
-  lines << QStringLiteral("RenderDoc investigation bookmarks: %1 record(s).").arg(sidecar.items.size());
+  lines << QStringLiteral("RenderMax investigation bookmarks: %1 record(s).").arg(sidecar.items.size());
 
   if(!sidecar.available)
     lines << QStringLiteral("(capture not open locally; extended bookmark fields are unavailable)");

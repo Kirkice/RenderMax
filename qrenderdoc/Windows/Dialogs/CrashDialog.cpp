@@ -145,18 +145,18 @@ CrashDialog::CrashDialog(PersistentConfig &cfg, QVariantMap crashReportJSON, QWi
   else if(replayCrash)
   {
     text =
-        tr("<p>RenderDoc encountered a serious problem. Please take a moment to look over this "
-           "form to check what has been gathered then send it off so that RenderDoc can get "
+        tr("<p>RenderMax encountered a serious problem. Please take a moment to look over this "
+           "form to check what has been gathered then send it off so that RenderMax can get "
            "better!</p>");
   }
   else
   {
     text =
-        tr("<p>A crash happened while RenderDoc was injected into your application. It's not "
-           "feasible to tell whether the crash was in your application or in RenderDoc's capturing "
+        tr("<p>A crash happened while RenderMax was injected into your application. It's not "
+           "feasible to tell whether the crash was in your application or in RenderMax's capturing "
            "code. The minidump <a href=\"%1\">in the zip</a> might show the problem.</p>"
            "<p>If you don't think your application crashed on its own please take a moment to "
-           "look over this form to check what has been gathered then send it off so that RenderDoc "
+           "look over this form to check what has been gathered then send it off so that RenderMax "
            "can get better!</p>")
             .arg(QUrl::fromLocalFile(m_ReportPath).toString());
   }
@@ -168,10 +168,9 @@ CrashDialog::CrashDialog(PersistentConfig &cfg, QVariantMap crashReportJSON, QWi
 
   if(m_Config.CheckUpdate_UpdateAvailable)
   {
-    text +=
-        tr("<p><b><a href=\"https://renderdoc.org/builds\">An updated version of RenderDoc</a> is "
-           "available</b>. This bug may be fixed in a newer version, it's advised that you "
-           "update to see if the bug is fixed.</p>");
+    text += tr("<p><b>An updated version of RenderMax is available</b>. This bug may be fixed "
+               "in a newer version; update through your configured RenderMax distribution "
+               "channel to see if the problem is resolved.</p>");
   }
 
   text += tr("<p>The contents of the report can be found <a href=\"%1\">in this zip</a> which "
@@ -193,7 +192,7 @@ CrashDialog::CrashDialog(PersistentConfig &cfg, QVariantMap crashReportJSON, QWi
     ui->email->setEnabled(false);
 
     text = tr(
-        "<p>RenderDoc encountered a serious problem. "
+        "<p>RenderMax encountered a serious problem. "
         "Unfortunately something went wrong while initialising the bug reporter as Qt was unable "
         "to load SSL support at runtime.</p>");
 
@@ -227,14 +226,13 @@ CrashDialog::CrashDialog(PersistentConfig &cfg, QVariantMap crashReportJSON, QWi
 
     text += lit("</p>");
 
-    text += tr("<p>There is no non-secure bug reporting system available so unfortunately we can't "
-               "proceed. If you'd like to send in the capture directly you can "
-               "<a href=\"mailto:baldurk@baldurk.org\">email it to me</a> attaching "
-               "<a href=\"%1\">this report</a> ")
+    text += tr("<p>There is no non-secure crash-reporting system available, so submission can't "
+               "continue. Please keep <a href=\"%1\">this report</a> and contact your "
+               "configured RenderMax support channel if you need assistance.")
                 .arg(QUrl::fromLocalFile(m_ReportPath).toString());
 
     if(ui->captureFilename->isVisible())
-      text += tr(" and if you'd like, the capture linked below.");
+      text += tr(" You can also include the capture linked below if your support channel requests it.");
 
     text += lit("</p>");
   }
@@ -323,11 +321,9 @@ void CrashDialog::on_send_clicked()
   {
     QMessageBox::StandardButton result =
         RDDialog::question(this, tr("Are you sure?"),
-                           tr("Uploading your capture file will send it privately to the "
-                              "RenderDoc server where I can "
-                              "use it to reproduce your problem.\n\nAre you sure you are "
-                              "OK with sending the capture "
-                              "securely to RenderDoc's website?"));
+                           tr("Uploading your capture file will send it privately to the configured "
+                              "crash-report service, where it can be used to reproduce your problem."
+                              "\n\nAre you sure you want to send the capture securely?"));
 
     if(result != QMessageBox::Yes)
     {
@@ -339,10 +335,10 @@ void CrashDialog::on_send_clicked()
             this, tr("Capture required"),
             tr("<html>For unrecoverable errors like the one you encountered, without a "
                "capture to reproduce the problem it's impossible to tell what "
-               "went wrong so a crash report is unfortunately required.\n\n"
-               "If you don't wish to share your capture that is OK. You can also email me at <a "
-               "href=\"mailto:baldurk@baldurk.org?subject=RenderDoc%20Unrecoverable%20error\">"
-               "baldurk@baldurk.org</a> with information and I can help investigate.</html>"));
+               "went wrong, so a crash report is unfortunately required.\n\n"
+               "If you do not wish to share your capture, that is OK. Keep the report and "
+               "contact your configured RenderMax support channel with the information you are "
+               "comfortable sharing.</html>"));
       return;
     }
   }

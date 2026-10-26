@@ -1,4 +1,4 @@
-RenderDoc
+RenderMax
 =========
 
 .. include:: include/intro_header_inc.rst

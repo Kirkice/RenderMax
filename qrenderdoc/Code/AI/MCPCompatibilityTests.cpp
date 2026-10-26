@@ -178,7 +178,7 @@ TEST_CASE("Compatibility diagnosis works without capture and really exports", "[
   CHECK_FALSE(QFile::exists(args.value(QStringLiteral("outputPath")).toString()));
   args.remove(QStringLiteral("outputPath")); args.remove(QStringLiteral("confirm")); args[QStringLiteral("format")] = QStringLiteral("markdown");
   result = registry.Call(QStringLiteral("renderdoc_diagnoseEnvironment"), args, call); REQUIRE(result.ok);
-  CHECK(result.structured.value(QStringLiteral("content")).toString().startsWith(QStringLiteral("# Native RenderDoc")));
+  CHECK(result.structured.value(QStringLiteral("content")).toString().startsWith(QStringLiteral("# Native RenderMax")));
 }
 TEST_CASE("Compatibility investigation document keeps inline evidence and propagates export failure", "[mcp][compatibility][output]")
 {

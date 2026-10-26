@@ -141,7 +141,7 @@ QColor SeriesColour(int index)
 // `button.trackmetricbutton` is at least 30px tall.
 //
 // The colours are deliberately *not* declared here. This panel paints with QPainter instead of
-// style sheets, so it has to read the theme RenderDoc is actually running rather than imposing a
+// style sheets, so it has to read the theme RenderMax is actually running rather than imposing a
 // scheme of its own: RDStyle installs the application palette and the project has no global
 // stylesheet, so the widget's palette is the single authority. The accessors live on
 // SystemTraceTimeline, mirroring how TimelineBar paints from palette().
@@ -338,7 +338,7 @@ public:
 
   // --- theme ---------------------------------------------------------------------------------
   // This widget draws its whole surface with QPainter, so it cannot inherit the theme the way a
-  // styled child would. RenderDoc installs its palette application-wide through RDStyle and has no
+  // styled child would. RenderMax installs its palette application-wide through RDStyle and has no
   // global stylesheet, so the widget's own palette is the authority: these accessors are the same
   // idiom TimelineBar uses (`palette().brush(QPalette::Window)` / `Base` / `Text`), which keeps the
   // panel consistent with the rest of the UI and correct in both the light and dark schemes.
@@ -355,7 +355,7 @@ public:
   QColor Grid() const { return Blend(Chrome(), palette().color(QPalette::WindowText), 0.22); }
   QColor Text() const { return palette().color(QPalette::WindowText); }
   QColor DimText() const { return Blend(Text(), Chrome(), 0.42); }
-  // Accent is the interaction colour the rest of RenderDoc uses for selection and focus.
+  // Accent is the interaction colour the rest of RenderMax uses for selection and focus.
   QColor Accent() const { return palette().color(QPalette::Highlight); }
   QColor AccentHover() const { return palette().color(QPalette::Highlight).darker(130); }
   // The emphasis colour for calipers, annotations and a selected span's outline: the accent lifted
@@ -1997,7 +1997,7 @@ void SystemTraceViewer::captureTrace()
 
   // The only place a `traceconv` binary may be found is the Snapdragon Profiler installation the
   // user already pointed at in Settings; the driver falls back to PATH discovery when this is
-  // empty. Nothing is bundled or redistributed with RenderDoc.
+  // empty. Nothing is bundled or redistributed with RenderMax.
   const QString profilerPath =
       QString::fromUtf8(m_Ctx.Config().ExternalTool_SnapdragonProfiler.c_str());
   if(!profilerPath.isEmpty())
@@ -2172,7 +2172,7 @@ void SystemTraceViewer::rebuild()
     return;
   }
 
-  // The imported lanes do not depend on RenderDoc: keep showing them (on their own time base)
+  // The imported lanes do not depend on RenderMax: keep showing them (on their own time base)
   // even with no capture open. Only the frame overlay and the per-event readout need a capture.
   if(!m_Ctx.IsCaptureLoaded())
   {
@@ -2183,15 +2183,15 @@ void SystemTraceViewer::rebuild()
 
   const uint32_t frame = m_Ctx.FrameInfo().frameNumber;
 
-  // The per-event timing is a RenderDoc replay query, so it must run on the replay thread. The
-  // anchor's timeSec is 0 because RenderDoc exposes no absolute frame-origin timestamp: action
+  // The per-event timing is a RenderMax replay query, so it must run on the replay thread. The
+  // anchor's timeSec is 0 because RenderMax exposes no absolute frame-origin timestamp: action
   // times are already relative to the frame origin (see ClockDomainAlignment).
   m_Ctx.Replay().AsyncInvoke([this, frame](IReplayController *r) {
     const rdcarray<CounterResult> results = r->FetchCounters({GPUCounter::EventGPUDuration});
 
     // Prefix-sum the per-event durations in event-id order to obtain each event's start time
     // relative to the frame origin. Event ids increase in submission order, so this ordering is
-    // the same one RenderDoc's own event browser uses.
+    // the same one RenderMax's own event browser uses.
     std::vector<CounterResult> sorted;
     sorted.reserve((size_t)results.size());
     for(const CounterResult &cr : results)
@@ -2372,13 +2372,13 @@ void SystemTraceViewer::updateStatusText()
       m_Status->setText(tr("No trace loaded. Use \"Capture Trace...\" to record one directly from "
                            "the connected device, or \"Open Trace...\" to import one. Then click a "
                            "lane element to read its fields, or a draw/dispatch marker to select it "
-                           "in RenderDoc."));
+                           "in RenderMax."));
     }
     else
     {
       m_Status->setText(tr("No trace loaded. Use \"Open Trace...\" to import one, then click a lane "
                            "element to read its fields, or a draw/dispatch marker to select it in "
-                           "RenderDoc. Recording a trace needs a connected device, which this "
+                           "RenderMax. Recording a trace needs a connected device, which this "
                            "session does not have."));
     }
     return;

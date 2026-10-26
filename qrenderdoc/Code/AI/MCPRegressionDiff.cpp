@@ -1600,7 +1600,7 @@ QJsonObject RegressionDiffToJson(const RegressionDiffResult &result)
 QString RegressionDiffToMarkdown(const RegressionDiffResult &result)
 {
   QStringList lines;
-  lines << QStringLiteral("# RenderDoc Cross-Capture Regression Report");
+  lines << QStringLiteral("# RenderMax Cross-Capture Regression Report");
   lines << QString();
   lines << QStringLiteral("- Baseline: %1").arg(
       result.baselineLabel.isEmpty() ? QStringLiteral("(unknown)") : result.baselineLabel);

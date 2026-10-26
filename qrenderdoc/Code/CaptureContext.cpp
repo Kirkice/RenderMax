@@ -167,21 +167,18 @@ CaptureContext::CaptureContext(PersistentConfig &cfg) : m_Config(cfg)
         if(CrashDialog::HasCaptureReady(m_Config))
         {
           text +=
-              tr("If you think this may be a RenderDoc bug please click the button below to report "
-                 "it, "
-                 "but note that this will require you to upload the capture for reproduction as "
-                 "otherwise it is impossible to tell what the problem may be.");
+              tr("If you think this may be a RenderMax bug, click the button below to report it. "
+                 "This requires you to upload the capture for reproduction; otherwise it is "
+                 "impossible to tell what the problem may be.");
 
           add_report = true;
         }
         else if(CrashDialog::CaptureTooLarge(m_Config))
         {
           text = tr("<html>%1<br><br>"
-                    "Your capture is too lage to upload as a crash report so this can't be "
-                    "automatically reported. "
-                    "Please email me at <a "
-                    "href=\"mailto:baldurk@baldurk.org?subject=RenderDoc%20Unrecoverable%20error\">"
-                    "baldurk@baldurk.org</a> with information and I can help investigate.</html>")
+                    "Your capture is too large to upload as a crash report, so it cannot be "
+                    "automatically reported. Keep the report and contact your configured RenderMax "
+                    "support channel with the information you are comfortable sharing.</html>")
                      .arg(text);
         }
         else

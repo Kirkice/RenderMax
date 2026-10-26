@@ -1239,7 +1239,7 @@ ToolResult QueryAdapter::DiagnoseEnvironment(const QString &format, CallContext 
   const QString fmt = format == QStringLiteral("markdown") ? format : QStringLiteral("json");
   QString content = QString::fromUtf8(QJsonDocument(report).toJson(QJsonDocument::Indented));
   if(fmt == QStringLiteral("markdown"))
-    content = QStringLiteral("# Native RenderDoc Environment Diagnosis\n\nObserved runtime, configuration and application session; device readiness is not inferred.\n\n```json\n") + content + QStringLiteral("```\n");
+    content = QStringLiteral("# Native RenderMax Environment Diagnosis\n\nObserved runtime, configuration and application session; device readiness is not inferred.\n\n```json\n") + content + QStringLiteral("```\n");
   return ToolResult::Success(QJsonObject{{QStringLiteral("report"), report},
       {QStringLiteral("format"), fmt}, {QStringLiteral("content"), content}}, content);
 }

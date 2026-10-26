@@ -1875,7 +1875,7 @@ TEST_CASE("MCP structured performance report model", "[mcp][analysis]")
     report.conclusions.toVerify.push_back(QStringLiteral("Inspect the top event ids."));
 
     const QString md = PerformanceReportToMarkdown(report);
-    CHECK(md.startsWith(QStringLiteral("# RenderDoc Performance Report")));
+    CHECK(md.startsWith(QStringLiteral("# RenderMax Performance Report")));
     CHECK(md.contains(QStringLiteral("## Hottest passes")));
     CHECK(md.contains(QStringLiteral("## Hottest events")));
     CHECK(md.contains(QStringLiteral("## Evidence and limitations")));
@@ -2130,7 +2130,7 @@ TEST_CASE("MCP event browser advanced filtering and AI context model", "[mcp][an
     CHECK_FALSE(events[1].toObject().contains(QStringLiteral("durationUs")));
 
     const QString text = EventBrowserContextToText(ctx);
-    CHECK(text.startsWith(QStringLiteral("RenderDoc event context: 2 filtered event(s) of 6.")));
+    CHECK(text.startsWith(QStringLiteral("RenderMax event context: 2 filtered event(s) of 6.")));
     CHECK(text.contains(QStringLiteral("Vulkan")));
     CHECK(text.contains(QStringLiteral("marker=\"GBuffer\"")));
     CHECK(text.contains(QStringLiteral("EID 21")));
@@ -2299,7 +2299,7 @@ TEST_CASE("MCP investigation bookmark model", "[mcp][analysis]")
         QStringLiteral("inferred"));
 
   const QString text = BookmarkSidecarToText(sidecar);
-  CHECK(text.startsWith(QStringLiteral("RenderDoc investigation bookmarks: 2 record(s).")));
+  CHECK(text.startsWith(QStringLiteral("RenderMax investigation bookmarks: 2 record(s).")));
   CHECK(text.contains(QStringLiteral("Capture: D:/caps/frame.rdc")));
   CHECK(text.contains(QStringLiteral("Sidecar: D:/caps/frame.rdc.bookmarks.json")));
   CHECK(text.contains(QStringLiteral("[bm-21]")));
@@ -2407,7 +2407,7 @@ TEST_CASE("MCP investigation report composition and rendering", "[mcp][analysis]
 
   // ---- Markdown rendering keeps the section titles the plugin contract uses
   const QString md = InvestigationReportToMarkdown(report);
-  CHECK(md.startsWith(QStringLiteral("# RenderDoc Investigation Report")));
+  CHECK(md.startsWith(QStringLiteral("# RenderMax Investigation Report")));
   CHECK(md.contains(QStringLiteral("- Generated: 2026-01-02T03:04:05Z")));
   CHECK(md.contains(QStringLiteral("- Capture: D:/caps/frame.rdc")));
   CHECK(md.contains(QStringLiteral("- API: Vulkan")));

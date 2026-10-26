@@ -160,7 +160,7 @@ ToolResult AndroidReadiness(const QJsonObject &args, const QJsonObject &target)
   out[QStringLiteral("ok")] = result.OK() && !activity.isEmpty();
   out[QStringLiteral("code")] = !result.OK() ? QStringLiteral("DEVICE_COMMAND_FAILED") : activity.isEmpty() ? QStringLiteral("ACTIVITY_NOT_FOUND") : QStringLiteral("READY");
   if(!result.OK()) out[QStringLiteral("message")] = Str(result.Message());
-  out[QStringLiteral("deviceTransport")] = QStringLiteral("RenderDoc device protocol (configured adb)");
+  out[QStringLiteral("deviceTransport")] = QStringLiteral("RenderMax device protocol (configured adb)");
   // Enumeration/support and these commands establish device transport, package,
   // and launcher readiness, not debuggability or successful injection.
   out[QStringLiteral("limitation")] = QStringLiteral("Injection/debugger readiness is established only by launch; no APK is installed or modified by this check.");
@@ -246,7 +246,7 @@ public:
       }
       if(!QRegularExpression(QStringLiteral("^[A-Za-z0-9_.]+/[A-Za-z0-9_.$]+$")).match(app).hasMatch())
         return Fail(ErrorCode::InvalidParams, "Invalid Android package/activity");
-      // Explicit remote-launch authority includes RenderDoc's native server setup:
+      // Explicit remote-launch authority includes RenderMax's native server setup:
       // it can install/update its own APKs and change device capture settings.
       // The requested application APK is not installed or patched here.
       ResultDetails started = controller->StartRemoteServer(Rdc(url));
@@ -295,7 +295,7 @@ public:
     out[QStringLiteral("platform")] = platform;
     out[QStringLiteral("selectedTarget")] = selected;
     if(platform == QStringLiteral("android"))
-      out[QStringLiteral("serverSetupEffects")] = QStringLiteral("Native RenderDoc server setup may install/update its server APKs, forward ports and configure device capture settings; the requested application APK is not installed by this tool.");
+      out[QStringLiteral("serverSetupEffects")] = QStringLiteral("Native RenderMax server setup may install/update its server APKs, forward ports and configure device capture settings; the requested application APK is not installed by this tool.");
     out[QStringLiteral("state")] = State();
     return ToolResult::Success(out);
   }
@@ -541,11 +541,11 @@ void RegisterSessionTools(ToolRegistry &registry, QueryAdapter &adapter)
   launch[QStringLiteral("app")] = string(true);
   launch[QStringLiteral("workingDir")] = string();
   launch[QStringLiteral("platform")] = QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}, {QStringLiteral("enum"), QJsonArray{QStringLiteral("windows"), QStringLiteral("android")}}};
-  add("renderdoc_launchApplication", "Launch an explicitly selected Windows/Android application; omitted platform returns PLATFORM_REQUIRED. Android native server setup may install/update RenderDoc server APKs and device capture settings. Application sessions are not MCP transport sessions.", launch, QJsonArray{QStringLiteral("app")}, false);
-  add("renderdoc_launchWindowsApplication", "Launch a Windows executable using native RenderDoc injection and retain its target connection.", QJsonObject{{QStringLiteral("executablePath"), string(true)}, {QStringLiteral("workingDir"), string()}, {QStringLiteral("commandLine"), string()}}, QJsonArray{QStringLiteral("executablePath")}, false);
-  add("renderdoc_launchRemoteApplication", "Select one Android target, launch package/activity and retain its target connection. Native server setup may install/update RenderDoc server APKs and device capture settings; does not install the requested application's APK.", remote, QJsonArray{QStringLiteral("packageActivity")}, false);
+  add("renderdoc_launchApplication", "Launch an explicitly selected Windows/Android application; omitted platform returns PLATFORM_REQUIRED. Android native server setup may install/update RenderMax server APKs and device capture settings. Application sessions are not MCP transport sessions.", launch, QJsonArray{QStringLiteral("app")}, false);
+  add("renderdoc_launchWindowsApplication", "Launch a Windows executable using native RenderMax injection and retain its target connection.", QJsonObject{{QStringLiteral("executablePath"), string(true)}, {QStringLiteral("workingDir"), string()}, {QStringLiteral("commandLine"), string()}}, QJsonArray{QStringLiteral("executablePath")}, false);
+  add("renderdoc_launchRemoteApplication", "Select one Android target, launch package/activity and retain its target connection. Native server setup may install/update RenderMax server APKs and device capture settings; does not install the requested application's APK.", remote, QJsonArray{QStringLiteral("packageActivity")}, false);
   add("renderdoc_checkAndroidLaunchReadiness", "Check native device transport, supported Android target, installed package and launcher activity without starting an application.", QJsonObject{{QStringLiteral("packageName"), string(true)}, {QStringLiteral("targetQuery"), string()}}, QJsonArray{QStringLiteral("packageName")}, true);
-  add("renderdoc_listCaptureTargets", "Enumerate native RenderDoc device protocols and their supported capture targets.", QJsonObject(), QJsonArray(), true);
+  add("renderdoc_listCaptureTargets", "Enumerate native RenderMax device protocols and their supported capture targets.", QJsonObject(), QJsonArray(), true);
   add("renderdoc_openCapture", "Resolve the native active capture or load an absolute filePath; refuses to discard temporary or modified UI captures.", QJsonObject{{QStringLiteral("filePath"), string()}}, QJsonArray(), false);
   add("renderdoc_closeSession", "Disconnect the application target and remote connection without terminating the application, deleting files or closing replay. Not MCP transport-session deletion.", QJsonObject(), QJsonArray(), false);
   add("renderdoc_captureFrame", "Trigger one immediate/frame/delayed capture, preserve the saved file and load it into native replay when safe. Timeout does not revoke a submitted frame request.", trigger, QJsonArray(), false);

@@ -357,7 +357,7 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
               NULL, tr("vkconfig detected - possible incompatibility"),
               tr("Configuration from 'vkconfig' tool detected.\n\n"
                  "This program has caused problems in the past and it is \n"
-                 "strongly recommended that you disable it while using RenderDoc.\n\n"
+                 "strongly recommended that you disable it while using RenderMax.\n\n"
                  "If this program is not active check the path below for any leftover files:\n\n%1")
                   .arg(vkconfigcheck.absoluteFilePath()));
 
@@ -846,8 +846,8 @@ void MainWindow::OnCaptureTrigger(const QString &exe, const QString &workingDir,
   LambdaThread *th = new LambdaThread([this, exe, workingDir, cmdLine, env, opts, callback, &ret]() {
     if(isUnshareableDeviceInUse())
     {
-      RDDialog::warning(this, tr("RenderDoc is already capturing an app on this device"),
-                        tr("A running app on this device is already being captured with RenderDoc. "
+      RDDialog::warning(this, tr("RenderMax is already capturing an app on this device"),
+                        tr("A running app on this device is already being captured with RenderMax. "
                            "First please close the app then try to launch again."),
                         QMessageBox::Ok);
       return;
@@ -1317,7 +1317,7 @@ void MainWindow::SetTitle(const QString &filename)
   if(m_Ctx.Replay().CurrentRemote().IsValid())
     prefix += tr("Remote: %1 - ").arg(m_Ctx.Replay().CurrentRemote().Name());
 
-  QString text = prefix + lit("RenderDoc ");
+  QString text = prefix + lit("RenderMax ");
 
   if(RENDERDOC_STABLE_BUILD)
     text += lit(FULL_VERSION_STRING);
@@ -1355,19 +1355,14 @@ bool MainWindow::HandleMismatchedVersions()
         tr("You are running an unofficial build with mismatched core and UI versions.\n"
            "Double check where you got your build from and do a sanity check!"));
 #else
-    QMessageBox::StandardButton res = RDDialog::critical(
+    RDDialog::critical(
         this, tr("Mismatched versions"),
-        tr("RenderDoc has detected mismatched versions between its internal module and UI.\n"
+        tr("RenderMax has detected mismatched versions between its internal module and UI.\n"
            "This is likely caused by a buggy update in the past which partially updated your "
-           "install."
-           "Likely because a program was running with renderdoc while the update happened.\n"
-           "You should reinstall RenderDoc immediately as this configuration is almost guaranteed "
-           "to crash.\n\n"
-           "Would you like to open the downloads page to reinstall?"),
-        QMessageBox::Yes | QMessageBox::No);
-
-    if(res == QMessageBox::Yes)
-      QDesktopServices::openUrl(QUrl(lit("https://renderdoc.org/builds")));
+           "install. Likely because a program was running with renderdoc while the update happened.\n"
+           "You should reinstall RenderMax immediately as this configuration is almost guaranteed "
+           "to crash. Obtain an updated build through your configured RenderMax distribution "
+           "channel."));
 
     SetUpdateAvailable();
 #endif
@@ -2242,7 +2237,7 @@ void MainWindow::setRemoteHost(int hostIdx)
               RDDialog::critical(
                   this, tr("Unsupported Device Android Version"),
                   tr("This device is older than Android 6.0, the minimum required version for "
-                     "RenderDoc.\n\nThis may break or cause unknown problems - use at your own "
+                     "RenderMax.\n\nThis may break or cause unknown problems - use at your own "
                      "risk."));
             }
 
@@ -2252,7 +2247,7 @@ void MainWindow::setRemoteHost(int hostIdx)
           {
             RDDialog::critical(
                 this, tr("Unsupported Device"),
-                tr("This device is not able to support RenderDoc. Please consult the documentation "
+                tr("This device is not able to support RenderMax. Please consult the documentation "
                    "for this type of device to see what the problem may be."));
           }
         });
@@ -3003,7 +2998,7 @@ void MainWindow::on_action_Open_Snapdragon_Profile_triggered()
     return;
 
   // Unlike RGP there is no Qualcomm profile embedded in the capture. Snapdragon Profiler
-  // produces its own trace, so the user selects that existing trace and RenderDoc hands the
+  // produces its own trace, so the user selects that existing trace and RenderMax hands the
   // path to the external tool. Because the Snapdragon wire protocol is unverified, this only
   // launches the user-configured profiler; if the tool can't dial back, the capture degrades
   // to the file-export path (handled inside CaptureContext::OpenQCProfile).
@@ -3253,17 +3248,21 @@ void MainWindow::on_action_View_Documentation_triggered()
     QDesktopServices::openUrl(
         QUrl::fromLocalFile(fi.absoluteDir().absoluteFilePath(lit("renderdoc.chm"))));
   else
-    QDesktopServices::openUrl(QUrl::fromUserInput(lit("https://renderdoc.org/docs")));
+    RDDialog::information(this, tr("Documentation unavailable"),
+                          tr("Local RenderMax documentation is not installed. Obtain documentation "
+                             "through your configured RenderMax distribution channel."));
 }
 
 void MainWindow::on_action_Source_on_GitHub_triggered()
 {
-  QDesktopServices::openUrl(QUrl::fromUserInput(lit("https://github.com/baldurk/renderdoc")));
+  RDDialog::information(this, tr("Source location unavailable"),
+                        tr("A RenderMax source location has not been configured for this build."));
 }
 
 void MainWindow::on_action_Build_Release_Downloads_triggered()
 {
-  QDesktopServices::openUrl(QUrl::fromUserInput(lit("https://renderdoc.org/builds")));
+  RDDialog::information(this, tr("Release location unavailable"),
+                        tr("A RenderMax release location has not been configured for this build."));
 }
 
 void MainWindow::on_action_Show_Tips_triggered()
@@ -3337,14 +3336,10 @@ void MainWindow::on_action_Check_for_Updates_triggered()
       }
       case UpdateResult::Unofficial:
       {
-        QMessageBox::StandardButton res =
-            RDDialog::question(this, tr("Unofficial build"),
-                               tr("You are running an unofficial build, not a stable release.\n"
-                                  "Updates are only available for installed release builds\n\n"
-                                  "Would you like to open the builds list in a browser?"));
-
-        if(res == QMessageBox::Yes)
-          QDesktopServices::openUrl(lit("https://renderdoc.org/builds"));
+        RDDialog::information(this, tr("Unofficial build"),
+                              tr("You are running an unofficial build, not a stable release.\n"
+                                 "Updates are only available for installed release builds. Obtain "
+                                 "a release through your configured RenderMax distribution channel."));
         break;
       }
       case UpdateResult::Latest:
@@ -3412,7 +3407,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
   if(RENDERDOC_IsGlobalHookActive())
   {
     RDDialog::critical(this, tr("Global hook active"),
-                       tr("Cannot close RenderDoc while global hook is active."));
+                       tr("Cannot close RenderMax while global hook is active."));
     event->ignore();
     return;
   }
@@ -3629,7 +3624,7 @@ void MainWindow::showLaunchError(ResultDetails result)
     case ResultCode::AndroidGrantPermissionsFailed:
       message =
           tr("%1.\n\n"
-             "Please manually allow the RenderDocCmd program storage permissions on your device "
+             "Please manually allow the RenderMaxCmd program storage permissions on your device "
              "to ensure correct functionality.")
               .arg(result.Message());
       break;
@@ -3653,11 +3648,11 @@ void MainWindow::showLaunchError(ResultDetails result)
           );
       break;
     default:
-      message = tr("Error encountered launching RenderDoc remote server: %1.").arg(result.Message());
+      message = tr("Error encountered launching RenderMax remote server: %1.").arg(result.Message());
       break;
   }
   GUIInvoke::call(this, [this, message]() {
-    RDDialog::warning(this, tr("Problems launching RenderDoc remote server"), message);
+    RDDialog::warning(this, tr("Problems launching RenderMax remote server"), message);
   });
 }
 

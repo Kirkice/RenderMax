@@ -2190,13 +2190,13 @@ void PythonShell::createExtension_clicked()
       if(init.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
       {
         init.write(R"(
-# Blank RenderDoc UI extension
+# Blank RenderMax UI extension
 
 import renderdoc as rd
 import qrenderdoc as qrd
 
 def register(version: str, pyrenderdoc: qrd.CaptureContext):
-    print(f"New UI extension loaded in RenderDoc {version}")
+    print(f"New UI extension loaded in RenderMax {version}")
 
 def unregister():
     print(f"New UI extension being unloaded")
@@ -2418,7 +2418,7 @@ void PythonShell::interactive_keypress(QKeyEvent *event)
 
 QString PythonShell::scriptHeader()
 {
-  return tr(R"(RenderDoc Python console, powered by python %1.
+  return tr(R"(RenderMax Python console, powered by python %1.
 The 'pyrenderdoc' object is the current CaptureContext instance.
 The 'renderdoc' and 'qrenderdoc' modules are available.
 Documentation is available: https://renderdoc.org/docs/python_api/index.html)")

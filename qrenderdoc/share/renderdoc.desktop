@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
-Name=RenderDoc
-Comment=A stand-alone graphics API debugger
+Name=RenderMax
+Comment=A RenderDoc-compatible graphics debugger and performance analysis tool
 Comment[ru]=Автономный отладчик графических API
 GenericName=Graphics Debugger
 Exec=qrenderdoc %f
@@ -10,7 +10,7 @@ Terminal=false
 Type=Application
 X-MultipleArgs=false
 Categories=Development;
-Keywords=RenderDoc;
-Keywords[ru]=РендерДок;
+Keywords=RenderMax;RenderDoc;
+Keywords[ru]=РендерМакс;РендерДок;
 StartupNotify=true
 MimeType=application/x-renderdoc-capture;

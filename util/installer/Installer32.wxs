@@ -1,14 +1,14 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
-  <Product Name='RenderDoc' Id='*' UpgradeCode='D320753C-4B18-4905-A752-E68959943E7D'
+  <Product Name='RenderMax' Id='*' UpgradeCode='D320753C-4B18-4905-A752-E68959943E7D'
     Language='1033' Codepage='1252' Version='$(env.RENDERDOC_VERSION).0' Manufacturer='Baldur Karlsson'>
 
-    <Package Id='*' Keywords='Installer' Description="Installer for RenderDoc"
-      Comments='RenderDoc Homepage is http://renderdoc.org/' Manufacturer='Baldur Karlsson'
+    <Package Id='*' Keywords='Installer' Description="Installer for RenderMax"
+      Comments='RenderMax is a RenderDoc-compatible graphics capture and performance analysis tool.' Manufacturer='Baldur Karlsson'
       InstallerVersion='301' Languages='1033' Compressed='yes' SummaryCodepage='1252' />
 
     <UI> 
-      <Error Id="25000">Please use the 64-bit installer - the 64-bit version of RenderDoc fully supports capturing 32-bit programs.</Error>
+      <Error Id="25000">Please use the 64-bit installer - the 64-bit version of RenderMax fully supports capturing 32-bit programs.</Error>
     </UI> 
 
     <Property Id="MajorMinorVersion">$(env.RENDERDOC_VERSION)</Property>
@@ -39,15 +39,15 @@
     </Condition> 
 
     <Media Id='1' Cabinet='renderdoc.cab' EmbedCab='yes' CompressionLevel='high' DiskPrompt="CD-ROM #1" />
-    <Property Id='DiskPrompt' Value="RenderDoc Installation [1]" />
+    <Property Id='DiskPrompt' Value="RenderMax Installation [1]" />
 
     <Directory Id='TARGETDIR' Name='SourceDir'>
       <Directory Id='ProgramFilesFolder' Name='PFiles'>
-        <Directory Id='INSTALLDIR' Name='RenderDoc'>
+        <Directory Id='INSTALLDIR' Name='RenderMax'>
 
           <Component Id='QRenderDoc' Guid='0DB375D5-7712-4853-AA75-536DF863C827'>
             <File Id='qrenderdocEXE' Name='qrenderdoc.exe' DiskId='1' Source='dist/Release32/qrenderdoc.exe' KeyPath='yes'>
-              <Shortcut Id="startmenuRenderDoc" Directory="ProgramMenuDir" Name="RenderDoc" WorkingDirectory='INSTALLDIR' Icon="icon.ico" IconIndex="0" Advertise="yes" />
+              <Shortcut Id="startmenuRenderDoc" Directory="ProgramMenuDir" Name="RenderMax" WorkingDirectory='INSTALLDIR' Icon="icon.ico" IconIndex="0" Advertise="yes" />
             </File>
 
             <RegistryValue Root="HKLM" Id="VerbRDC" Action="write" 
@@ -56,7 +56,7 @@
               Type="expandable" />
             <RegistryValue Root="HKLM" Id="VerbDescRDC" Action="write" 
               Key="Software\Classes\RenderDoc.RDCCapture.1" 
-              Value='RenderDoc Capture Log (.rdc)' 
+              Value='RenderMax Capture Log (.rdc)'
               Type="expandable" />
             <RegistryValue Root="HKLM" Id="VerbIconRDC" Action="write" 
               Key="Software\Classes\RenderDoc.RDCCapture.1\DefaultIcon" 
@@ -73,7 +73,7 @@
               Type="expandable" />
             <RegistryValue Root="HKLM" Id="VerbDescCAP" Action="write" 
               Key="Software\Classes\RenderDoc.RDCSettings.1" 
-              Value='RenderDoc Capture Settings (.cap)' 
+              Value='RenderMax Capture Settings (.cap)'
               Type="expandable" />
             <RegistryValue Root="HKLM" Id="VerbIconCAP" Action="write" 
               Key="Software\Classes\RenderDoc.RDCSettings.1\DefaultIcon" 
@@ -95,7 +95,7 @@
 
             <RegistryValue Root="HKLM" Id="RDCCLSID" Action="write" 
               Key="Software\Classes\CLSID\{5D6BF029-A6BA-417A-8523-120492B1DCE3}" 
-              Value='RenderDoc Thumbnail Handler' 
+              Value='RenderMax Thumbnail Handler'
               Type="expandable" />
             <RegistryValue Root="HKLM" Id="RDCCLSIDServer" Action="write" 
               Key="Software\Classes\CLSID\{5D6BF029-A6BA-417A-8523-120492B1DCE3}\InprocServer32" 
@@ -152,7 +152,7 @@
 
           <Component Id='Documentation' Guid='CD32B446-6DC1-49E4-8FE9-509E1AFB126D'>
             <File Id='Documentation' Name='renderdoc.chm' DiskId='1' Source='dist/Release32/renderdoc.chm' KeyPath='yes'>
-              <Shortcut Id="startmenuDocs" Directory="ProgramMenuDir" Name="RenderDoc Documentation" Icon='chm.ico' Advertise="yes" />
+              <Shortcut Id="startmenuDocs" Directory="ProgramMenuDir" Name="RenderMax Documentation" Icon='chm.ico' Advertise="yes" />
             </File>
           </Component>
 
@@ -225,7 +225,7 @@
       </Directory>
 
       <Directory Id="ProgramMenuFolder" Name="Programs">
-        <Directory Id="ProgramMenuDir" Name="RenderDoc">
+        <Directory Id="ProgramMenuDir" Name="RenderMax">
           <Component Id="ProgramMenuDir" Guid="30CCCAB1-49D5-45B3-952C-53E3B581E691">
             <RemoveFolder Id='ProgramMenuDir' On='uninstall' />
             <RegistryValue Root='HKCU' Key='Software\[Manufacturer]\[ProductName]' Type='string' Value='' KeyPath='yes' />
@@ -300,13 +300,13 @@
       </Component>
 
       <Component Id="FileExtensionRDC" Guid="5F21081F-59A8-43EE-8E95-170335FC3EF4">
-        <ProgId Id='RenderDoc.RDCCapture.1' Description='RenderDoc Capture Log (.rdc)'>
+        <ProgId Id='RenderDoc.RDCCapture.1' Description='RenderMax Capture Log (.rdc)'>
           <Extension Id='rdc' />
         </ProgId>
       </Component>
 
       <Component Id="FileExtensionCAP"  Guid="3A373912-99D7-4A1C-B81C-6C69BA6B8733">
-        <ProgId Id='RenderDoc.RDCSettings.1' Description='RenderDoc Capture Settings (.cap)'>
+        <ProgId Id='RenderDoc.RDCSettings.1' Description='RenderMax Capture Settings (.cap)'>
           <Extension Id='cap' />
         </ProgId>
       </Component>
@@ -358,7 +358,7 @@
       <Custom Action="RemoveHash" Before="LaunchConditions"/>
     </InstallUISequence>
 
-    <Feature Id='Complete' Title='RenderDoc' Description='Everything included.' AllowAdvertise='no' Absent='disallow' Display='expand' Level='1' ConfigurableDirectory='INSTALLDIR'>
+    <Feature Id='Complete' Title='RenderMax' Description='Everything included.' AllowAdvertise='no' Absent='disallow' Display='expand' Level='1' ConfigurableDirectory='INSTALLDIR'>
       <Feature Id='MainProgram' Title='Program' Description='The main executable with everything needed to capture and replay.' AllowAdvertise='no' Absent='disallow' Level='1'>
         <ComponentRef Id='QRenderDoc' />
         <ComponentRef Id='RenderDocCPP' />
@@ -398,7 +398,7 @@
         <ComponentRef Id='Documentation' />
       </Feature>
 
-      <Feature Id='FileExts' Title='File Associations' Description='Associate .rdc (Capture logs) and .cap (Capture settings) files with RenderDoc.' Level='1'>
+      <Feature Id='FileExts' Title='File Associations' Description='Associate .rdc (Capture logs) and .cap (Capture settings) files with RenderMax.' Level='1'>
         <ComponentRef Id='ImageThumbnailProvider' />
         <ComponentRef Id='FileExtensionRDC' />
         <ComponentRef Id='FileExtensionCAP' />
@@ -417,7 +417,7 @@
     <Icon Id="chm.ico"  SourceFile="util/installer/chm.ico" />
     <Icon Id="icon.ico" SourceFile="qrenderdoc/Resources/icon.ico" />
     <Property Id="ARPPRODUCTICON" Value="icon.ico" />
-    <Property Id="ARPHELPLINK" Value="http://renderdoc.org/" />
+    <!-- No public RenderMax help URL is configured yet. -->
 
   </Product>
 </Wix>

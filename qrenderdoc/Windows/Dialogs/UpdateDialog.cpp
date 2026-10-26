@@ -125,8 +125,8 @@ void UpdateDialog::on_close_clicked()
 void UpdateDialog::on_update_clicked()
 {
   QMessageBox::StandardButton res =
-      RDDialog::question(this, tr("RenderDoc Update"),
-                         tr("This will close RenderDoc immediately - if you have any "
+      RDDialog::question(this, tr("RenderMax Update"),
+                         tr("This will close RenderMax immediately - if you have any "
                             "unsaved work, save it first!\n"
                             "Continue?"),
                          QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
@@ -168,8 +168,8 @@ void UpdateDialog::on_update_clicked()
     if(running > 0)
     {
       RDDialog::critical(
-          this, tr("RenderDoc in use"),
-          tr("RenderDoc is currently capturing, cannot update until the program%1 closed:\n\n")
+          this, tr("RenderMax in use"),
+          tr("RenderMax is currently capturing, cannot update until the program%1 closed:\n\n")
                   .arg(running > 1 ? lit("s are") : lit(" is")) +
               runningPrograms);
       return;
@@ -229,8 +229,8 @@ void UpdateDialog::on_update_clicked()
 
       QDir dir(QDir::tempPath());
 
-      dir.mkdir(lit("RenderDocUpdate"));
-      dir.cd(lit("RenderDocUpdate"));
+      dir.mkdir(lit("RenderMaxUpdate"));
+      dir.cd(lit("RenderMaxUpdate"));
 
       QString path = dir.absoluteFilePath(lit("update.zip"));
 

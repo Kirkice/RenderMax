@@ -934,7 +934,7 @@ int RegisterCoreTools(ToolRegistry &registry, QueryAdapter &adapter)
                       "Optional driver label to stamp on the report (APIProperties does not "
                       "expose it).");
     AddSchemaProperty(props, "rdocVersion", "string",
-                      "Optional RenderDoc version label; defaults to this build's version.");
+                      "Optional RenderMax version label; defaults to this build's version.");
     AddSchemaProperty(props, "fields", "array", "Optional list of top-level keys to return.");
 
     registry.Add(
@@ -1465,7 +1465,7 @@ int RegisterCoreTools(ToolRegistry &registry, QueryAdapter &adapter)
 
     registry.Add(
         ToolDefinition{QStringLiteral("renderdoc_getSessionState"),
-                       QStringLiteral("Get RenderDoc Session State"),
+                       QStringLiteral("Get RenderMax Session State"),
                        QStringLiteral("Return the full session state: capture info, replay status, "
                                       "modifications made in the UI and the list of bookmarks."),
                        ToolEffects::ReadOnly, ToolRequirements::None, MakeSchema(props)},
