@@ -2343,6 +2343,12 @@ void MainWindow::setRemoteHost(int hostIdx)
 
         contextChooser->setEnabled(true);
 
+        // System Trace can be opened before a device context is selected. Its capture button was
+        // previously refreshed only on capture load/close, leaving it disabled after this Android
+        // host connected even though the replay context now has an ADB protocol.
+        if(!m_SystemTraceViewer.isNull())
+          m_SystemTraceViewer->OnRemoteHostChanged();
+
         if(m_Ctx.HasCaptureDialog())
           m_Ctx.GetCaptureDialog()->UpdateRemoteHost();
       });

@@ -20,7 +20,15 @@
    <item>
     <widget class="QLabel" name="label">
      <property name="text">
-      <string><html><head/><body><p align="center"><span style=" font-size:18pt; font-weight:600;">Anonymous Analytics</span></p><p><br/>RenderMax has some very minimal analytics gathering. The data is gathered only in the UI and <span style=" font-weight:600; text-decoration: underline;">not during capture</span>. It is <span style=" font-weight:600; text-decoration: underline;">not personally identifiable</span> and contains <span style=" font-weight:600; text-decoration: underline;">absolutely no data from captures</span>. The source is freely available and auditable.</p><p>A report is generated monthly and sent securely to the configured analytics service. If you want, you can choose to manually approve each report before it is sent.</p><p>If you wish to opt out entirely, no statistics will be gathered or reported. Please consider this carefully, as it makes it harder for the RenderMax team to decide which features to prioritise.</p><p>To see a complete list of gathered data, <a href="#documentreport"><span style=" text-decoration: underline; color:#0000ff;">click here</span></a>. You can change your mind at any point in the settings window.</p></body></html></string>
+      <string>Anonymous Analytics
+
+RenderMax has some very minimal analytics gathering. The data is gathered only in the UI and not during capture. It is not personally identifiable and contains absolutely no data from captures. The source is freely available and auditable.
+
+A report is generated monthly and sent securely to the configured analytics service. If you want, you can choose to manually approve each report before it is sent.
+
+If you wish to opt out entirely, no statistics will be gathered or reported. Please consider this carefully, as it makes it harder for the RenderMax team to decide which features to prioritise.
+
+To see a complete list of gathered data, click here. You can change your mind at any point in the settings window.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>

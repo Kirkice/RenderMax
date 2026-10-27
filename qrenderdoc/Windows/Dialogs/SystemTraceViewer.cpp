@@ -1843,6 +1843,12 @@ void SystemTraceViewer::OnCaptureLoaded()
   rebuild();
 }
 
+void SystemTraceViewer::OnRemoteHostChanged()
+{
+  updateCaptureControls();
+  updateStatusText();
+}
+
 void SystemTraceViewer::OnCaptureClosed()
 {
   m_Correlation = TraceCorrelation();

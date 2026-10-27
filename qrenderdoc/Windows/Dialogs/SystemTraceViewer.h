@@ -94,6 +94,10 @@ public:
   void OnSelectedEventChanged(uint32_t eventId) override;
   void OnEventChanged(uint32_t eventId) override;
 
+  // The replay context can change without loading or closing a capture. Refresh device-recording
+  // availability at that point so a newly connected Android host enables Capture Trace immediately.
+  void OnRemoteHostChanged();
+
 private:
   void browseForTrace();
   void reloadTrace();

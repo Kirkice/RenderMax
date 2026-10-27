@@ -26,7 +26,13 @@
    <item>
     <widget class="QLabel" name="label">
      <property name="text">
-      <string><html><head/><body><p align="center"><span style=" font-size:18pt; font-weight:600;">Analytics Report Ready</span></p><p><br/>RenderMax has gathered analytics from your usage over the past month. This is now ready to send to the configured analytics service for processing.</p><p>As requested, the full report is listed below so you can check the data and ensure you are happy with what is being sent.</p><p>When ready, click OK to send the report. Clicking Discard will throw away this report and begin again next month. <a href="#documentreport"><span style=" text-decoration: underline; color:#0000ff;">Click here</span></a> to see an explanation of the report properties.</p></body></html></string>
+      <string>Analytics Report Ready
+
+RenderMax has gathered analytics from your usage over the past month. This is now ready to send to the configured analytics service for processing.
+
+As requested, the full report is listed below so you can check the data and ensure you are happy with what is being sent.
+
+When ready, click OK to send the report. Clicking Discard will throw away this report and begin again next month. Click here to see an explanation of the report properties.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>
