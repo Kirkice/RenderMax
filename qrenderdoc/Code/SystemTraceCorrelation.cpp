@@ -152,12 +152,92 @@ TraceCorrelation CorrelateSystemTrace(const SystemTrace &trace, const QVector<Tr
     return result;
   }
 
+  if(offsets.isEmpty() && !trace.HasDeclaredFrameNumbers() && frameAnchors.size() >= 2 &&
+     trace.frameBoundaries.size() >= frameAnchors.size())
+  {
+    // The trace's boundaries are ordinals, so they cannot be matched by number. Both sets advance
+    // in time order instead, so the offset that explains every pair at once is the one that leaves
+    // the smallest worst-case residual: slide the capture's anchors over the trace's boundaries and
+    // keep the best fit.
+    QVector<const TraceFrameAnchor *> sortedAnchors;
+    sortedAnchors.reserve(frameAnchors.size());
+    for(const TraceFrameAnchor &anchor : frameAnchors)
+      sortedAnchors.push_back(&anchor);
+
+    std::sort(sortedAnchors.begin(), sortedAnchors.end(),
+              [](const TraceFrameAnchor *a, const TraceFrameAnchor *b) {
+                return a->timeSec < b->timeSec;
+              });
+
+    const int count = sortedAnchors.size();
+    const int windows = trace.frameBoundaries.size() - count + 1;
+
+    double bestOffset = 0.0;
+    double bestResidual = 0.0;
+    int bestStart = -1;
+
+    for(int start = 0; start < windows; start++)
+    {
+      double sum = 0.0;
+      for(int i = 0; i < count; i++)
+        sum += trace.frameBoundaries[start + i].timeSec - sortedAnchors[i]->timeSec;
+
+      const double mean = sum / double(count);
+      double worst = 0.0;
+
+      for(int i = 0; i < count; i++)
+      {
+        const double residual =
+            fabs(trace.frameBoundaries[start + i].timeSec - sortedAnchors[i]->timeSec - mean);
+        worst = residual > worst ? residual : worst;
+      }
+
+      if(bestStart < 0 || worst < bestResidual)
+      {
+        bestStart = start;
+        bestOffset = mean;
+        bestResidual = worst;
+      }
+    }
+
+    // Half a frame is the acceptance threshold: a fit that drifts further than that has paired
+    // frames that do not belong together, so the offset would be worse than none at all.
+    const double frameInterval =
+        count >= 2 ? (sortedAnchors.last()->timeSec - sortedAnchors.first()->timeSec) / double(count - 1)
+                   : 0.0;
+    const double threshold = frameInterval > 0.0 ? frameInterval * 0.5 : 0.05;
+
+    if(bestStart >= 0 && bestResidual <= threshold)
+    {
+      result.matchedFrames = count;
+      result.alignment.confidence = ClockDomainConfidence::EstimatedFromFrameTiming;
+      result.alignment.offsetSec = bestOffset;
+      result.alignment.toleranceSec = bestResidual;
+      result.alignment.description =
+          QStringLiteral(
+              "Aligned by frame position: the trace's frame boundaries are ordinals, not frame "
+              "ids, so %1 captured frame(s) were paired with boundaries %2-%3 of the trace "
+              "(worst-case residual %4 s).")
+              .arg(count)
+              .arg(bestStart + 1)
+              .arg(bestStart + count)
+              .arg(bestResidual, 0, 'f', 6);
+      return result;
+    }
+  }
+
   if(offsets.isEmpty())
   {
     // Secondary key: when the capture only has a single frame there is no frame number to match
-    // on, so fall back to absolute time using the same frame as the anchor.
-    if(frameAnchors.size() == 1 && !trace.frameBoundaries.isEmpty())
+    // on, so fall back to absolute time using the same frame as the anchor. This is only sound when
+    // the trace declared real frame ids: then the trace's boundary list is known to contain the
+    // captured frame, and a one-frame trace's boundary IS that frame. Ordinal boundaries carry no
+    // such guarantee, so placing the capture at an arbitrary one of them would be a guess dressed up
+    // as an alignment - it is refused instead, and the description says why.
+    if(frameAnchors.size() == 1 && !trace.frameBoundaries.isEmpty() &&
+       trace.HasDeclaredFrameNumbers())
     {
+      result.matchedFrames = 1;
       result.alignment.confidence = ClockDomainConfidence::EstimatedFromFrameTiming;
       result.alignment.offsetSec = trace.frameBoundaries.first().timeSec - frameAnchors[0].timeSec;
       result.alignment.toleranceSec = 0.0;
@@ -178,6 +258,12 @@ TraceCorrelation CorrelateSystemTrace(const SystemTrace &trace, const QVector<Tr
     else if(frameAnchors.isEmpty())
       result.alignment.description =
           QStringLiteral("Capture has no frame timing: clock domains could not be related.");
+    else if(frameAnchors.size() == 1)
+      result.alignment.description =
+          QStringLiteral("The trace's frame boundaries are ordinals, not frame ids, and only one "
+                         "frame was captured: nothing ties that frame to one of the %1 boundaries. "
+                         "Capture at least two frames to align by position.")
+              .arg(trace.frameBoundaries.size());
     else
       result.alignment.description =
           QStringLiteral("No trace frame boundary matched a captured frame (by number or time): "

@@ -146,6 +146,15 @@ bool TraceSeries::SampleAt(double traceTimeSec, double &outValue) const
 
   const TraceSample &b = samples[lo];
   const TraceSample &a = samples[lo - 1];
+
+  // A level series only ever takes the values it was sampled at, so the value at any time is the
+  // one from the last sample at or before it.
+  if(step)
+  {
+    outValue = a.value;
+    return true;
+  }
+
   const double span = b.timeSec - a.timeSec;
   const double t = span > 0.0 ? (traceTimeSec - a.timeSec) / span : 0.0;
   outValue = a.value + (b.value - a.value) * t;
@@ -229,6 +238,17 @@ int SystemTrace::SpanCount() const
     count += track.spans.size();
 
   return count;
+}
+
+bool SystemTrace::HasDeclaredFrameNumbers() const
+{
+  for(const TraceFrameBoundary &b : frameBoundaries)
+  {
+    if(b.source.isEmpty())
+      return true;
+  }
+
+  return false;
 }
 
 SystemTrace ImportSystemTraceJsonLines(const QString &path)
@@ -413,6 +433,9 @@ struct ChromeEventStats
   int unmappedPhase = 0;
   int missingTimestamp = 0;
   int malformed = 0;
+  // Counter events that parsed but carried no named value, so there is nothing to caption a series
+  // with. Counted separately from `malformed` because the record itself was well formed.
+  int unusableCounters = 0;
   int missingDuration = 0;
   int unterminatedSpans = 0;
   int reversedSpans = 0;
@@ -420,6 +443,14 @@ struct ChromeEventStats
   int metadataUnusable = 0;
   int framesFromArgs = 0;
   int framesFromName = 0;
+  // Totals for the Systrace (ftrace text) branch, kept separate from the Chrome event counts so a
+  // warning can say which of the two forms contributed.
+  int systraceEvents = 0;
+  int systraceSpans = 0;
+  int systraceCounterSamples = 0;
+  int systraceUnmodelled = 0;
+  int derivedFrames = 0;
+  int droppedClockSeries = 0;
 };
 
 // One (pid,tid) lane as read from the file, before names are resolved and before nesting depth is
@@ -429,6 +460,9 @@ struct RawLane
   int pid = -1;
   int tid = -1;
   QVector<TraceSpan> spans;
+  // True when the lane holds atrace (userspace) marks rather than scheduler slices. Only used to
+  // caption it as a process lane when no thread name was declared for the id.
+  bool atrace = false;
 };
 
 // Accumulates the whole file. Metadata is kept here rather than applied immediately because
@@ -443,6 +477,11 @@ struct ChromeTraceBuilder
   QHash<int, QString> processNames;
   // Begin/end ('B' then 'E') spans still open, per lane, outermost last.
   QHash<quint64, QVector<TraceSpan>> openSpans;
+  // Per-CPU lanes, indexed by CPU number. Filled from the scheduler events in the Systrace text.
+  QVector<RawLane> cpuLanes;
+  // Ftrace event types (and atrace mark kinds) that produced no lane or metric, with the number of
+  // records seen for each. Reported in one warning so the panel can say what it omitted.
+  QHash<QString, int> unmodelledEvents;
   ChromeEventStats stats;
 };
 
@@ -572,7 +611,7 @@ void AddCounterEvent(const QJsonObject &obj, QVector<TraceSeries> &series, Chrom
   {
     // A counter with no named values would need an invented name to be displayed, so it is
     // counted rather than guessed at.
-    stats.malformed++;
+    stats.unusableCounters++;
     return;
   }
 
@@ -651,6 +690,13 @@ void ConsumeMetadata(const QJsonObject &obj, ChromeTraceBuilder &builder)
     if(tid >= 0)
     {
       builder.threadNames.insert(tid, value);
+
+      // `traceconv` emits only `thread_name` records, so this is the only process name a trace may
+      // carry. The thread whose tid equals the pid IS the process's main thread, so its name is the
+      // best identity the source declared. An explicit `process_name` record always wins over it.
+      if(tid == pid && !builder.processNames.contains(pid))
+        builder.processNames.insert(pid, value);
+
       builder.stats.metadataApplied++;
     }
     else
@@ -804,74 +850,705 @@ void ConsumeChromeEvent(const QJsonObject &obj, ChromeTraceBuilder &builder)
   builder.stats.unmappedPhase++;
 }
 
-// Qualcomm's bundled traceconv writes Android ftrace text in the Chrome trace document's
-// `systemTraceEvents` member while leaving `traceEvents` empty. Convert only scheduler switches
-// into thread spans here; the source does not provide Chrome event objects for the rest of ftrace.
-bool ConsumeSystemTraceEvents(const QString &ftrace, ChromeTraceBuilder &builder)
+// ---------------------------------------------------------------------------------------------
+// Systrace (ftrace text) parsing
+// ---------------------------------------------------------------------------------------------
+//
+// `traceconv` embeds the device's kernel trace verbatim in the Chrome trace document's
+// `systemTraceEvents` member and leaves `traceEvents` holding little more than metadata. Its lines
+// use the classic systrace layout:
+//
+//   <...>-4226  ( 4203) [003] .... 2343.167670: sched_switch: prev_comm=UnityMain prev_pid=4226 ...
+//     comm-tid   tgid    cpu  flags    time       event        payload
+//
+// Only the CPU, the timestamp, the event name and the payload are structurally needed, so the
+// leading columns are matched loosely. Each event type is then read by its own grammar: ftrace
+// payloads are event-specific, and comm names may contain spaces (`comm=shell svc 4391`), which
+// rules out one generic `key=value` split.
+//
+// What is extracted is what a Perfetto ftrace capture can actually contain, mapped to the shapes
+// this module can draw:
+//
+//   sched_switch            per-thread running spans, per-CPU lanes, runnable intervals
+//   sched_waking/wakeup     where a runnable interval begins
+//   cpu_frequency           per-CPU frequency metric (step)
+//   cpu_idle                per-CPU idle/busy state metric (step)
+//   clk_set_rate            clock rate metric (step)
+//   tracing_mark_write      atrace begin/end, async begin/end and counter marks
+//
+// Event types that are not modelled are counted and named in a warning rather than silently
+// dropped, so the panel says what it is not showing.
+struct SystraceRecord
 {
-  static const QRegularExpression switchPattern(
-      QStringLiteral("^.*\\[(\\d+)\\].*?\\s(\\d+\\.\\d+): sched_switch: "
-                     "prev_comm=(.*?) prev_pid=(\\d+).*?==> next_comm=(.*?) next_pid=(\\d+)"));
+  int cpu = -1;
+  int tid = -1;
+  double timeSec = 0.0;
+  QString event;
+  QString payload;
+};
 
-  struct RunningThread
+// Parses one systrace line. Returns false for anything that is not an event: the file banner, the
+// blank separators, and Perfetto's trailing statistics lines.
+bool ParseSystraceRecord(const QString &line, SystraceRecord &rec)
+{
+  // The comm may itself contain '-', and the tgid column is '-----' for a kernel thread, so the tgid
+  // is captured loosely rather than as a number.
+  static const QRegularExpression pattern(QStringLiteral(
+      "^(.*?)-(\\d+)\\s+\\(([^)]*)\\)\\s*\\[\\s*(\\d+)\\][^\\r\\n]*?\\s(\\d+\\.\\d+):\\s+"
+      "([A-Za-z0-9_]+):\\s?(.*)$"));
+
+  const QRegularExpressionMatch match = pattern.match(line);
+  if(!match.hasMatch())
+    return false;
+
+  rec.tid = match.captured(2).toInt();
+  rec.cpu = match.captured(4).toInt();
+  rec.timeSec = match.captured(5).toDouble();
+  rec.event = match.captured(6);
+  rec.payload = match.captured(7);
+  return true;
+}
+
+// Transient state for one Systrace text: everything that has to be closed again at the end, plus
+// the metric series that are created the first time an event of their type is seen.
+struct SystraceState
+{
+  struct Running
   {
-    TraceSpan span;
-    int pid = -1;
+    int tid = -1;
+    QString comm;
+    double beginSec = 0.0;
+    bool valid = false;
   };
 
-  QHash<int, RunningThread> running;
+  // Per CPU: the thread currently on it.
+  QHash<int, Running> running;
+  // Per CPU: the span still open on that CPU's lane.
+  QHash<int, TraceSpan> cpuOpen;
+  // tid -> the time it became runnable and has not run since.
+  QHash<int, double> runnableSince;
+  // Per pid: the open atrace 'B' blocks, outermost last.
+  QHash<int, QVector<TraceSpan>> atraceStacks;
+  // "pid|name|cookie" -> the open async span.
+  QHash<QString, TraceSpan> asyncOpen;
+  // Series name -> index into builder.series.
+  QHash<QString, int> seriesIndex;
+  // tid -> index into builder.lanes, so a thread keeps one lane no matter which event type announced
+  // it first. See SystraceLaneFor().
+  QHash<int, int> laneByTid;
+  bool lanesSeeded = false;
+  int clockSeries = 0;
   double lastTimeSec = 0.0;
-  bool sawSwitch = false;
+  bool any = false;
+};
+
+// Lanes are keyed by (pid, tid), but a scheduler slice only ever names a tid: the process a thread
+// belongs to is learned from its atrace marks, which can appear after its first slice. Lanes in this
+// text are therefore looked up by tid alone and adopt their owning process as soon as it is known,
+// so one thread is one row rather than one row per way it was discovered.
+RawLane &SystraceLaneFor(ChromeTraceBuilder &builder, SystraceState &state, int ownerPid, int tid)
+{
+  if(tid < 0)
+    return LaneFor(builder, ownerPid, tid);
+
+  if(!state.lanesSeeded)
+  {
+    for(int i = 0; i < builder.lanes.size(); i++)
+    {
+      if(builder.lanes[i].tid >= 0 && !state.laneByTid.contains(builder.lanes[i].tid))
+        state.laneByTid.insert(builder.lanes[i].tid, i);
+    }
+
+    state.lanesSeeded = true;
+  }
+
+  const auto it = state.laneByTid.constFind(tid);
+  if(it != state.laneByTid.constEnd())
+  {
+    RawLane &lane = builder.lanes[it.value()];
+
+    // Adopt the owning process once it is known; a lane that already has a real pid keeps it.
+    if(ownerPid >= 0 && (lane.pid < 0 || lane.pid == lane.tid))
+      lane.pid = ownerPid;
+
+    return lane;
+  }
+
+  // Until an owner is known the lane is captioned by its thread id, which is the only identity the
+  // scheduler events gave it.
+  RawLane &lane = LaneFor(builder, ownerPid >= 0 ? ownerPid : tid, tid);
+  state.laneByTid.insert(tid, builder.lanes.size() - 1);
+  return lane;
+}
+
+int SeriesIndexFor(ChromeTraceBuilder &builder, SystraceState &state, const QString &name,
+                   const QString &unit, bool step, const QString &group, int pid)
+{
+  const auto it = state.seriesIndex.constFind(name);
+  if(it != state.seriesIndex.constEnd())
+    return it.value();
+
+  TraceSeries s;
+  s.name = name;
+  s.unit = unit;
+  s.step = step;
+  s.group = group;
+  s.pid = pid;
+
+  const int index = builder.series.size();
+  builder.series.push_back(s);
+  state.seriesIndex.insert(name, index);
+
+  return index;
+}
+
+void AddSystraceSample(ChromeTraceBuilder &builder, SystraceState &state, const QString &name,
+                       const QString &unit, bool step, const QString &group, int pid,
+                       double timeSec, double value)
+{
+  const int index = SeriesIndexFor(builder, state, name, unit, step, group, pid);
+
+  TraceSample sample;
+  sample.timeSec = timeSec;
+  sample.value = value;
+  builder.series[index].samples.push_back(sample);
+
+  builder.stats.systraceCounterSamples++;
+}
+
+// The per-CPU lane shows which thread occupied the CPU, which is what a scheduler timeline is read
+// for. It is kept separate from the per-thread lanes because the two answer different questions:
+// "what was this CPU doing" versus "where did this thread run".
+RawLane &CpuLaneFor(ChromeTraceBuilder &builder, int cpu)
+{
+  while(builder.cpuLanes.size() <= cpu)
+  {
+    RawLane lane;
+    lane.pid = -1;
+    lane.tid = -1;
+    builder.cpuLanes.push_back(lane);
+  }
+
+  return builder.cpuLanes[cpu];
+}
+
+void CloseCpuSpan(ChromeTraceBuilder &builder, SystraceState &state, int cpu, double timeSec)
+{
+  const auto open = state.cpuOpen.find(cpu);
+  if(open == state.cpuOpen.end())
+    return;
+
+  TraceSpan span = open.value();
+  span.endSec = timeSec;
+  state.cpuOpen.erase(open);
+
+  if(span.endSec < span.beginSec)
+  {
+    builder.stats.reversedSpans++;
+    return;
+  }
+
+  CpuLaneFor(builder, cpu).spans.push_back(span);
+  builder.stats.spans++;
+  builder.stats.systraceSpans++;
+}
+
+void ConsumeSchedSwitch(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral(
+      "^prev_comm=(.*?) prev_pid=(-?\\d+) prev_prio=-?\\d+ prev_state=(\\S+) ==> "
+      "next_comm=(.*?) next_pid=(-?\\d+)"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const QString prevComm = match.captured(1);
+  const int prevTid = match.captured(2).toInt();
+  const QString prevState = match.captured(3);
+  const QString nextComm = match.captured(4);
+  const int nextTid = match.captured(5).toInt();
+
+  // The thread that was on this CPU stops running here.
+  const auto current = state.running.constFind(rec.cpu);
+  if(current != state.running.constEnd() && current->valid)
+  {
+    TraceSpan span;
+    span.beginSec = current->beginSec;
+    span.endSec = rec.timeSec;
+    span.name = current->comm;
+    span.category = QStringLiteral("sched");
+    span.fields << QStringLiteral("cpu = %1").arg(rec.cpu)
+                << QStringLiteral("tid = %1").arg(current->tid);
+
+    if(span.endSec < span.beginSec)
+    {
+      builder.stats.reversedSpans++;
+    }
+    else
+    {
+      SystraceLaneFor(builder, state, -1, current->tid).spans.push_back(span);
+      builder.stats.spans++;
+      builder.stats.systraceSpans++;
+    }
+  }
+
+  // 'R' means the thread it replaced was still ready to run: it leaves the CPU but stays runnable,
+  // which is the state that explains a jank. Any other state means it blocked, so a runnable
+  // interval that was still open has to be discarded rather than extended over a sleep.
+  if(prevState.startsWith(QLatin1Char('R')))
+    state.runnableSince.insert(prevTid, rec.timeSec);
+  else
+    state.runnableSince.remove(prevTid);
+
+  CloseCpuSpan(builder, state, rec.cpu, rec.timeSec);
+
+  // The thread that comes in stops being runnable at exactly this point.
+  const auto runnable = state.runnableSince.find(nextTid);
+  if(runnable != state.runnableSince.end())
+  {
+    if(rec.timeSec > runnable.value())
+    {
+      TraceSpan span;
+      span.beginSec = runnable.value();
+      span.endSec = rec.timeSec;
+      span.name = QStringLiteral("Runnable");
+      span.category = QStringLiteral("sched-runnable");
+      span.fields << QStringLiteral("tid = %1").arg(nextTid);
+
+      SystraceLaneFor(builder, state, -1, nextTid).spans.push_back(span);
+      builder.stats.spans++;
+      builder.stats.systraceSpans++;
+    }
+
+    state.runnableSince.erase(runnable);
+  }
+
+  SystraceState::Running next;
+  next.tid = nextTid;
+  next.comm = nextComm;
+  next.beginSec = rec.timeSec;
+  next.valid = true;
+  state.running.insert(rec.cpu, next);
+
+  TraceSpan cpuSpan;
+  cpuSpan.beginSec = rec.timeSec;
+  cpuSpan.endSec = rec.timeSec;
+  cpuSpan.name = nextComm;
+  cpuSpan.category = QStringLiteral("sched");
+  cpuSpan.fields << QStringLiteral("tid = %1").arg(nextTid);
+  state.cpuOpen.insert(rec.cpu, cpuSpan);
+}
+
+void ConsumeWakeup(const SystraceRecord &rec, SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("^comm=.*? pid=(-?\\d+) prio=-?\\d+"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+    return;
+
+  // `sched_waking` and `sched_wakeup` describe the same transition, the second once the target CPU
+  // has been chosen. Whichever arrives first owns the start of the runnable interval.
+  const int tid = match.captured(1).toInt();
+  if(!state.runnableSince.contains(tid))
+    state.runnableSince.insert(tid, rec.timeSec);
+}
+
+void ConsumeCpuIdle(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("^state=(\\d+) cpu_id=(\\d+)"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const qulonglong idleState = match.captured(1).toULongLong();
+  const int cpu = match.captured(2).toInt();
+
+  // `state` is the idle state being entered; 0xFFFFFFFF marks leaving idle. The series is a level,
+  // so it is drawn as a step: interpolating it would draw partially-idle CPUs that never existed.
+  AddSystraceSample(builder, state, QObject::tr("CPU %1 Idle").arg(cpu), QString(), true,
+                    QObject::tr("CPU Idle"), -1, rec.timeSec,
+                    idleState == 0xFFFFFFFFull ? 0.0 : 1.0);
+}
+
+void ConsumeCpuFrequency(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("^state=(\\d+) cpu_id=(\\d+)"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  // `state` is in kHz. MHz keeps the label short and the value readable on a lane that is only a
+  // few pixels tall.
+  const double mhz = match.captured(1).toDouble() / 1000.0;
+  const int cpu = match.captured(2).toInt();
+
+  AddSystraceSample(builder, state, QObject::tr("CPU %1 Frequency").arg(cpu),
+                    QStringLiteral("MHz"), true, QObject::tr("CPU Frequency"), -1, rec.timeSec, mhz);
+}
+
+void ConsumeClockSetRate(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("^(\\S+) (\\d+)$"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const QString clock = match.captured(1);
+  const QString name = QObject::tr("Clock %1").arg(clock);
+
+  // A trace can carry dozens of clocks. Every one of them is a real measurement, but a ceiling
+  // keeps the lane count finite; the ones left out are reported rather than silently dropped.
+  const int MaxClockSeries = 16;
+  if(!state.seriesIndex.contains(name))
+  {
+    if(state.clockSeries >= MaxClockSeries)
+    {
+      builder.stats.droppedClockSeries++;
+      return;
+    }
+
+    state.clockSeries++;
+  }
+
+  AddSystraceSample(builder, state, name, QStringLiteral("MHz"), true, QObject::tr("Clocks"),
+                    -1, rec.timeSec, match.captured(2).toDouble() / 1.0e6);
+}
+
+// atrace marks arrive through `tracing_mark_write` with their own field grammar:
+//
+//   B|pid|name            begin, closed by the next E|pid on that pid
+//   E|pid                 end
+//   S|pid|name|cookie     async begin, closed by F|pid|name|cookie
+//   F|pid|name|cookie     async end
+//   C|pid|name|value      counter sample
+//
+// The name is free text (surface names, "Choreographer#doFrame 174031") so only the leading two
+// fields and, for counters and async marks, the trailing field are taken structurally.
+void ConsumeAtrace(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  const QString &payload = rec.payload;
+  const int kindEnd = payload.indexOf(QLatin1Char('|'));
+  if(kindEnd <= 0)
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const QString kind = payload.left(kindEnd);
+  const int pidEnd = payload.indexOf(QLatin1Char('|'), kindEnd + 1);
+  const QString pidText =
+      pidEnd < 0 ? payload.mid(kindEnd + 1) : payload.mid(kindEnd + 1, pidEnd - kindEnd - 1);
+  const int pid = pidText.toInt();
+  const QString rest = pidEnd < 0 ? QString() : payload.mid(pidEnd + 1);
+
+  if(kind == QLatin1String("B"))
+  {
+    TraceSpan span;
+    span.beginSec = rec.timeSec;
+    span.endSec = rec.timeSec;
+    span.name = rest;
+    span.category = QStringLiteral("atrace");
+    state.atraceStacks[pid].push_back(span);
+    return;
+  }
+
+  if(kind == QLatin1String("E"))
+  {
+    QVector<TraceSpan> &stack = state.atraceStacks[pid];
+    if(stack.isEmpty())
+    {
+      builder.stats.unterminatedSpans++;
+      return;
+    }
+
+    TraceSpan span = stack.takeLast();
+    span.endSec = rec.timeSec;
+
+    if(span.endSec < span.beginSec)
+    {
+      builder.stats.reversedSpans++;
+      return;
+    }
+
+    RawLane &lane = SystraceLaneFor(builder, state, pid, rec.tid >= 0 ? rec.tid : pid);
+    lane.atrace = true;
+    lane.spans.push_back(span);
+    builder.stats.spans++;
+    builder.stats.systraceSpans++;
+    return;
+  }
+
+  if(kind == QLatin1String("S") || kind == QLatin1String("F"))
+  {
+    const int cookieStart = rest.lastIndexOf(QLatin1Char('|'));
+    if(cookieStart <= 0)
+    {
+      builder.stats.malformed++;
+      return;
+    }
+
+    const QString name = rest.left(cookieStart);
+    const QString key = QStringLiteral("%1|%2|%3").arg(pid).arg(name, rest.mid(cookieStart + 1));
+
+    if(kind == QLatin1String("S"))
+    {
+      TraceSpan span;
+      span.beginSec = rec.timeSec;
+      span.endSec = rec.timeSec;
+      span.name = name;
+      span.category = QStringLiteral("atrace-async");
+      state.asyncOpen.insert(key, span);
+      return;
+    }
+
+    const auto open = state.asyncOpen.find(key);
+    if(open == state.asyncOpen.end())
+    {
+      // An async end whose begin was never captured: there is no interval to close.
+      builder.stats.unterminatedSpans++;
+      return;
+    }
+
+    TraceSpan span = open.value();
+    span.endSec = rec.timeSec;
+    state.asyncOpen.erase(open);
+
+    if(span.endSec < span.beginSec)
+    {
+      builder.stats.reversedSpans++;
+      return;
+    }
+
+    RawLane &lane = SystraceLaneFor(builder, state, pid, rec.tid >= 0 ? rec.tid : pid);
+    lane.atrace = true;
+    lane.spans.push_back(span);
+    builder.stats.spans++;
+    builder.stats.systraceSpans++;
+    return;
+  }
+
+  if(kind == QLatin1String("C"))
+  {
+    const int valueStart = rest.lastIndexOf(QLatin1Char('|'));
+    if(valueStart <= 0)
+    {
+      builder.stats.malformed++;
+      return;
+    }
+
+    bool ok = false;
+    const double value = rest.mid(valueStart + 1).toDouble(&ok);
+    if(!ok)
+    {
+      builder.stats.malformed++;
+      return;
+    }
+
+    const QString name = rest.left(valueStart);
+
+    // The pid is recorded on the series so its metric lane lands in the owning process's group.
+    AddSystraceSample(builder, state, name, QString(), false, builder.processNames.value(pid), pid,
+                      rec.timeSec, value);
+    return;
+  }
+
+  // 'N' (track name), 'I' (instant), 'A' (legacy async) and vendor-specific marks have no interval
+  // to draw, so they are counted rather than coerced into a shape they do not have.
+  builder.stats.systraceUnmodelled++;
+  builder.unmodelledEvents.insert(QStringLiteral("tracing_mark_write %1").arg(kind), 1);
+}
+
+// Reads the whole ftrace text and closes everything it opened. Returns true when at least one
+// record was recognised.
+bool ConsumeSystemTraceEvents(const QString &ftrace, ChromeTraceBuilder &builder)
+{
+  SystraceState state;
 
   const QStringList lines = ftrace.split(QLatin1Char('\n'));
+  SystraceRecord rec;
+
   for(const QString &line : lines)
   {
-    const QRegularExpressionMatch match = switchPattern.match(line);
-    if(!match.hasMatch())
+    if(line.isEmpty())
       continue;
 
-    const int cpu = match.captured(1).toInt();
-    const double timeSec = match.captured(2).toDouble();
-    const QString nextComm = match.captured(5);
-    const int nextPid = match.captured(6).toInt();
+    if(!ParseSystraceRecord(line, rec))
+      continue;
 
-    auto current = running.find(cpu);
-    if(current != running.end())
+    state.any = true;
+    state.lastTimeSec = rec.timeSec;
+    builder.stats.systraceEvents++;
+
+    if(rec.event == QLatin1String("sched_switch"))
     {
-      TraceSpan span = current->span;
-      span.endSec = timeSec;
-      if(span.endSec >= span.beginSec)
+      ConsumeSchedSwitch(rec, builder, state);
+    }
+    else if(rec.event == QLatin1String("tracing_mark_write"))
+    {
+      ConsumeAtrace(rec, builder, state);
+    }
+    else if(rec.event == QLatin1String("cpu_idle"))
+    {
+      ConsumeCpuIdle(rec, builder, state);
+    }
+    else if(rec.event == QLatin1String("sched_waking") || rec.event == QLatin1String("sched_wakeup"))
+    {
+      ConsumeWakeup(rec, state);
+    }
+    else if(rec.event == QLatin1String("cpu_frequency"))
+    {
+      ConsumeCpuFrequency(rec, builder, state);
+    }
+    else if(rec.event == QLatin1String("clk_set_rate"))
+    {
+      ConsumeClockSetRate(rec, builder, state);
+    }
+    else
+    {
+      builder.stats.systraceUnmodelled++;
+      builder.unmodelledEvents.insert(rec.event, 1);
+    }
+  }
+
+  if(!state.any)
+    return false;
+
+  const double endSec = state.lastTimeSec;
+
+  // Everything still open is closed at the last timestamp the trace recorded. Dropping it would
+  // hide work that really happened, while inventing an end beyond the trace would draw off the
+  // timeline, so the true end is reported as unknown through the warning the caller emits.
+  for(auto it = state.running.begin(); it != state.running.end(); ++it)
+  {
+    if(!it->valid)
+      continue;
+
+    TraceSpan span;
+    span.beginSec = it->beginSec;
+    span.endSec = endSec;
+    span.name = it->comm;
+    span.category = QStringLiteral("sched");
+    span.fields << QStringLiteral("cpu = %1").arg(it.key())
+                << QStringLiteral("tid = %1").arg(it->tid);
+
+    if(span.endSec >= span.beginSec)
+    {
+      SystraceLaneFor(builder, state, -1, it->tid).spans.push_back(span);
+      builder.stats.spans++;
+      builder.stats.systraceSpans++;
+    }
+  }
+
+  QVector<int> cpus;
+  for(auto it = state.cpuOpen.constBegin(); it != state.cpuOpen.constEnd(); ++it)
+    cpus.push_back(it.key());
+  for(int cpu : cpus)
+    CloseCpuSpan(builder, state, cpu, endSec);
+
+  for(auto it = state.atraceStacks.begin(); it != state.atraceStacks.end(); ++it)
+  {
+    RawLane &lane = SystraceLaneFor(builder, state, -1, it.key());
+    lane.atrace = true;
+    for(TraceSpan &span : it.value())
+    {
+      span.endSec = endSec;
+      lane.spans.push_back(span);
+      builder.stats.spans++;
+      builder.stats.systraceSpans++;
+    }
+  }
+
+  for(auto it = state.asyncOpen.begin(); it != state.asyncOpen.end(); ++it)
+  {
+    const int pid = it.key().section(QLatin1Char('|'), 0, 0).toInt();
+    TraceSpan span = it.value();
+    span.endSec = endSec;
+
+    RawLane &lane = SystraceLaneFor(builder, state, pid, pid);
+    lane.atrace = true;
+    lane.spans.push_back(span);
+    builder.stats.spans++;
+    builder.stats.systraceSpans++;
+  }
+
+  return true;
+}
+} // namespace
+
+// Android's ftrace carries no notion of a captured frame, and `traceconv` emits no frame events, so
+// a boundary has to be derived from a marker that is actually present. The preference order follows
+// how directly each marker bounds one frame of the app under capture:
+//
+//   1. the app's frame callback, `Choreographer#doFrame <id>`, which fires once per frame it draws
+//   2. SurfaceFlinger's `prepareFrame`, which starts one composition
+//   3. SurfaceFlinger's `handlePageFlip`, which bounds what actually reached the display
+//
+// The numbers assigned this way are 1-based ordinals within the trace, not ids the source declared.
+// They are tagged with a `source` so correlation knows it may not match them against capture frame
+// numbers.
+void DeriveFrameBoundaries(SystemTrace &trace)
+{
+  static const char *const Rules[] = {
+      "Choreographer#doFrame",
+      "prepareFrame",
+      "handlePageFlip",
+  };
+
+  for(const char *rule : Rules)
+  {
+    const QString prefix = QLatin1String(rule);
+    QVector<double> marks;
+
+    for(const TraceTrack &track : trace.tracks)
+    {
+      for(const TraceSpan &span : track.spans)
       {
-        LaneFor(builder, current->pid, current->pid).spans.push_back(span);
-        builder.stats.spans++;
+        if(span.name.startsWith(prefix))
+          marks.push_back(span.beginSec);
       }
     }
 
-    RunningThread next;
-    next.pid = nextPid;
-    next.span.beginSec = timeSec;
-    next.span.endSec = timeSec;
-    next.span.name = nextComm;
-    next.span.category = QStringLiteral("sched");
-    next.span.fields << QStringLiteral("cpu = %1").arg(cpu);
-    running.insert(cpu, next);
-    lastTimeSec = timeSec;
-    sawSwitch = true;
-  }
+    if(marks.isEmpty())
+      continue;
 
-  for(auto it = running.begin(); it != running.end(); ++it)
-  {
-    TraceSpan span = it->span;
-    span.endSec = lastTimeSec;
-    if(span.endSec >= span.beginSec)
+    std::sort(marks.begin(), marks.end());
+
+    trace.frameBoundaries.clear();
+
+    for(double mark : marks)
     {
-      LaneFor(builder, it->pid, it->pid).spans.push_back(span);
-      builder.stats.spans++;
-    }
-  }
+      // Two markers describing the same boundary would otherwise become two frames that no
+      // capture can match, so anything closer than half a millisecond is collapsed.
+      if(!trace.frameBoundaries.isEmpty() &&
+         mark - trace.frameBoundaries.last().timeSec < 0.0005)
+        continue;
 
-  return sawSwitch;
-}
+      TraceFrameBoundary boundary;
+      boundary.frameNumber = (uint32_t)trace.frameBoundaries.size() + 1;
+      boundary.timeSec = mark;
+      boundary.source = QObject::tr("%1 marker").arg(prefix);
+      trace.frameBoundaries.push_back(boundary);
+    }
+
+    return;
+  }
 }
 
 SystemTrace ImportChromeTraceEventFormat(const QString &path)
@@ -998,7 +1675,7 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
   }
 
   // traceconv json exports Android kernel events as one Systrace string, not as individual Chrome
-  // events. Preserve its scheduler timeline when `traceEvents` contained no usable events.
+  // events. Preserve its timeline when `traceEvents` contained no usable events.
   // The fallback has to key off "nothing drawable was built" rather than off the event count:
   // `traceconv json` emits the scheduler stream as ftrace text in `systemTraceEvents` and leaves
   // `traceEvents` holding nothing but a couple of hundred metadata records, which are counted as
@@ -1006,6 +1683,9 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
   const bool nothingDrawable =
       builder.series.isEmpty() && builder.frames.isEmpty() && builder.stats.spans == 0 &&
       builder.stats.counters == 0;
+
+  bool systraceUsed = false;
+  int systraceEventCount = 0;
 
   if(builder.stats.events == 0 || nothingDrawable)
   {
@@ -1016,10 +1696,10 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
       const QString ftrace = document.object().value(QStringLiteral("systemTraceEvents")).toString();
       if(!ftrace.isEmpty() && ConsumeSystemTraceEvents(ftrace, builder))
       {
-        trace.formatName = QStringLiteral("Chrome Trace Event Format (Perfetto traceconv json/systrace)");
-        trace.warnings << QObject::tr(
-            "Scheduler lanes were rebuilt from the Systrace (ftrace) text in 'systemTraceEvents'; "
-            "other ftrace events in that string are not drawn");
+        systraceUsed = true;
+        systraceEventCount = builder.stats.systraceEvents;
+        trace.formatName =
+            QStringLiteral("Chrome Trace Event Format (Perfetto traceconv json/systrace)");
       }
     }
   }
@@ -1081,15 +1761,56 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
   }
 
   // Counter lanes come first and are ordered by series, so the metrics that explain GPU-bound
-  // frames stay at the top of the view the way SDP presents them. Thread lanes follow, grouped by
-  // process and then ordered by tid, which is stable across imports.
+  // frames stay at the top of the view the way SDP presents them. System-wide metrics (per-CPU
+  // frequency, clocks) are ordered before per-process ones so their groups stay contiguous.
+  QVector<int> seriesOrder;
   for(int i = 0; i < trace.series.size(); i++)
+    seriesOrder.push_back(i);
+
+  std::sort(seriesOrder.begin(), seriesOrder.end(), [&](int a, int b) {
+    const TraceSeries &sa = trace.series[a];
+    const TraceSeries &sb = trace.series[b];
+
+    if((sa.pid < 0) != (sb.pid < 0))
+      return sa.pid < 0;
+    if(sa.pid != sb.pid)
+      return sa.pid < sb.pid;
+    if(sa.group != sb.group)
+      return sa.group < sb.group;
+
+    return sa.name < sb.name;
+  });
+
+  for(int seriesIdx : seriesOrder)
   {
     TraceTrack track;
     track.kind = TraceTrackKind::Counter;
-    track.name = trace.series[i].name;
-    track.unit = trace.series[i].unit;
-    track.counterSeries = i;
+    track.name = trace.series[seriesIdx].name;
+    track.unit = trace.series[seriesIdx].unit;
+    track.counterSeries = seriesIdx;
+    track.pid = trace.series[seriesIdx].pid;
+    track.group = trace.series[seriesIdx].group;
+    if(track.group.isEmpty())
+      track.group = QObject::tr("Metrics");
+    trace.tracks.push_back(track);
+  }
+
+  // Per-CPU lanes next: which thread occupied each CPU. They are kept as their own group because
+  // they answer "what was this CPU doing" rather than "where did this thread run".
+  for(int cpu = 0; cpu < builder.cpuLanes.size(); cpu++)
+  {
+    RawLane &lane = builder.cpuLanes[cpu];
+    if(lane.spans.isEmpty())
+      continue;
+
+    AssignNestingDepth(lane.spans);
+
+    TraceTrack track;
+    track.kind = TraceTrackKind::Cpu;
+    track.cpu = cpu;
+    track.name = QObject::tr("Sched CPU %1").arg(cpu);
+    track.group = QObject::tr("CPU Scheduling");
+    track.spans = lane.spans;
     trace.tracks.push_back(track);
   }
 
@@ -1147,6 +1868,8 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
 
     if(!threadName.isEmpty())
       track.name = threadName;
+    else if(lane.atrace && lane.pid >= 0 && lane.pid == lane.tid)
+      track.name = processName.isEmpty() ? QObject::tr("atrace pid %1").arg(lane.pid) : processName;
     else if(lane.tid >= 0)
       track.name = QObject::tr("tid %1").arg(lane.tid);
     else
@@ -1154,20 +1877,43 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
 
     if(!processName.isEmpty())
       track.group = processName;
-    else if(lane.pid >= 0)
+    else if(lane.pid >= 0 && lane.pid != lane.tid)
       track.group = QObject::tr("pid %1").arg(lane.pid);
+    else
+      track.group = QObject::tr("Other threads");
 
-    if(threadName.isEmpty() && processName.isEmpty() && lane.tid < 0 && lane.pid < 0)
+    // atrace marks are emitted by a process, not by an individual thread, so a lane made from
+    // them is a process lane even when metadata named the pid.
+    if(lane.atrace && lane.pid == lane.tid)
+      track.kind = TraceTrackKind::Process;
+    else if(threadName.isEmpty() && processName.isEmpty() && lane.tid < 0 && lane.pid < 0)
       track.kind = TraceTrackKind::Process;
 
+    track.atrace = lane.atrace;
     track.spans = lane.spans;
     trace.tracks.push_back(track);
   }
 
-  if(stats.counters == 0 && !trace.tracks.isEmpty())
+  // A Chrome trace from `traceconv` declares no frame boundaries at all: the source has no notion
+  // of a captured frame. Derive them from the per-frame markers that are present so correlation has
+  // something to align against.
+  if(trace.frameBoundaries.isEmpty())
+  {
+    DeriveFrameBoundaries(trace);
+
+    if(!trace.frameBoundaries.isEmpty())
+    {
+      trace.warnings << QObject::tr(
+          "%1 frame boundaries were derived from '%2' markers: they are numbered as ordinals "
+          "within this trace, not frame ids the source declared")
+                            .arg(trace.frameBoundaries.size())
+                            .arg(trace.frameBoundaries.first().source);
+    }
+  }
+
+  if(stats.counters == 0 && trace.series.isEmpty() && !trace.tracks.isEmpty())
     trace.warnings << QObject::tr(
-        "Trace contained no counter ('ph':'C') events: only spans and frame boundaries can be "
-        "shown");
+        "Trace contained no counter events: only spans and frame boundaries can be shown");
 
   if(stats.framesFromName > 0)
     trace.warnings << QObject::tr(
@@ -1178,6 +1924,11 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
   if(stats.malformed > 0)
     trace.warnings << QObject::tr("%1 events could not be parsed and were skipped")
                           .arg(stats.malformed);
+
+  if(stats.unusableCounters > 0)
+    trace.warnings << QObject::tr(
+        "%1 counter events carried no named values and were skipped")
+                          .arg(stats.unusableCounters);
 
   if(stats.missingDuration > 0)
     trace.warnings << QObject::tr(
@@ -1203,6 +1954,47 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
     trace.warnings << QObject::tr(
         "%1 metadata records carried no usable name or no id, so lanes keep their id captions")
                           .arg(stats.metadataUnusable);
+
+  if(!builder.unmodelledEvents.isEmpty())
+  {
+    // Naming the first few is actionable; a full list of every kernel tracepoint would not be.
+    QStringList names;
+    int total = 0;
+    for(auto it = builder.unmodelledEvents.constBegin(); it != builder.unmodelledEvents.constEnd();
+        ++it)
+    {
+      total++;
+      if(names.size() < 6)
+        names << it.key();
+    }
+
+    std::sort(names.begin(), names.end());
+
+    trace.warnings << QObject::tr(
+        "%1 ftrace event type(s) have no lane or metric in this build and are not drawn: %2%3")
+                          .arg(total)
+                          .arg(names.join(QStringLiteral(", ")))
+                          .arg(total > names.size() ? QStringLiteral(", ...") : QString());
+  }
+
+  if(stats.droppedClockSeries > 0)
+    trace.warnings << QObject::tr(
+        "%1 clock rate samples belonged to more than %2 distinct clocks and were left out of the "
+        "'Clocks' group")
+                          .arg(stats.droppedClockSeries)
+                          .arg(16);
+
+  if(systraceUsed)
+  {
+    trace.warnings << QObject::tr(
+        "Timeline rebuilt from the Systrace (ftrace) text in 'systemTraceEvents': %1 events "
+        "contributed %2 spans across %3 lanes, %4 metric series and %5 metric samples")
+                          .arg(systraceEventCount)
+                          .arg(trace.SpanCount())
+                          .arg(trace.tracks.size() - trace.series.size())
+                          .arg(trace.series.size())
+                          .arg(builder.stats.systraceCounterSamples);
+  }
 
   if(trace.series.isEmpty() && trace.frameBoundaries.isEmpty() && trace.SpanCount() == 0)
   {

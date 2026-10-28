@@ -1266,11 +1266,31 @@ private:
         break;
 
       const double y = bottom - ((sample.value - vmin) / (vmax - vmin)) * (bottom - top);
+
+      // A level series (frequency, clock rate, idle state) holds each value until the next sample,
+      // so it is drawn as a step. Interpolating it would draw values that were never measured.
+      if(series.step && !poly.isEmpty())
+        poly << QPointF(XForTime(sample.timeSec), poly.last().y());
+
       poly << QPointF(XForTime(sample.timeSec), y);
     }
 
     if(poly.size() < 2)
       return;
+
+    // One-pixel lanes would otherwise disappear entirely; a filled band also makes a level series
+    // readable as "the CPU was at this frequency" rather than as a thin line.
+    if(series.step)
+    {
+      QPolygonF band = poly;
+      band << QPointF(poly.last().x(), bottom) << QPointF(poly.first().x(), bottom);
+
+      QColor fill = SeriesColour(colourIndex);
+      fill.setAlpha(48);
+      p.setPen(Qt::NoPen);
+      p.setBrush(fill);
+      p.drawPolygon(band);
+    }
 
     p.setPen(QPen(SeriesColour(colourIndex), 1.4));
     p.setBrush(Qt::NoBrush);
@@ -1411,7 +1431,11 @@ private:
         else
         {
           swatch = SpanColour(track.spans.isEmpty() ? QString() : track.spans[0].category);
-          detail = QObject::tr("%1 spans").arg(track.spans.size());
+
+          if(track.kind == TraceTrackKind::Cpu)
+            detail = QObject::tr("%1 slices").arg(track.spans.size());
+          else
+            detail = QObject::tr("%1 spans").arg(track.spans.size());
         }
       }
       else if(row.series >= 0 && row.series < trace.series.size())

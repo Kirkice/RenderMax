@@ -65,7 +65,16 @@ struct TraceSeries
 {
   QString name;
   QString unit;    // display-only, may be empty if the source did not declare one
+  // Group header for the metric lane, mirroring TraceTrack::group. Empty means "metrics".
+  QString group;
+  // Owning process when the source identified one (atrace counters carry the emitting pid). -1
+  // when the metric is system-wide (per-CPU frequencies, clock rates).
+  int pid = -1;
   QVector<TraceSample> samples;
+  // True when each sample is a level that holds until the next one (a frequency, a clock rate, an
+  // idle/busy state). Those are drawn as steps: interpolating between them would draw values that
+  // were never measured.
+  bool step = false;
 
   // Sort samples ascending by time. Safe to call more than once.
   void Sort();
@@ -84,6 +93,12 @@ struct TraceFrameBoundary
 {
   uint32_t frameNumber = 0;
   double timeSec = 0.0;
+  // Empty when the trace itself declared this frame number (an explicit frame index in `args` or a
+  // "Frame <n>" slice), so it can be matched against the capture by number. Non-empty when the
+  // boundary was derived from an observed per-frame marker: it names that marker, and
+  // `frameNumber` is then a 1-based ordinal within this trace rather than an id the source
+  // declared. Correlation matches those by position, never by number.
+  QString source;
 };
 
 // A span (slice): something that occupied an interval on exactly one track lane, e.g. a scheduled
@@ -113,9 +128,11 @@ enum class TraceTrackKind
 {
   // A metric series, drawn as a curve rather than as spans.
   Counter,
+  // A CPU: which thread occupied it over time (SDP's "Sched CPU" track).
+  Cpu,
   // A host thread, identified by the trace's own pid/tid pair.
   Thread,
-  // A lane whose events carried no thread identity.
+  // A lane that represents a process rather than one of its threads.
   Process,
 };
 
@@ -137,6 +154,10 @@ struct TraceTrack
   int counterSeries = -1;
   // Display unit for a counter lane, copied from the series so the header can show it.
   QString unit;
+  // CPU index for a Cpu lane, or -1.
+  int cpu = -1;
+  // True when the lane's spans are atrace marks rather than scheduler slices.
+  bool atrace = false;
 };
 
 // How confidently trace time could be related to RenderDoc time.
@@ -188,6 +209,9 @@ struct SystemTrace
   bool valid = false;
 
   const TraceSeries *FindSeries(const QString &name) const;
+  // True when at least one boundary carries a frame number the source itself declared. Derived
+  // boundaries only carry ordinals, so they must not be matched against capture frame numbers.
+  bool HasDeclaredFrameNumbers() const;
   // Earliest and latest timestamp in the trace, in the trace's own time base. They are not
   // necessarily around zero: Chrome traces from `traceconv` carry device uptime, which starts at
   // boot, so only the extent - never the offset - may be treated as the drawing window.
