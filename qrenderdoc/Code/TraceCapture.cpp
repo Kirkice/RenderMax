@@ -24,6 +24,7 @@
 
 #include "TraceCapture.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -123,6 +124,28 @@ QString FindTraceconv(const TraceCaptureOptions &opts, TraceCaptureResult &resul
                     .arg(opts.snapdragonProfilerPath));
   }
 
+  // A standalone traceconv can be installed beside qrenderdoc. This is deliberately discovery
+  // rather than redistribution: RenderMax does not ship the executable, but a local deployment can
+  // place Perfetto's official binary next to the application without modifying the machine PATH.
+  const QDir applicationDir(QCoreApplication::applicationDirPath());
+#ifdef _WIN32
+  const QStringList applicationCandidates = {
+      QStringLiteral("traceconv.exe"),
+      QStringLiteral("traceconv-win-amd64.exe"),
+  };
+#else
+  const QStringList applicationCandidates = {QStringLiteral("traceconv")};
+#endif
+  for(const QString &candidate : applicationCandidates)
+  {
+    const QString path = applicationDir.absoluteFilePath(candidate);
+    if(QFileInfo::exists(path))
+    {
+      Log(result, QStringLiteral("traceconv: found beside RenderMax at %1").arg(path));
+      return path;
+    }
+  }
+
   const QString onPath = QStandardPaths::findExecutable(QStringLiteral("traceconv"));
   if(!onPath.isEmpty())
   {
@@ -163,7 +186,8 @@ QString FindTraceconv(const TraceCaptureOptions &opts, TraceCaptureResult &resul
   }
 #endif
 
-  Log(result, QStringLiteral("traceconv: not found on PATH or in a default Snapdragon Profiler installation"));
+  Log(result, QStringLiteral("traceconv: not found beside RenderMax, on PATH, or in a default "
+                             "Snapdragon Profiler installation"));
   return QString();
 }
 
