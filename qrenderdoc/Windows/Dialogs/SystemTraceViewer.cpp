@@ -279,8 +279,11 @@ public:
       m_LastTrace = newData.trace;
       m_ResetPending = false;
 
+      // The window starts at the trace's own first timestamp: a Chrome trace from `traceconv`
+      // carries device uptime, so anchoring the view at 0 s would show an empty window several
+      // thousand seconds to the left of every lane.
       const double total = TotalSpan();
-      m_ViewStartSec = 0.0;
+      m_ViewStartSec = TraceStart();
       m_ViewSpanSec = total > 0.0 ? total : 1.0;
     }
 
@@ -709,6 +712,19 @@ private:
 
   double TotalSpan() const { return m_Data.trace == NULL ? 0.0 : m_Data.trace->SpanSec(); }
 
+  // The trace's own time base. Only the extent is drawn: the absolute offset (device uptime) must
+  // not be assumed to be zero, or the lanes fall outside the view window.
+  double TraceStart() const
+  {
+    if(m_Data.trace == NULL)
+      return 0.0;
+
+    double start = 0.0;
+    double end = 0.0;
+    m_Data.trace->TimeExtent(start, end);
+    return start;
+  }
+
   QRectF RowsRect() const
   {
     const double left = kHeaderWidth;
@@ -748,7 +764,9 @@ private:
 
     // Never zoom past a ten-thousandth of the trace: below that the ruler step degenerates.
     m_ViewSpanSec = qMin(total, qMax(total * 1.0e-4, m_ViewSpanSec));
-    m_ViewStartSec = qMin(qMax(0.0, m_ViewStartSec), total - m_ViewSpanSec);
+
+    const double start = TraceStart();
+    m_ViewStartSec = qMin(qMax(start, m_ViewStartSec), start + total - m_ViewSpanSec);
   }
 
   void PanBy(double fraction)

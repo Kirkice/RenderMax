@@ -162,7 +162,7 @@ const TraceSeries *SystemTrace::FindSeries(const QString &name) const
   return NULL;
 }
 
-double SystemTrace::SpanSec() const
+void SystemTrace::TimeExtent(double &startSec, double &endSec) const
 {
   double minT = 0.0;
   double maxT = 0.0;
@@ -202,7 +202,24 @@ double SystemTrace::SpanSec() const
   for(const TraceFrameBoundary &b : frameBoundaries)
     extend(b.timeSec);
 
-  return any ? (maxT - minT) : 0.0;
+  startSec = minT;
+  endSec = maxT;
+
+  if(!any)
+  {
+    startSec = 0.0;
+    endSec = 0.0;
+  }
+}
+
+double SystemTrace::SpanSec() const
+{
+  double start = 0.0;
+  double end = 0.0;
+
+  TimeExtent(start, end);
+
+  return end > start ? (end - start) : 0.0;
 }
 
 int SystemTrace::SpanCount() const
@@ -982,7 +999,15 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
 
   // traceconv json exports Android kernel events as one Systrace string, not as individual Chrome
   // events. Preserve its scheduler timeline when `traceEvents` contained no usable events.
-  if(builder.stats.events == 0)
+  // The fallback has to key off "nothing drawable was built" rather than off the event count:
+  // `traceconv json` emits the scheduler stream as ftrace text in `systemTraceEvents` and leaves
+  // `traceEvents` holding nothing but a couple of hundred metadata records, which are counted as
+  // events but contribute no lanes. Testing `events == 0` therefore never fires for a real export.
+  const bool nothingDrawable =
+      builder.series.isEmpty() && builder.frames.isEmpty() && builder.stats.spans == 0 &&
+      builder.stats.counters == 0;
+
+  if(builder.stats.events == 0 || nothingDrawable)
   {
     QJsonParseError documentError = {};
     const QJsonDocument document = QJsonDocument::fromJson(contents, &documentError);
@@ -990,7 +1015,12 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
     {
       const QString ftrace = document.object().value(QStringLiteral("systemTraceEvents")).toString();
       if(!ftrace.isEmpty() && ConsumeSystemTraceEvents(ftrace, builder))
+      {
         trace.formatName = QStringLiteral("Chrome Trace Event Format (Perfetto traceconv json/systrace)");
+        trace.warnings << QObject::tr(
+            "Scheduler lanes were rebuilt from the Systrace (ftrace) text in 'systemTraceEvents'; "
+            "other ftrace events in that string are not drawn");
+      }
     }
   }
 

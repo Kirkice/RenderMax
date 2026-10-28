@@ -188,6 +188,10 @@ struct SystemTrace
   bool valid = false;
 
   const TraceSeries *FindSeries(const QString &name) const;
+  // Earliest and latest timestamp in the trace, in the trace's own time base. They are not
+  // necessarily around zero: Chrome traces from `traceconv` carry device uptime, which starts at
+  // boot, so only the extent - never the offset - may be treated as the drawing window.
+  void TimeExtent(double &startSec, double &endSec) const;
   // Total trace span in seconds; 0 when empty. Spans and series both contribute.
   double SpanSec() const;
   // Number of spans across all tracks, for status reporting.
