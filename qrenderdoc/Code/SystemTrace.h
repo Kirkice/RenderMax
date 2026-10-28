@@ -256,3 +256,15 @@ SystemTrace ImportSystemTraceJsonLines(const QString &path);
 // The function never throws and never asserts: on failure it returns an invalid SystemTrace whose
 // `warnings` explain why.
 SystemTrace ImportChromeTraceEventFormat(const QString &path);
+
+// Parse a raw systrace text export: `traceconv systrace`, or any kernel trace file whose lines have
+// the `comm-tid (tgid) [cpu] timestamp: event: payload` shape. This is the same event stream the
+// JSON export embeds in `systemTraceEvents`, so the timeline it produces is identical - it just
+// avoids materialising a multi-megabyte escaped JSON string, and it is the only shape that carries
+// every thread's name in the line itself.
+SystemTrace ImportSystraceText(const QString &path);
+
+// Import a trace by inspecting the file's content: a document starting with '{' or '[' is read as
+// Chrome Trace Event Format, anything else as systrace text. `traceconv` can write either, so the
+// caller does not have to know which one it asked for.
+SystemTrace ImportSystemTraceFile(const QString &path);

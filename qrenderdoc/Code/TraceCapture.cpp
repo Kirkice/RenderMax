@@ -269,8 +269,8 @@ void PersistCaptureLog(TraceCaptureResult &result)
     text += QStringLiteral("\n\nFAILED: %1").arg(result.error);
   if(!result.localTracePath.isEmpty())
     text += QStringLiteral("\n\nPerfetto trace: %1").arg(result.localTracePath);
-  if(!result.localJsonPath.isEmpty())
-    text += QStringLiteral("\nImportable JSON: %1").arg(result.localJsonPath);
+  if(!result.localTimelinePath.isEmpty())
+    text += QStringLiteral("\nImportable timeline: %1").arg(result.localTimelinePath);
 
   if(file.write(text.toUtf8()) == text.toUtf8().size())
   {
@@ -284,9 +284,18 @@ void PersistCaptureLog(TraceCaptureResult &result)
 QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
 {
   // Every data source and event named here is part of the standard Android Perfetto surface, so
-  // the config does not assume a vendor-specific probe or a rooted device. The counters chosen are
-  // the ones that explain GPU-bound frames: what ran, on which CPU, at what frequency, and how
-  // much memory the system had while it ran.
+  // the config does not assume a vendor-specific probe or a rooted device. The events chosen are the
+  // ones that explain GPU-bound frames: what ran, on which CPU and at what frequency, what took the
+  // CPU away from it (interrupts, softirqs, clock gating), and what a thread was waiting for when it
+  // was not running. `atrace_apps: "*"` is what makes the atrace categories apply to the app under
+  // capture rather than only to the system processes Perfetto tags by default.
+  //
+  // The interrupt events are requested by name rather than through the `irq` atrace category: the
+  // category also turns on the IPI, tasklet and softirq-raise probes, which are point events the
+  // timeline has no lane for, and they only add noise to the warning about undrawn event types.
+  // `binder_driver` is left out for the same reason until binder transactions have a lane.
+  // Every ftrace event requested here is emitted on stock Android 12; `workqueue`'s probes are
+  // compiled out of some vendor kernels, in which case the timeline simply has no workqueue spans.
   //
   // NOTE: this is textproto, selected with `perfetto --txt`.
   return QStringLiteral(
@@ -303,15 +312,37 @@ QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
              "            ftrace_events: \"sched/sched_switch\"\n"
              "            ftrace_events: \"sched/sched_wakeup\"\n"
              "            ftrace_events: \"sched/sched_waking\"\n"
+             "            ftrace_events: \"sched/sched_blocked_reason\"\n"
+             "            ftrace_events: \"sched/sched_process_exit\"\n"
+             "            ftrace_events: \"sched/task_newtask\"\n"
+             "            ftrace_events: \"sched/task_rename\"\n"
              "            ftrace_events: \"power/cpu_frequency\"\n"
              "            ftrace_events: \"power/cpu_idle\"\n"
              "            ftrace_events: \"power/suspend_resume\"\n"
+             "            ftrace_events: \"clk/clk_set_rate\"\n"
+             "            ftrace_events: \"clk/clk_enable\"\n"
+             "            ftrace_events: \"clk/clk_disable\"\n"
+             "            ftrace_events: \"irq/irq_handler_entry\"\n"
+             "            ftrace_events: \"irq/irq_handler_exit\"\n"
+             "            ftrace_events: \"irq/softirq_entry\"\n"
+             "            ftrace_events: \"irq/softirq_exit\"\n"
+             "            ftrace_events: \"workqueue/workqueue_execute_start\"\n"
+             "            ftrace_events: \"workqueue/workqueue_execute_end\"\n"
+             "            ftrace_events: \"ftrace/print\"\n"
              "            atrace_categories: \"gfx\"\n"
              "            atrace_categories: \"view\"\n"
              "            atrace_categories: \"sched\"\n"
              "            atrace_categories: \"freq\"\n"
              "            atrace_categories: \"idle\"\n"
              "            atrace_categories: \"am\"\n"
+             "            atrace_categories: \"wm\"\n"
+             "            atrace_categories: \"input\"\n"
+             "            atrace_categories: \"res\"\n"
+             "            atrace_categories: \"sync\"\n"
+             "            atrace_categories: \"hal\"\n"
+             "            atrace_categories: \"workq\"\n"
+             "            atrace_categories: \"power\"\n"
+             "            atrace_apps: \"*\"\n"
              "        }\n"
              "    }\n"
              "}\n"
@@ -567,8 +598,8 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   }
 
   // -----------------------------------------------------------------------------------------------
-  // Step 6: convert to Chrome Trace Event Format. `perfetto` itself writes a protobuf, which the
-  // importer does not parse, so the conversion is required rather than optional.
+  // Step 6: convert the protobuf to a timeline the importer can read. `perfetto` itself writes a
+  // protobuf, which the importer does not parse, so the conversion is required rather than optional.
   // -----------------------------------------------------------------------------------------------
   result.traceconvPath = FindTraceconv(opts, result);
 
@@ -583,33 +614,66 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
     return result;
   }
 
+  // `systrace` text is preferred over `json`: it is the same event stream without the JSON
+  // wrapper, so the file is slightly smaller and needs no unescaping, but the reason that matters is
+  // that it is the shape the importer parses natively. `json` remains as the fallback for traceconv
+  // builds that do not offer the sub-command.
+  const QString textPath = QDir(localDir).absoluteFilePath(QStringLiteral("capture.systrace.txt"));
   const QString jsonPath = QDir(localDir).absoluteFilePath(QStringLiteral("capture.json"));
+
+  QString importPath;
+  QStringList convertErrors;
   {
-    bool ok = false;
-    const QString toolOut = RunLocalTool(result.traceconvPath,
-                                         {QStringLiteral("json"), localTrace, jsonPath}, 10 * 60 * 1000,
-                                         ok);
-
-    if(!toolOut.trimmed().isEmpty())
-      Log(result, QStringLiteral("traceconv output: %1").arg(Summarise(toolOut)));
-
-    const qint64 jsonSize = QFileInfo::exists(jsonPath) ? QFileInfo(jsonPath).size() : -1;
-
-    if(!ok || jsonSize <= 0)
+    const struct
     {
-      // An older or newer `traceconv` may expect different arguments. The tool's own output is
-      // reported verbatim so that mismatch is visible instead of presenting a generic error.
-      Fail(result, QStringLiteral("convert trace to Chrome Trace Event Format"),
-           QStringLiteral("`traceconv json` did not produce %1.\n%2\n\nThe recorded protobuf is "
-                          "retained at:\n%3")
-               .arg(jsonPath, Summarise(toolOut), localTrace));
-      return result;
-    }
+      const char *subcommand;
+      const QString *output;
+    } attempts[] = {
+        {"systrace", &textPath},
+        {"json", &jsonPath},
+    };
 
-    Log(result, QStringLiteral("converted %1 bytes to %2").arg(jsonSize).arg(jsonPath));
+    for(const auto &attempt : attempts)
+    {
+      bool ok = false;
+      const QString toolOut =
+          RunLocalTool(result.traceconvPath,
+                       {QLatin1String(attempt.subcommand), localTrace, *attempt.output},
+                       10 * 60 * 1000, ok);
+
+      if(!toolOut.trimmed().isEmpty())
+        Log(result, QStringLiteral("traceconv %1 output: %2")
+                        .arg(QLatin1String(attempt.subcommand), Summarise(toolOut)));
+
+      const qint64 size =
+          QFileInfo::exists(*attempt.output) ? QFileInfo(*attempt.output).size() : -1;
+
+      if(ok && size > 0)
+      {
+        importPath = *attempt.output;
+        Log(result, QStringLiteral("converted %1 bytes to %2 (traceconv %3)")
+                        .arg(size)
+                        .arg(importPath, QLatin1String(attempt.subcommand)));
+        break;
+      }
+
+      convertErrors << QStringLiteral("`traceconv %1` produced no output: %2")
+                           .arg(QLatin1String(attempt.subcommand), Summarise(toolOut));
+    }
   }
 
-  result.localJsonPath = jsonPath;
+  if(importPath.isEmpty())
+  {
+    // An older or newer `traceconv` may expect different arguments. What each attempt printed is
+    // reported verbatim so that a mismatch is visible instead of presenting a generic error.
+    Fail(result, QStringLiteral("convert trace to an importable timeline"),
+         QStringLiteral("%1\n\nThe recorded protobuf is retained at:\n%2")
+             .arg(convertErrors.join(QStringLiteral("\n")), localTrace));
+    return result;
+  }
+
+  result.localTimelinePath = importPath;
+
   result.success = true;
   Log(result, QStringLiteral("capture complete"));
   return result;

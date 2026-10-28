@@ -105,22 +105,39 @@ QString ConfidenceName(ClockDomainConfidence c)
 // usually named `.json`, but a `.txt` systrace or a bare file can still be the same document. The
 // format is therefore identified by looking for the Chrome event array first, and only then
 // falling back to the JSON-lines interchange.
-bool LooksLikeChromeTrace(const QString &path)
+enum class TraceFileKind
+{
+  ChromeJson,
+  JsonLines,
+  SystraceText,
+};
+
+// Which importer a file needs is decided by its content, not its extension: `traceconv` writes a
+// JSON document for `json`, a plain kernel trace for `systrace`, and the documented interchange is
+// JSON-lines. Reading a bounded prefix is enough to tell them apart and keeps a multi-hundred-
+// megabyte trace from being read twice.
+TraceFileKind ClassifyTraceFile(const QString &path)
 {
   QFile file(path);
   if(!file.open(QIODevice::ReadOnly))
-    return false;
+    return TraceFileKind::ChromeJson;
 
-  // The event array is at the top level of the document, so a bounded prefix is enough to decide
-  // and keeps a multi-hundred-megabyte trace from being read twice.
   const QByteArray prefix = file.read(64 * 1024);
-
-  if(prefix.contains("\"traceEvents\""))
-    return true;
-
   const QByteArray trimmed = prefix.trimmed();
-  // A bare top-level array of events; JSON-lines interchange always starts with a '{'.
-  return trimmed.startsWith('[');
+
+  // A bare top-level array of events is a Chrome trace; the JSON-lines interchange always starts
+  // with a '{'.
+  if(trimmed.startsWith('['))
+    return TraceFileKind::ChromeJson;
+
+  if(trimmed.startsWith('{'))
+  {
+    if(prefix.contains("\"traceEvents\"") || prefix.contains("\"systemTraceEvents\""))
+      return TraceFileKind::ChromeJson;
+    return TraceFileKind::JsonLines;
+  }
+
+  return TraceFileKind::SystraceText;
 }
 
 // Distinct, reasonably colour-blind friendly line colours for the overlay curves.
@@ -1942,11 +1959,16 @@ void SystemTraceViewer::reloadTrace()
 
 void SystemTraceViewer::loadTraceFrom(const QString &path)
 {
-  // The capture path always produces a Chrome Trace Event Format document, while the documented
-  // interchange is JSON-lines. Both are accepted, and the file itself decides which importer runs:
-  // selecting on the extension alone would mis-route a `traceconv json` output named `.txt`.
-  m_Trace = LooksLikeChromeTrace(path) ? ImportChromeTraceEventFormat(path)
-                                       : ImportSystemTraceJsonLines(path);
+  // Three inputs are accepted - a Chrome Trace Event Format document, the documented JSON-lines
+  // interchange, and a raw systrace/kernel trace text file - and the file's own content decides
+  // which importer runs. Selecting on the extension alone would mis-route a `traceconv json` output
+  // named `.txt`, and `traceconv systrace` produces a file that starts with a kernel trace header.
+  switch(ClassifyTraceFile(path))
+  {
+    case TraceFileKind::ChromeJson: m_Trace = ImportChromeTraceEventFormat(path); break;
+    case TraceFileKind::JsonLines: m_Trace = ImportSystemTraceJsonLines(path); break;
+    case TraceFileKind::SystraceText: m_Trace = ImportSystraceText(path); break;
+  }
 
   m_TracePath->setText(path);
   m_Loaded = true;
@@ -2090,8 +2112,8 @@ void SystemTraceViewer::captureTrace()
 
       if(!result.localTracePath.isEmpty())
         m_CaptureLog->appendPlainText(tr("\nPerfetto trace: %1").arg(result.localTracePath));
-      if(!result.localJsonPath.isEmpty())
-        m_CaptureLog->appendPlainText(tr("Importable JSON: %1").arg(result.localJsonPath));
+      if(!result.localTimelinePath.isEmpty())
+        m_CaptureLog->appendPlainText(tr("Importable timeline: %1").arg(result.localTimelinePath));
     }
 
     if(!result.success)
@@ -2109,9 +2131,9 @@ void SystemTraceViewer::captureTrace()
       return;
     }
 
-    // The captured JSON is the same document the importer accepts, so it is loaded through the
+    // The captured timeline is a document the importer accepts as-is, so it is loaded through the
     // normal path: one code path for both captured and manually opened traces.
-    loadTraceFrom(result.localJsonPath);
+    loadTraceFrom(result.localTimelinePath);
   });
 }
 

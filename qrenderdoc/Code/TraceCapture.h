@@ -73,7 +73,10 @@ struct TraceCaptureOptions
   // Recording length and ring buffer size baked into the default config. Ignored when
   // `configText` is supplied, because then the config owns those values.
   int durationMs = 5000;
-  uint64_t bufferSizeKb = 16384;
+  // A ring buffer rather than a filling one, so a long recording keeps its tail instead of stopping
+  // at the ceiling. The default leaves room for the scheduler, interrupt, clock and atrace streams
+  // the config enables on a busier device.
+  uint64_t bufferSizeKb = 32768;
   // Explicit path to `traceconv`. When empty, discovery is attempted (Snapdragon Profiler install
   // directory, then PATH).
   QString traceconvPath;
@@ -88,8 +91,9 @@ struct TraceCaptureResult
   // The pulled Perfetto protobuf. Retained even when conversion fails, so the recording is not
   // lost and the user can convert it later.
   QString localTracePath;
-  // The Chrome Trace Event Format JSON. This is the file ImportChromeTraceEventFormat() consumes.
-  QString localJsonPath;
+  // The importable timeline: `systrace` text when traceconv supports that sub-command, otherwise
+  // Chrome Trace Event Format JSON. ImportSystemTraceFile() accepts either.
+  QString localTimelinePath;
   // The persistent local copy of every command and result. This remains available after the UI is
   // closed, so failed captures can be diagnosed without relying on an in-memory log widget.
   QString localLogPath;
