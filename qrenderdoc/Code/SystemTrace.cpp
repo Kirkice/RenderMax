@@ -449,6 +449,10 @@ struct ChromeEventStats
   int systraceSpans = 0;
   int systraceCounterSamples = 0;
   int systraceUnmodelled = 0;
+  // How many atrace marks (`tracing_mark_write`) were read. Zero in a trace that also carries
+  // scheduler data is the signature of atrace not being enabled on the device, which looks exactly
+  // like a trace where the app drew nothing.
+  int atraceMarks = 0;
   int derivedFrames = 0;
   int droppedClockSeries = 0;
 };
@@ -1626,6 +1630,8 @@ void ConsumeAtrace(const SystraceRecord &rec, ChromeTraceBuilder &builder, Systr
   if(payload.startsWith(QLatin1String("trace_event_clock_sync")))
     return;
 
+  builder.stats.atraceMarks++;
+
   const int kindEnd = payload.indexOf(QLatin1Char('|'));
   if(kindEnd <= 0)
   {
@@ -2412,6 +2418,17 @@ SystemTrace BuildTraceFromBuilder(ChromeTraceBuilder &builder, const QString &pa
                           .arg(trace.tracks.size() - trace.series.size())
                           .arg(trace.series.size())
                           .arg(builder.stats.systraceCounterSamples);
+
+    // A trace full of scheduler evidence but containing no atrace mark at all is not a quiet app:
+    // the device did not enable atrace, so there are no userspace lanes and no frame callback to
+    // derive boundaries from. Saying so is the difference between "the panel is broken" and "record
+    // it again".
+    if(builder.stats.atraceMarks == 0)
+      trace.warnings << QObject::tr(
+          "The trace contains no atrace marks (`tracing_mark_write`), so there are no userspace "
+          "lanes and no `Choreographer#doFrame` boundaries. The recording itself is fine; atrace "
+          "was not enabled on the device while it ran, which happens when `traced_probes` is not "
+          "tagging the app. Recording again usually produces them.");
   }
 
   if(trace.series.isEmpty() && trace.frameBoundaries.isEmpty() && trace.SpanCount() == 0)
