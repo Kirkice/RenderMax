@@ -33,6 +33,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QRegularExpression>
 
 // [观测] System-trace import provenance (planning document section 8.9.3).
 //
@@ -785,6 +786,75 @@ void ConsumeChromeEvent(const QJsonObject &obj, ChromeTraceBuilder &builder)
   // have no duration to draw as a lane interval, so they are counted rather than coerced.
   builder.stats.unmappedPhase++;
 }
+
+// Qualcomm's bundled traceconv writes Android ftrace text in the Chrome trace document's
+// `systemTraceEvents` member while leaving `traceEvents` empty. Convert only scheduler switches
+// into thread spans here; the source does not provide Chrome event objects for the rest of ftrace.
+bool ConsumeSystemTraceEvents(const QString &ftrace, ChromeTraceBuilder &builder)
+{
+  static const QRegularExpression switchPattern(
+      QStringLiteral("^.*\\[(\\d+)\\].*?\\s(\\d+\\.\\d+): sched_switch: "
+                     "prev_comm=(.*?) prev_pid=(\\d+).*?==> next_comm=(.*?) next_pid=(\\d+)"));
+
+  struct RunningThread
+  {
+    TraceSpan span;
+    int pid = -1;
+  };
+
+  QHash<int, RunningThread> running;
+  double lastTimeSec = 0.0;
+  bool sawSwitch = false;
+
+  const QStringList lines = ftrace.split(QLatin1Char('\n'));
+  for(const QString &line : lines)
+  {
+    const QRegularExpressionMatch match = switchPattern.match(line);
+    if(!match.hasMatch())
+      continue;
+
+    const int cpu = match.captured(1).toInt();
+    const double timeSec = match.captured(2).toDouble();
+    const QString nextComm = match.captured(5);
+    const int nextPid = match.captured(6).toInt();
+
+    auto current = running.find(cpu);
+    if(current != running.end())
+    {
+      TraceSpan span = current->span;
+      span.endSec = timeSec;
+      if(span.endSec >= span.beginSec)
+      {
+        LaneFor(builder, current->pid, current->pid).spans.push_back(span);
+        builder.stats.spans++;
+      }
+    }
+
+    RunningThread next;
+    next.pid = nextPid;
+    next.span.beginSec = timeSec;
+    next.span.endSec = timeSec;
+    next.span.name = nextComm;
+    next.span.category = QStringLiteral("sched");
+    next.span.fields << QStringLiteral("cpu = %1").arg(cpu);
+    running.insert(cpu, next);
+    lastTimeSec = timeSec;
+    sawSwitch = true;
+  }
+
+  for(auto it = running.begin(); it != running.end(); ++it)
+  {
+    TraceSpan span = it->span;
+    span.endSec = lastTimeSec;
+    if(span.endSec >= span.beginSec)
+    {
+      LaneFor(builder, it->pid, it->pid).spans.push_back(span);
+      builder.stats.spans++;
+    }
+  }
+
+  return sawSwitch;
+}
 }
 
 SystemTrace ImportChromeTraceEventFormat(const QString &path)
@@ -908,6 +978,20 @@ SystemTrace ImportChromeTraceEventFormat(const QString &path)
     // The event array's closing bracket at brace depth 0 ends the stream.
     if(c == ']' && depth == 0)
       break;
+  }
+
+  // traceconv json exports Android kernel events as one Systrace string, not as individual Chrome
+  // events. Preserve its scheduler timeline when `traceEvents` contained no usable events.
+  if(builder.stats.events == 0)
+  {
+    QJsonParseError documentError = {};
+    const QJsonDocument document = QJsonDocument::fromJson(contents, &documentError);
+    if(documentError.error == QJsonParseError::NoError && document.isObject())
+    {
+      const QString ftrace = document.object().value(QStringLiteral("systemTraceEvents")).toString();
+      if(!ftrace.isEmpty() && ConsumeSystemTraceEvents(ftrace, builder))
+        trace.formatName = QStringLiteral("Chrome Trace Event Format (Perfetto traceconv json/systrace)");
+    }
   }
 
   const ChromeEventStats &stats = builder.stats;

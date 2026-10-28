@@ -90,6 +90,9 @@ struct TraceCaptureResult
   QString localTracePath;
   // The Chrome Trace Event Format JSON. This is the file ImportChromeTraceEventFormat() consumes.
   QString localJsonPath;
+  // The persistent local copy of every command and result. This remains available after the UI is
+  // closed, so failed captures can be diagnosed without relying on an in-memory log widget.
+  QString localLogPath;
   // The path the trace had while on the device, kept for diagnostics.
   QString deviceTracePath;
   QString traceconvPath;

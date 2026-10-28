@@ -91,8 +91,9 @@ QString FindTraceconv(const TraceCaptureOptions &opts, TraceCaptureResult &resul
             .arg(opts.traceconvPath));
   }
 
-  // [观测] The Snapdragon Profiler distribution bundles Perfetto's converter under several names
-  // depending on release and architecture. Only the ones that were actually observed are probed.
+  // [observed] Snapdragon Profiler 2025 installs Perfetto's converter below
+  // <install>/plugins/data. Older releases place it beside the executable or under Resources.
+  // Probe only known layouts so discovery never turns an arbitrary directory into an executable.
   if(!opts.snapdragonProfilerPath.isEmpty())
   {
     const QDir sdpDir(opts.snapdragonProfilerPath);
@@ -100,6 +101,10 @@ QString FindTraceconv(const TraceCaptureOptions &opts, TraceCaptureResult &resul
         QStringLiteral("traceconv-win-amd64.exe"),
         QStringLiteral("traceconv.exe"),
         QStringLiteral("traceconv"),
+        QStringLiteral("plugins/data/traceconv-win-amd64.exe"),
+        QStringLiteral("plugins/data/traceconv.exe"),
+        QStringLiteral("Plugins/data/traceconv-win-amd64.exe"),
+        QStringLiteral("Plugins/data/traceconv.exe"),
         QStringLiteral("resources/traceconv-win-amd64.exe"),
         QStringLiteral("Resources/traceconv-win-amd64.exe"),
     };
@@ -125,7 +130,40 @@ QString FindTraceconv(const TraceCaptureOptions &opts, TraceCaptureResult &resul
     return onPath;
   }
 
-  Log(result, QStringLiteral("traceconv: not found on PATH"));
+#ifdef _WIN32
+  // A normal Snapdragon Profiler installation does not put traceconv on PATH. Discover its known
+  // default installation location as a final convenience, so System Trace works without requiring
+  // a separate external-tool configuration entry.
+  const QStringList programFiles = {
+      QString::fromLocal8Bit(qgetenv("ProgramW6432")),
+      QString::fromLocal8Bit(qgetenv("ProgramFiles")),
+      QString::fromLocal8Bit(qgetenv("ProgramFiles(x86)")),
+  };
+  const QStringList candidates = {
+      QStringLiteral("plugins/data/traceconv-win-amd64.exe"),
+      QStringLiteral("plugins/data/traceconv.exe"),
+  };
+
+  for(const QString &root : programFiles)
+  {
+    if(root.isEmpty())
+      continue;
+
+    const QDir installDir(QDir(root).absoluteFilePath(QStringLiteral("Qualcomm/Snapdragon Profiler")));
+    for(const QString &candidate : candidates)
+    {
+      const QString path = installDir.absoluteFilePath(candidate);
+      if(QFileInfo::exists(path))
+      {
+        Log(result, QStringLiteral("traceconv: found in default Snapdragon Profiler installation at %1")
+                        .arg(path));
+        return path;
+      }
+    }
+  }
+#endif
+
+  Log(result, QStringLiteral("traceconv: not found on PATH or in a default Snapdragon Profiler installation"));
   return QString();
 }
 
@@ -181,6 +219,42 @@ QString RunLocalTool(const QString &exe, const QStringList &args, int timeoutMs,
   return combined;
 }
 
+// Store diagnostics independently of the viewer: its in-memory Capture Log disappears when the
+// application closes, but a device-side error usually needs to be inspected after the failure.
+void PersistCaptureLog(TraceCaptureResult &result)
+{
+  const QString directory =
+      QDir(QDir::tempPath()).absoluteFilePath(QStringLiteral("RenderMax/trace-capture-logs"));
+  if(!QDir().mkpath(directory))
+    return;
+
+  QString suffix = QUuid::createUuid().toString();
+  suffix.remove(QLatin1Char('{')).remove(QLatin1Char('}')).remove(QLatin1Char('-'));
+
+  const QString path = QDir(directory).absoluteFilePath(
+      QStringLiteral("trace-capture-%1-%2.log")
+          .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")))
+          .arg(suffix.left(8)));
+
+  QFile file(path);
+  if(!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    return;
+
+  QString text = result.log.join(QStringLiteral("\n"));
+  if(!result.error.isEmpty())
+    text += QStringLiteral("\n\nFAILED: %1").arg(result.error);
+  if(!result.localTracePath.isEmpty())
+    text += QStringLiteral("\n\nPerfetto trace: %1").arg(result.localTracePath);
+  if(!result.localJsonPath.isEmpty())
+    text += QStringLiteral("\nImportable JSON: %1").arg(result.localJsonPath);
+
+  if(file.write(text.toUtf8()) == text.toUtf8().size())
+  {
+    result.localLogPath = path;
+    Log(result, QStringLiteral("persistent capture log: %1").arg(path));
+  }
+}
+
 }    // anonymous namespace
 
 QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
@@ -233,14 +307,6 @@ QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
              "            stat_counters: STAT_CPU_TIMES\n"
              "        }\n"
              "    }\n"
-             "}\n"
-             "data_sources: {\n"
-             "    config {\n"
-             "        name: \"linux.pslist\"\n"
-             "        pslist_config {\n"
-             "            scan_interval_ms: 1000\n"
-             "        }\n"
-             "    }\n"
              "}\n")
       .arg(durationMs)
       .arg(bufferSizeKb);
@@ -288,8 +354,8 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   }
 
   // -----------------------------------------------------------------------------------------------
-  // Step 2: stage the config and the trace under /data/local/tmp. A per-run directory keeps two
-  // concurrent or successive captures from overwriting each other's files.
+  // Step 2: stage the config under /data/local/tmp. A per-run directory keeps concurrent captures
+  // separate. The actual trace is written to Perfetto's SELinux-approved output directory below.
   // -----------------------------------------------------------------------------------------------
   // QUuid::WithoutBraces is newer than the Qt versions this project still builds against, so the
   // braces and separators are stripped from the string form instead.
@@ -302,7 +368,10 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   const QString deviceDir =
       QStringLiteral("%1/rdoc_trace_%2").arg(QLatin1String(DeviceTempRoot), runId);
   const QString deviceConfig = deviceDir + QStringLiteral("/config.txtproto");
-  const QString deviceTrace = deviceDir + QStringLiteral("/capture.perfetto-trace");
+  // Pixel 3's perfetto_cmd can produce a trace only inside this platform-managed directory. The
+  // Perfetto process can write it and ADB can pull it, while the shell user cannot create it there.
+  const QString deviceTrace =
+      QStringLiteral("/data/misc/perfetto-traces/rendermax-%1.perfetto-trace").arg(runId);
 
   result.deviceTracePath = deviceTrace;
 
@@ -383,9 +452,15 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   // which is why this call blocks for that long and why cancellation cannot cut it short: the
   // device protocol serialises commands onto one thread, so there is no channel to send a stop
   // signal while this command is in flight.
+  //
+  // Perfetto runs under a more restricted SELinux domain than `adb shell`. On this Pixel 3 its
+  // perfetto_cmd domain cannot open the adb-pushed config, even though adb shell can access the
+  // staging directory, so the config is passed through stdin. Conversely, SELinux forbids the shell
+  // process from creating files in /data/misc/perfetto-traces; Perfetto itself must create the
+  // output in that platform-managed directory.
   // -----------------------------------------------------------------------------------------------
   {
-    const QString command = QStringLiteral("perfetto --txt -c %1 -o %2")
+    const QString command = QStringLiteral("cat %1 | perfetto --txt -c - -o %2")
                                 .arg(ShellQuote(deviceConfig), ShellQuote(deviceTrace));
 
     Log(result, QStringLiteral("recording: %1 (blocking for the configured duration)")
@@ -452,17 +527,19 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
     }
   }
 
-  // The device copy is no longer needed. Failure to remove it is logged but is not fatal: the
-  // capture itself already succeeded, and /data/local/tmp is periodically cleaned by the platform.
+  // The device staging directory and trace are no longer needed. Failure to remove either is
+  // non-fatal because the capture itself already succeeded.
   {
     rdcstr ignored;
     const ResultDetails rm = protocol->ExecCommand(
-        urlStr, QStringLiteral("rm -rf %1").arg(ShellQuote(deviceDir)), &ignored);
+        urlStr, QStringLiteral("rm -rf %1; rm -f %2")
+                    .arg(ShellQuote(deviceDir), ShellQuote(deviceTrace)),
+        &ignored);
     if(!rm.OK())
-      Log(result, QStringLiteral("cleanup of %1 failed (non-fatal): %2")
-                      .arg(deviceDir, ToQStringDisplay(rm.Message())));
+      Log(result, QStringLiteral("cleanup of %1 and %2 failed (non-fatal): %3")
+                      .arg(deviceDir, deviceTrace, ToQStringDisplay(rm.Message())));
     else
-      Log(result, QStringLiteral("removed device staging directory"));
+      Log(result, QStringLiteral("removed device staging directory and trace"));
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -520,7 +597,8 @@ void TraceCaptureJob::Start(QObject *owner, IDeviceProtocolController *protocol,
   QPointer<QObject> guard(owner);
 
   LambdaThread *thread = new LambdaThread([protocol, url, opts, done, guard]() {
-    const TraceCaptureResult result = RunTraceCapture(protocol, url, opts);
+    TraceCaptureResult result = RunTraceCapture(protocol, url, opts);
+    PersistCaptureLog(result);
 
     // The caller's widget may have been destroyed while the device was recording, in which case
     // the result still exists (it is local evidence) but there is nobody to deliver it to.

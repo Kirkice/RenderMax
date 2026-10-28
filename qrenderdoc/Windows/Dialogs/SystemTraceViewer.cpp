@@ -2055,10 +2055,15 @@ void SystemTraceViewer::captureTrace()
     if(!result.success)
     {
       updateStatusText();
+      const QString persistentLog =
+          result.localLogPath.isEmpty()
+              ? QString()
+              : tr("\n\nPersistent Capture Log: %1").arg(result.localLogPath);
       RDDialog::warning(this, tr("Trace capture failed"),
                         tr("The trace could not be recorded or converted.\n\n%1\n\nEvery command "
-                           "that ran is listed in the Capture Log tab.")
-                            .arg(result.error.isEmpty() ? tr("unknown error") : result.error));
+                           "that ran is listed in the Capture Log tab.%2")
+                            .arg(result.error.isEmpty() ? tr("unknown error") : result.error,
+                                 persistentLog));
       return;
     }
 
