@@ -1910,33 +1910,116 @@ private:
     p.drawText(QRectF(rows.left() + 4.0, double(row.top + row.height) - 12.0, 140.0, 11.0),
                Qt::AlignLeft | Qt::AlignTop, FormatValue(vmin) + unit);
 
+    const auto yFor = [&](double value) {
+      return bottom - ((value - vmin) / (vmax - vmin)) * (bottom - top);
+    };
+
+    const int count = series.samples.size();
     QPolygonF poly;
+
+    // The lane has to be covered even where no sample of its own falls: a counter is sampled every
+    // 20ms on a Pixel, while the timeline zooms down to a 200th of the trace, so a window narrower
+    // than the sampling interval is the normal case, not the corner case. Stopping the drawing at
+    // the last sample inside the window is what made the right-hand part of a lane go blank as soon
+    // as the user zoomed in. Both edges therefore get the neighbour that they need.
     int first = 0;
-    if(!series.samples.isEmpty())
+    int afterT1 = count;
+    if(count > 0)
     {
-      const auto it = std::lower_bound(
+      const auto beginIt = std::lower_bound(
           series.samples.constBegin(), series.samples.constEnd(), t0,
           [](const TraceSample &sample, double time) { return sample.timeSec < time; });
-      first = int(it - series.samples.constBegin());
+      const auto endIt = std::upper_bound(
+          series.samples.constBegin(), series.samples.constEnd(), t1,
+          [](double time, const TraceSample &sample) { return time < sample.timeSec; });
+
+      first = int(beginIt - series.samples.constBegin());
+      afterT1 = int(endIt - series.samples.constBegin());
+
       // Keep one sample before the viewport so a step/curve remains connected at the left edge.
       if(first > 0)
         first--;
     }
 
-    for(int i = first; i < series.samples.size(); i++)
+    if(count > 0 && series.step)
     {
-      const TraceSample &sample = series.samples[i];
-      if(sample.timeSec > t1)
-        break;
-
-      const double y = bottom - ((sample.value - vmin) / (vmax - vmin)) * (bottom - top);
-
       // A level series (frequency, clock rate, idle state) holds each value until the next sample,
-      // so it is drawn as a step. Interpolating it would draw values that were never measured.
-      if(series.step && !poly.isEmpty())
-        poly << QPointF(XForTime(sample.timeSec), poly.last().y());
+      // so the value in force at the left edge is the last sample at or before it. Interpolating
+      // between two samples would draw a value that was never measured.
+      int held = first;
+      if(held < count && series.samples[held].timeSec > t0)
+        held--;
+      if(held < 0)
+        held = 0;
 
-      poly << QPointF(XForTime(sample.timeSec), y);
+      // The value in force at the right edge is the last sample at or before it, so the sample that
+      // crosses the edge is not needed here: the hold is extended to the edge explicitly below.
+      const int to = qMin(count - 1, afterT1 - 1);
+
+      if(held <= to)
+      {
+        poly << QPointF(XForTime(qMax(t0, series.samples[held].timeSec)),
+                        yFor(series.samples[held].value));
+
+        for(int i = held + 1; i <= to; i++)
+        {
+          const double x = XForTime(series.samples[i].timeSec);
+          poly << QPointF(x, poly.last().y());
+          poly << QPointF(x, yFor(series.samples[i].value));
+        }
+
+        // Still holding at the right edge, which is the whole point of drawing a level series as a
+        // hold rather than as a sparse set of dots.
+        if(poly.last().x() < XForTime(t1))
+          poly << QPointF(XForTime(t1), poly.last().y());
+      }
+    }
+    else if(count > 0)
+    {
+      // A curve connects neighbouring samples, so the two segments that cross the window edges are
+      // clipped in time and their values interpolated there. That keeps the drawing inside the
+      // widget as well: an unclipped neighbour can be megabytes of pixels away when the sampling
+      // interval is much wider than the window.
+      const auto edge = [&](int i0, int i1, double at) {
+        const TraceSample &a = series.samples[i0];
+        const TraceSample &b = series.samples[i1];
+        const double dt = b.timeSec - a.timeSec;
+        const double f = dt > 0.0 ? (at - a.timeSec) / dt : 0.0;
+
+        poly << QPointF(XForTime(at), yFor(a.value + f * (b.value - a.value)));
+      };
+
+      const int from = first;
+      const int to = qMin(count - 1, afterT1);
+
+      if(from == to)
+      {
+        // One known value cannot be connected to anything, but reporting it across the window is
+        // still truer than an empty lane. Only done when the sample is actually inside the window:
+        // a value that predates it must not be presented as current.
+        const double t = series.samples[from].timeSec;
+
+        if(t >= t0 && t <= t1)
+        {
+          const double y = yFor(series.samples[from].value);
+          poly << QPointF(XForTime(t0), y) << QPointF(XForTime(t1), y);
+        }
+      }
+      else
+      {
+        if(series.samples[from].timeSec < t0)
+          edge(from, from + 1, t0);
+        else
+          poly << QPointF(XForTime(series.samples[from].timeSec), yFor(series.samples[from].value));
+
+        for(int i = from + 1; i < to; i++)
+          poly << QPointF(XForTime(series.samples[i].timeSec), yFor(series.samples[i].value));
+
+        if(series.samples[to].timeSec > t1)
+          edge(to - 1, to, t1);
+        else
+          poly << QPointF(XForTime(series.samples[to].timeSec), yFor(series.samples[to].value));
+      }
     }
 
     if(poly.size() < 2)
