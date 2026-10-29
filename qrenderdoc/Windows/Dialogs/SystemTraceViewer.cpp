@@ -196,9 +196,14 @@ const int kSpanStep = 16;
 // keeps most tracks at a single fixed height and lets the user open a track for detail; a trace that
 // stacks up to eight atrace nesting levels at 16 px per level otherwise spends 150 px on one thread
 // and pushes every other lane out of the window.
-const int kSpanHeightCompact = 9;
-const int kSpanStepCompact = 10;
+const int kSpanHeightCompact = 11;
+const int kSpanStepCompact = 12;
 const int kMaxDrawDepth = 8;
+
+// Snapdragon Profiler writes the element's name into every element wider than one character, so a
+// dense view can ask for a drawText per block. The budget is a frame-wide cap on that: past it the
+// blocks are still drawn, they just lose their labels until the view is zoomed or panned.
+const int kSpanLabelBudget = 1400;
 
 // How many lanes of a group are laid out before the rest are summarised in a single "more" row.
 // A phone capture produces one lane per thread; painting all of them on first open is exactly the
@@ -1846,6 +1851,8 @@ private:
     p.setClipRect(QRectF(rows.left(), rows.top(), rows.width(), rows.height()));
     p.translate(0, -m_ScrollY);
 
+    m_LabelBudget = kSpanLabelBudget;
+
     for(int rowIndex = 0; rowIndex < m_Rows.size(); rowIndex++)
     {
       const Row &row = m_Rows[rowIndex];
@@ -2128,15 +2135,44 @@ private:
         p.drawRect(box.adjusted(-1.0, -1.0, 1.0, 1.0));
       }
 
-      // A compact lane is 9 px tall, which cannot hold 11 px text without clipping it. The label is
-      // only drawn where it fits; expanding the lane brings it back.
-      if(w > 34.0 && row.spanHeight >= 12)
+      // Snapdragon Profiler labels a block as soon as it is wider than one character: it truncates
+      // the name to the characters that fit, centres the result in the block, and never draws an
+      // ellipsis. That is what makes its trace view read as a labelled chart rather than as a wall
+      // of colour, and it is worth the same here -- at 8 px the block can hold exactly one glyph,
+      // so 8 px is the only width threshold that is needed. The character count comes from the
+      // average advance rather than from a measurement, so rejecting a block that cannot show a
+      // letter costs no layout work.
+      if(w > 8.0 && row.spanHeight >= 8 && !span.name.isEmpty() && m_LabelBudget > 0)
       {
-        const QString label =
-            p.fontMetrics().elidedText(span.name, Qt::ElideRight, int(w) - 6);
+        // Zoomed in, a span is easily wider than the window, and a label centred in the span
+        // itself would then sit outside the viewport: the widest spans would be the only ones
+        // without a name. Centre in the part of the block that is actually on screen instead.
+        QRectF area = box.adjusted(2.0, 0.0, -2.0, 0.0);
+        area.setLeft(qMax(area.left(), RowsRect().left() + 2.0));
+        area.setRight(qMin(area.right(), RowsRect().right() - 2.0));
 
-        p.setPen(QColor(0x12, 0x12, 0x12));
-        p.drawText(box.adjusted(3.0, 0.0, -3.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter, label);
+        QFont font = p.font();
+        font.setPixelSize(qBound(8, row.spanHeight - 3, 11));
+
+        // One character per font size, which is what SDP divides by: an average glyph is narrower
+        // than that, so the truncation errs towards a short label instead of one clipped mid-letter.
+        const int maxChars = int(area.width()) / qMax(1, font.pixelSize());
+
+        if(area.width() > 1.0 && maxChars >= 1)
+        {
+          QString label = span.name;
+          if(label.size() > maxChars)
+            label.truncate(maxChars);
+
+          p.save();
+          p.setClipRect(area);
+          p.setFont(font);
+          p.setPen(QColor(0xf2, 0xf2, 0xf2));
+          p.drawText(area, Qt::AlignHCenter | Qt::AlignVCenter, label);
+          p.restore();
+
+          m_LabelBudget--;
+        }
       }
     }
   }
@@ -2516,6 +2552,10 @@ private:
   // number the caption was told about, instead of resolving it twice and risking a mismatch.
   int m_HoverRow = -1;
   int m_HoverSeries = -1;
+
+  // Remaining span labels for the frame being painted, so that a dense view cannot turn the paint
+  // event into thousands of text layouts.
+  int m_LabelBudget = 0;
   double m_HoverTimeSec = 0.0;
   double m_HoverValue = 0.0;
   QString m_HoverText;
