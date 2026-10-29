@@ -153,6 +153,10 @@ SWIGPY_DESTRUCTOR_CLOSURE(capviewer_deinit) /* defines capviewer_deinit_destruct
 // need to ignore the original function and add a helper that releases the python GIL while calling
 %ignore IReplayManager::BlockInvoke;
 
+// internal wiring, not part of the python API: records the device an externally owned session (the
+// MCP capture session) is showing
+%ignore IReplayManager::SetSessionRemoteHost;
+
 // ignore these functions as we don't map QVariantMap to/from python
 %ignore EnvironmentModification::toJSON;
 %ignore EnvironmentModification::fromJSON;

@@ -120,6 +120,12 @@ public:
   ToolResult SessionTool(const QString &name, const QJsonObject &args, CallContext &call);
   QJsonObject ApplicationSessionState() const;
 
+  // Announces (or clears, with an empty url) the device an externally owned capture session is
+  // talking to, so panels that ask the ReplayManager which device they are looking at see the same
+  // session the MCP tools launched. The session keeps ownership of its own connection; only the host
+  // is recorded, and the call is marshalled onto the UI thread where that record is read.
+  void SetActiveRemoteSession(const QString &url);
+
   // Shader tools run a capture-stable UI transaction and replay-only callbacks.
   ToolResult ShaderTool(const QString &name, const QJsonObject &args, CallContext &call);
   ToolResult ResourceTool(const QString &name, const QJsonObject &args, CallContext &call);

@@ -353,6 +353,26 @@ ResultDetails ReplayManager::ConnectToRemoteServer(RemoteHost host)
   return result;
 }
 
+void ReplayManager::SetSessionRemoteHost(const rdcstr &hostname)
+{
+  // A connection this manager opened is authoritative: it owns the IRemoteServer the replay thread
+  // talks to, so an externally owned session must not be reported in its place.
+  if(m_Remote != NULL)
+    return;
+
+  if(hostname.empty())
+  {
+    m_ExternalRemoteHost = RemoteHost();
+    return;
+  }
+
+  // RemoteHost(hostname) already resolves the device protocol controller for that URL, which is all a
+  // panel needs to run device commands. Nothing is connected here: the connection belongs to whoever
+  // asked for this record.
+  m_ExternalRemoteHost = RemoteHost(hostname);
+  m_ExternalRemoteHost.SetConnected(true);
+}
+
 void ReplayManager::DisconnectFromRemoteServer()
 {
   m_RemoteHost.SetConnected(false);

@@ -1955,6 +1955,13 @@ struct IReplayManager
 )");
   virtual RemoteHost CurrentRemote() = 0;
 
+  // Not part of the documented Python surface. Records which device an externally owned session (the
+  // MCP native capture session, which holds its own remote connection) is talking to, so panels can
+  // reach that device's protocol through CurrentRemote() without this manager opening a second
+  // connection to it. An empty hostname clears it, and a connection this manager owns is never
+  // replaced.
+  virtual void SetSessionRemoteHost(const rdcstr &hostname) = 0;
+
   DOCUMENT(R"(Retrieves the capture access handle for the currently open file.
 
 :return: The file handle active, or ``None`` if no capture is open.

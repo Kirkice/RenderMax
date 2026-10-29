@@ -324,6 +324,20 @@ T QueryAdapter::ReadOnUIThread(const std::function<T()> &fn) const
   return ret;
 }
 
+void QueryAdapter::SetActiveRemoteSession(const QString &url)
+{
+  if(m_Ctx == NULL)
+    return;
+
+  // The record is read by panels on the UI thread, while the session that owns the connection runs on
+  // its own worker, so both the write and the clear are marshalled here.
+  ReadOnUIThread<int>([this, url]() -> int {
+    m_Ctx->Replay().SetSessionRemoteHost(
+        url.isEmpty() ? rdcstr() : rdcstr(url.toUtf8().constData()));
+    return 0;
+  });
+}
+
 ToolResult QueryAdapter::WithCaptureUI(
     CallContext &call, const std::function<ToolResult(ICaptureContext &)> &fn)
 {

@@ -489,6 +489,23 @@ ToolResult QueryAdapter::SessionTool(const QString &name, const QJsonObject &arg
     return Fail(ErrorCode::InvalidParams, "Unknown native session tool");
   }, abandoned, call);
   ToolResult result = Await(job, call, abandoned);
+
+  // Announce which device this session is showing. The ReplayManager only records the host (which is
+  // enough for it to resolve the device protocol), so a panel that asks the manager which device it
+  // is looking at - the System Trace capture button does - sees this session without a second
+  // connection being opened to the device.
+  if(name == QStringLiteral("renderdoc_launchRemoteApplication") ||
+     name == QStringLiteral("renderdoc_launchApplication"))
+  {
+    const QString url = result.structured.value(QStringLiteral("url")).toString();
+    if(result.ok && !url.isEmpty())
+      SetActiveRemoteSession(url);
+  }
+  else if(name == QStringLiteral("renderdoc_closeSession"))
+  {
+    SetActiveRemoteSession(QString());
+  }
+
   if(!result.ok || (name != QStringLiteral("renderdoc_captureFrame") && name != QStringLiteral("renderdoc_triggerRemoteCapture"))) return result;
   // Trigger submission and completion are distinct. A timeout does not claim the
   // queued frame was cancelled, and the owner continues preserving late captures.

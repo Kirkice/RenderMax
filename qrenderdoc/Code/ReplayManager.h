@@ -90,7 +90,14 @@ public:
   // work whether local or remote.
   ICaptureFile *GetCaptureFile() { return m_CaptureFile; }
   void ReopenCaptureFile(const QString &path);
-  RemoteHost CurrentRemote() { return m_RemoteHost; }
+  RemoteHost CurrentRemote()
+  {
+    // A connection this manager owns always wins. Otherwise report the device of a session whose
+    // connection is owned elsewhere (the MCP capture session) - loading a local capture resets
+    // m_RemoteHost, and that must not make the panel forget which device it is working with.
+    return m_RemoteHost.IsValid() ? m_RemoteHost : m_ExternalRemoteHost;
+  }
+  void SetSessionRemoteHost(const rdcstr &hostname);
   ExecuteResult ExecuteAndInject(const rdcstr &exe, const rdcstr &workingDir, const rdcstr &cmdLine,
                                  const rdcarray<EnvironmentModification> &env,
                                  const rdcstr &capturefile, CaptureOptions opts);
@@ -135,6 +142,8 @@ private:
 
   QMutex m_RemoteLock;
   RemoteHost m_RemoteHost;
+  // Device of a session owned by someone else (the MCP capture session). Recorded, never connected.
+  RemoteHost m_ExternalRemoteHost;
   IRemoteServer *m_Remote = NULL;
   IRemoteServer *m_OrphanedRemote = NULL;
 
