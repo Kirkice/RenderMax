@@ -61,6 +61,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QTextStream>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -1251,7 +1252,10 @@ private:
 
   // The size of a lane, used to decide which lanes of a group are shown before the rest are folded
   // into a summary row. Counters weigh their sample count, span lanes their element count.
-  static int TrackWeight(const TraceTrack &track) { return track.spans.size(); }
+  // Busiest first, by element count. The idle lane counts as nothing: it is not work, it is the
+  // absence of it, and ranking it by span count would push the threads that did work out of the
+  // group's cap on every multi-core trace.
+  static int TrackWeight(const TraceTrack &track) { return track.idle ? 0 : track.spans.size(); }
 
   // Substring match on the lane caption and its group, which is what a user types when looking for
   // one thread or one process. A leading '-' or '!' negates the term, so "-idle" drops the idle
@@ -2430,6 +2434,35 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   m_ThreadTime->setSelectionBehavior(QAbstractItemView::SelectRows);
   m_ThreadTime->setSortingEnabled(true);
 
+  // The table answers two different questions: what a thread did over the whole capture, and what it
+  // did inside the frame being inspected. The second is the one that explains a stalled frame, so the
+  // window is a control rather than a re-import, and the result can be taken away as CSV.
+  QWidget *threadTimePane = new QWidget(this);
+
+  m_ThreadTimeFrame = new QCheckBox(tr("Selected frame only"), threadTimePane);
+  m_ThreadTimeFrame->setToolTip(
+      tr("Clip every running/runnable/sleeping interval to the frame correlated with the capture, so "
+         "the totals describe that frame instead of the whole trace."));
+
+  m_ThreadTimeCaption = new QLabel(tr("Whole trace"), threadTimePane);
+
+  m_ThreadTimeExport = new QPushButton(tr("Export CSV..."), threadTimePane);
+  m_ThreadTimeExport->setToolTip(tr("Write the rows shown here, with whatever sorting is applied, to "
+                                    "a CSV file."));
+
+  connect(m_ThreadTimeFrame, &QCheckBox::toggled, this, [this](bool) { updateThreadTime(); });
+  connect(m_ThreadTimeExport, &QPushButton::clicked, this, [this]() { exportThreadTime(); });
+
+  QHBoxLayout *threadTimeRow = new QHBoxLayout();
+  threadTimeRow->addWidget(m_ThreadTimeFrame);
+  threadTimeRow->addWidget(m_ThreadTimeCaption, 1);
+  threadTimeRow->addWidget(m_ThreadTimeExport);
+
+  QVBoxLayout *threadTimeLayout = new QVBoxLayout(threadTimePane);
+  threadTimeLayout->setContentsMargins(0, 0, 0, 0);
+  threadTimeLayout->addLayout(threadTimeRow);
+  threadTimeLayout->addWidget(m_ThreadTime, 1);
+
   m_Warnings = new QListWidget(this);
 
   // The capture log is kept as a tab rather than a transient popup: it holds every device command
@@ -2459,7 +2492,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   QTabWidget *sideTabs = new QTabWidget(this);
   sideTabs->addTab(m_Series, tr("Tracks"));
   sideTabs->addTab(m_Frames, tr("Frames"));
-  sideTabs->addTab(m_ThreadTime, tr("Thread Time"));
+  sideTabs->addTab(threadTimePane, tr("Thread Time"));
   sideTabs->addTab(elementPane, tr("Element"));
   sideTabs->addTab(m_Warnings, tr("Warnings"));
   sideTabs->addTab(m_CaptureLog, tr("Capture Log"));
@@ -2820,6 +2853,70 @@ void SystemTraceViewer::setNavMode(TraceNavMode mode)
     m_ModeZoom->setChecked(mode == TraceNavMode::Zoom);
 }
 
+// The trace-time extent of the frame currently correlated with the capture. False when there is no
+// capture, no correlation, or the frame was not matched, in which case the table has to fall back to
+// the whole trace rather than pretend to a window it does not have.
+bool SystemTraceViewer::frameWindow(double &beginSec, double &endSec) const
+{
+  if(m_FrameEventTimes.isEmpty() || !m_Ctx.IsCaptureLoaded())
+    return false;
+
+  const uint32_t frame =
+      m_CorrelatedFrame != 0 ? m_CorrelatedFrame : m_Ctx.FrameInfo().frameNumber;
+
+  const auto it = m_FrameEventTimes.constFind(frame);
+  if(it == m_FrameEventTimes.constEnd())
+    return false;
+
+  beginSec = it.value();
+  endSec = beginSec + m_FrameDuration;
+
+  return endSec > beginSec;
+}
+
+void SystemTraceViewer::exportThreadTime()
+{
+  if(m_ThreadTimeRows.isEmpty())
+    return;
+
+  const QString path = RDDialog::getSaveFileName(
+      this, tr("Export thread time"), m_Ctx.Config().LastCaptureFilePath,
+      tr("CSV files (*.csv);;All Files (*)"));
+
+  if(path.isEmpty())
+    return;
+
+  // Export in the order the table shows, not the order the aggregates were computed in.
+  QVector<TraceThreadTime> ordered;
+  ordered.reserve(m_ThreadTime->rowCount());
+  for(int row = 0; row < m_ThreadTime->rowCount(); row++)
+  {
+    const QTableWidgetItem *nameItem = m_ThreadTime->item(row, 0);
+    const int index = nameItem != NULL ? nameItem->data(Qt::UserRole).toInt() : row;
+
+    if(index >= 0 && index < m_ThreadTimeRows.size())
+      ordered.push_back(m_ThreadTimeRows[index]);
+  }
+
+  if(ordered.isEmpty())
+    ordered = m_ThreadTimeRows;
+
+  QFile file(path);
+  if(!file.open(QIODevice::WriteOnly | QIODevice::Text))
+  {
+    RDDialog::critical(this, tr("Export failed"),
+                       tr("Could not open %1 for writing.").arg(path));
+    return;
+  }
+
+  // The formatting lives in the importer so the exported text is covered by the trace tests; the
+  // dialog only decides where it goes.
+  QTextStream out(&file);
+  out << FormatThreadTimeCsv(ordered, m_ThreadTimeWindowSec);
+
+  file.close();
+}
+
 void SystemTraceViewer::updateThreadTime()
 {
   if(m_ThreadTime == NULL)
@@ -2830,8 +2927,47 @@ void SystemTraceViewer::updateThreadTime()
   m_ThreadTime->setSortingEnabled(false);
   m_ThreadTime->setRowCount(0);
 
-  const QVector<TraceThreadTime> rows = m_Trace.ThreadTimes();
-  const double window = m_Trace.SpanSec();
+  double windowBegin = 0.0;
+  double windowEnd = 0.0;
+  const bool frameOnly =
+      m_ThreadTimeFrame != NULL && m_ThreadTimeFrame->isChecked() && frameWindow(windowBegin, windowEnd);
+
+  if(frameOnly)
+  {
+    m_ThreadTimeWindowSec = windowEnd - windowBegin;
+    m_ThreadTimeCaption->setText(tr("Frame %1: %2 of trace time")
+                                     .arg(m_CorrelatedFrame != 0 ? m_CorrelatedFrame
+                                                                 : m_Ctx.FrameInfo().frameNumber)
+                                     .arg(FormatSeconds(m_ThreadTimeWindowSec)));
+  }
+  else
+  {
+    m_ThreadTimeWindowSec = m_Trace.SpanSec();
+    if(m_ThreadTimeCaption != NULL)
+    {
+      m_ThreadTimeCaption->setText(
+          m_ThreadTimeFrame != NULL && m_ThreadTimeFrame->isChecked()
+              ? tr("Whole trace (no correlated frame to clip to)")
+              : tr("Whole trace"));
+    }
+  }
+
+  const QVector<TraceThreadTime> rows =
+      frameOnly ? m_Trace.ThreadTimes(windowBegin, windowEnd) : m_Trace.ThreadTimes();
+  m_ThreadTimeRows = rows;
+
+  // A frame window that falls outside the trace, which is what a trace recorded in a different
+  // session than the capture gives, leaves nothing to show. Saying so is better than an empty table,
+  // and the export button is disabled rather than silently doing nothing when clicked.
+  if(frameOnly && rows.isEmpty() && m_ThreadTimeCaption != NULL)
+    m_ThreadTimeCaption->setText(m_ThreadTimeCaption->text() + tr(" - no lanes in this window"));
+
+  if(m_ThreadTimeExport != NULL)
+    m_ThreadTimeExport->setEnabled(!rows.isEmpty());
+
+  // Percentages are shares of the window the numbers were measured over, so a frame-clipped table
+  // reads "how much of this frame did the thread run" instead of "how much of the capture".
+  const double window = m_ThreadTimeWindowSec;
 
   m_ThreadTime->setRowCount(rows.size());
   for(int row = 0; row < rows.size(); row++)
@@ -2840,7 +2976,11 @@ void SystemTraceViewer::updateThreadTime()
     const double cpuPercent = window > 0.0 ? total.runningSec * 100.0 / window : 0.0;
     const double waitPercent = window > 0.0 ? total.runnableSec * 100.0 / window : 0.0;
 
-    m_ThreadTime->setItem(row, 0, new QTableWidgetItem(total.name));
+    // The row remembers which aggregate it shows so that exporting follows the table's own order:
+    // the user sorted it, and a file in insertion order would not be the table they were reading.
+    QTableWidgetItem *nameItem = new QTableWidgetItem(total.name);
+    nameItem->setData(Qt::UserRole, row);
+    m_ThreadTime->setItem(row, 0, nameItem);
     m_ThreadTime->setItem(row, 1, new NumericTableItem(QString::number(total.tid), total.tid));
     m_ThreadTime->setItem(row, 2, new QTableWidgetItem(total.process));
     m_ThreadTime->setItem(
@@ -3076,6 +3216,12 @@ void SystemTraceViewer::updateHighlight()
   }
 
   m_Selection->setText(selectionText);
+
+  // A frame-clipped thread-time table is a view of the frame that is now selected, so it has to be
+  // recomputed when the capture moves to another one. It is only rebuilt when the window is in use,
+  // because the whole-trace totals cannot change.
+  if(m_ThreadTimeFrame != NULL && m_ThreadTimeFrame->isChecked())
+    updateThreadTime();
 }
 
 void SystemTraceViewer::showTraceOnly()

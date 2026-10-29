@@ -240,9 +240,15 @@ int SystemTrace::SpanCount() const
   return count;
 }
 
-QVector<TraceThreadTime> SystemTrace::ThreadTimes() const
+QVector<TraceThreadTime> SystemTrace::ThreadTimes(double windowBeginSec, double windowEndSec) const
 {
-  QHash<int, TraceThreadTime> totals;
+  const bool clipped = windowEndSec > windowBeginSec;
+
+  // One row per lane, not per tid: a lane is what the timeline draws, and merged tids are not one
+  // thread. The kernel reuses ids, and its idle thread reports tid 0 on every CPU at once, so
+  // aggregating by tid produced rows that were not any lane and totals longer than the trace.
+  QVector<TraceThreadTime> ret;
+  ret.reserve(tracks.size());
 
   for(const TraceTrack &track : tracks)
   {
@@ -252,21 +258,34 @@ QVector<TraceThreadTime> SystemTrace::ThreadTimes() const
     if(track.kind == TraceTrackKind::Cpu || track.kind == TraceTrackKind::Counter || track.tid < 0)
       continue;
 
-    TraceThreadTime &total = totals[track.tid];
+    TraceThreadTime total;
     total.tid = track.tid;
-    if(total.name.isEmpty() || total.name.startsWith(QStringLiteral("Thread ")))
-      total.name = track.name;
-    if(total.process.isEmpty())
-      total.process = track.group;
+    total.name = track.name;
+    total.process = track.group;
 
     for(const TraceSpan &span : track.spans)
     {
-      const double duration = qMax(0.0, span.endSec - span.beginSec);
+      // A span that merely touches the window contributes nothing, and one that crosses it is
+      // measured by the part inside: the frame's share of a long sleep, not the whole sleep.
+      double beginSec = span.beginSec;
+      double endSec = span.endSec;
+
+      if(clipped)
+      {
+        beginSec = qMax(beginSec, windowBeginSec);
+        endSec = qMin(endSec, windowEndSec);
+      }
+
+      const double duration = qMax(0.0, endSec - beginSec);
 
       if(span.category == QLatin1String("sched"))
       {
         total.runningSec += duration;
-        total.switches++;
+
+        // A switch counts when the thread started running inside the window, so a per-frame view
+        // does not attribute the same preemption to two consecutive frames.
+        if(!clipped || (span.beginSec >= windowBeginSec && span.beginSec < windowEndSec))
+          total.switches++;
       }
       else if(span.category == QLatin1String("sched-runnable"))
       {
@@ -277,14 +296,9 @@ QVector<TraceThreadTime> SystemTrace::ThreadTimes() const
         total.sleepingSec += duration;
       }
     }
-  }
 
-  QVector<TraceThreadTime> ret;
-  ret.reserve(totals.size());
-  for(auto it = totals.constBegin(); it != totals.constEnd(); ++it)
-  {
-    if(it->runningSec > 0.0 || it->runnableSec > 0.0 || it->sleepingSec > 0.0)
-      ret.push_back(it.value());
+    if(total.runningSec > 0.0 || total.runnableSec > 0.0 || total.sleepingSec > 0.0)
+      ret.push_back(total);
   }
 
   return ret;
@@ -517,6 +531,12 @@ struct RawLane
 {
   int pid = -1;
   int tid = -1;
+  // Set only for the kernel's idle thread, which every CPU runs and which reports tid 0 everywhere.
+  // It is the identity that keeps one CPU's idle out of another's lane.
+  int cpu = -1;
+  // A name the source itself supplied for this lane, used verbatim when the lane has no unique tid
+  // to look a `thread_name` record up by. Idle lanes are exactly that case.
+  QString fixedName;
   QVector<TraceSpan> spans;
   // True when the lane holds atrace (userspace) marks rather than scheduler slices. Only used to
   // caption it as a process lane when no thread name was declared for the id.
@@ -1004,6 +1024,9 @@ struct SystraceState
   QHash<int, TraceSpan> cpuOpen;
   // tid -> the time it became runnable and has not run since.
   QHash<int, double> runnableSince;
+  // CPU -> the lane holding that CPU's idle spans. The idle thread is tid 0 on every CPU, so this
+  // is the only thing that keeps the CPUs' idle apart.
+  QHash<int, int> idleLaneByCpu;
   // tid -> the CPU whose runqueue holds it while it is runnable. `sched_waking` names a target_cpu; a
   // thread preempted with state 'R' stays on the runqueue of the CPU it was running on. Tids that are
   // runnable without an entry here were queued on a CPU the trace did not name.
@@ -1046,10 +1069,44 @@ struct SystraceState
 // belongs to is learned from its atrace marks, which can appear after its first slice. Lanes in this
 // text are therefore looked up by tid alone and adopt their owning process as soon as it is known,
 // so one thread is one row rather than one row per way it was discovered.
-RawLane &SystraceLaneFor(ChromeTraceBuilder &builder, SystraceState &state, int ownerPid, int tid)
+RawLane &SystraceLaneFor(ChromeTraceBuilder &builder, SystraceState &state, int ownerPid, int tid,
+                         int cpu = -1, const QString &comm = QString())
 {
   if(tid < 0)
     return LaneFor(builder, ownerPid, tid);
+
+  // Any value that no real Linux tid reaches, used only as a lane key.
+  const int kIdleLaneTidBase = 0x40000000;
+
+  // The idle thread runs on every CPU and reports tid 0 on all of them, so tid alone would put the
+  // whole device's idle into one lane: overlapping spans from 24 CPUs, and a running total eight
+  // times the length of the trace. Its identity is (tid 0, this CPU).
+  if(tid == 0 && cpu >= 0)
+  {
+    const auto idle = state.idleLaneByCpu.constFind(cpu);
+
+    if(idle != state.idleLaneByCpu.constEnd())
+    {
+      RawLane &lane = builder.lanes[idle.value()];
+
+      // The comm travels with every sched_switch, so the caption can still be the kernel's own
+      // `swapper/<cpu>` rather than something this importer made up.
+      if(lane.fixedName.isEmpty() && !comm.isEmpty())
+        lane.fixedName = comm;
+
+      return lane;
+    }
+
+    // The lane key is a synthetic tid, comfortably outside any real one, because LaneKey() folds
+    // every negative tid into the same "unknown" bucket: a negative key here would put all CPUs back
+    // into one lane. The tid the lane reports stays 0.
+    RawLane &lane = LaneFor(builder, ownerPid >= 0 ? ownerPid : -1, kIdleLaneTidBase + cpu);
+    lane.tid = 0;
+    lane.cpu = cpu;
+    lane.fixedName = comm.isEmpty() ? QObject::tr("swapper/%1").arg(cpu) : comm;
+    state.idleLaneByCpu.insert(cpu, builder.lanes.size() - 1);
+    return lane;
+  }
 
   if(!state.lanesSeeded)
   {
@@ -1299,7 +1356,8 @@ void ConsumeSchedSwitch(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
     }
     else
     {
-      SystraceLaneFor(builder, state, -1, current->tid).spans.push_back(span);
+      SystraceLaneFor(builder, state, -1, current->tid, rec.cpu, current->comm)
+          .spans.push_back(span);
       builder.stats.spans++;
       builder.stats.systraceSpans++;
     }
@@ -1347,7 +1405,7 @@ void ConsumeSchedSwitch(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
       span.category = QStringLiteral("sched-runnable");
       span.fields << QStringLiteral("tid = %1").arg(nextTid);
 
-      SystraceLaneFor(builder, state, -1, nextTid).spans.push_back(span);
+      SystraceLaneFor(builder, state, -1, nextTid, rec.cpu, nextComm).spans.push_back(span);
       builder.stats.spans++;
       builder.stats.systraceSpans++;
     }
@@ -1404,7 +1462,7 @@ void ConsumeWakeup(const SystraceRecord &rec, ChromeTraceBuilder &builder, Systr
 
 // `sched_blocked_reason: pid=4079 iowait=0 caller=1`. The payload is kept verbatim: `caller` is a
 // kernel call-site id that the trace does not name, so decoding it into a label would be a guess.
-void ConsumeBlockedReason(const SystraceRecord &rec, SystraceState &state)
+void ConsumeBlockedReason(const SystraceRecord &rec, ChromeTraceBuilder &, SystraceState &state)
 {
   static const QRegularExpression pattern(QStringLiteral("^pid=(-?[0-9]+) +(.*)$"));
 
@@ -1420,7 +1478,7 @@ void ConsumeBlockedReason(const SystraceRecord &rec, SystraceState &state)
 // `task_newtask: pid=4389 comm=UnityGfxDeviceW clone_flags=...` and
 // `task_rename: pid=4389 oldcomm=UnityGfxDeviceW newcomm=HWC release oom_score_adj=0`. The comm can
 // contain spaces, so it is captured up to the field that follows it rather than as one token.
-void ConsumeTaskName(const SystraceRecord &rec, ChromeTraceBuilder &builder)
+void ConsumeTaskName(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &)
 {
   if(rec.event == QLatin1String("task_newtask"))
   {
@@ -1581,7 +1639,7 @@ void ConsumeClockEnable(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
 // Interrupt context is not a thread: `irq_handler_entry` runs on whichever thread the CPU happened to
 // be running, so the span belongs to the CPU's interrupt row. Handlers can nest (a timer IRQ raising
 // a softirq), hence one stack per CPU.
-void ConsumeIrqEntry(const SystraceRecord &rec, SystraceState &state)
+void ConsumeIrqEntry(const SystraceRecord &rec, ChromeTraceBuilder &, SystraceState &state)
 {
   static const QRegularExpression pattern(QStringLiteral("^irq=(-?[0-9]+) name=(.*)$"));
 
@@ -1640,7 +1698,7 @@ QString SoftirqName(int vec, const QString &action)
   return QStringLiteral("softirq vec %1").arg(vec);
 }
 
-void ConsumeSoftirqEntry(const SystraceRecord &rec, SystraceState &state)
+void ConsumeSoftirqEntry(const SystraceRecord &rec, ChromeTraceBuilder &, SystraceState &state)
 {
   static const QRegularExpression vecPattern(QStringLiteral("^vec=(-?[0-9]+)"));
   static const QRegularExpression actionPattern(QStringLiteral("action=([^]]*)"));
@@ -1690,7 +1748,7 @@ void ConsumeSoftirqExit(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
 // Workqueue executions run on a worker thread, so they belong on that thread's lane. The symbol tells
 // the reader what the worker did; the offset is kept as a field so two calls to the same function stay
 // distinguishable without making the slice label unreadable.
-void ConsumeWorkqueueStart(const SystraceRecord &rec, SystraceState &state)
+void ConsumeWorkqueueStart(const SystraceRecord &rec, ChromeTraceBuilder &, SystraceState &state)
 {
   static const QRegularExpression pattern(QStringLiteral("function=(.*)$"));
 
@@ -1899,22 +1957,151 @@ void ConsumeAtrace(const SystraceRecord &rec, ChromeTraceBuilder &builder, Systr
 // something happened at one instant and carry no end, so there is nothing to draw on a lane. Naming
 // them here keeps the "no lane or metric" warning about events the timeline genuinely failed to
 // understand instead of nagging about ones it deliberately leaves to a future instant-marker track.
-static bool IsPointOnlyEvent(const QString &name)
+// What an understood ftrace event contributes to the model. This is the inventory Snapdragon
+// Profiler keeps as one parser plugin class per event type -- `?AVCpuFrequencySystraceParserPlugin@SDP@@`
+// and two hundred siblings in SystraceProcessor.dll -- and that shape is worth copying: the set of
+// events the importer understands, and what each one yields, is data in one table rather than a chain
+// of name comparisons spread over a thousand lines.
+enum class FtraceOutput
 {
-  static const char *const names[] = {
-      "binder_set_priority",  "binder_transaction",     "binder_transaction_alloc_buf",
-      "binder_transaction_received", "oom_score_adj_update", "sched_pi_setprio",
-      "softirq_raise",        "ipi_raise",              "workqueue_queue_work",
-      "workqueue_activate_work",
-  };
+  // An interval attributed to the thread the record names.
+  ThreadSlice,
+  // A transition that opens or closes thread state (runnable, blocked, exiting).
+  ThreadState,
+  // Naming metadata used by later records rather than drawn on its own.
+  ThreadName,
+  // `tracing_mark_write`: an interval the traced process declared for itself.
+  AtraceSlice,
+  // An interval on the CPU lane (idle).
+  CpuInterval,
+  // A level sampled onto a CPU lane (frequency, clock rate).
+  CpuLevel,
+  // A level sampled onto a metric lane (clock users).
+  Level,
+  // An interval on the interrupt group of a CPU lane.
+  InterruptSlice,
+  // An interval hung off the worker thread that ran it.
+  WorkqueueSlice,
+  // Runqueue accounting input, drawn as a per-CPU level.
+  RunQueueDepth,
+  // Understood but carries no interval: counted as recognised, never reported as missing.
+  Point,
+};
 
-  for(const char *candidate : names)
+const char *FtraceOutputName(FtraceOutput output)
+{
+  switch(output)
   {
-    if(name == QLatin1String(candidate))
-      return true;
+    case FtraceOutput::ThreadSlice: return "thread slice";
+    case FtraceOutput::ThreadState: return "thread state";
+    case FtraceOutput::ThreadName: return "thread name";
+    case FtraceOutput::AtraceSlice: return "atrace slice";
+    case FtraceOutput::CpuInterval: return "cpu interval";
+    case FtraceOutput::CpuLevel: return "cpu level";
+    case FtraceOutput::Level: return "metric level";
+    case FtraceOutput::InterruptSlice: return "interrupt slice";
+    case FtraceOutput::WorkqueueSlice: return "workqueue slice";
+    case FtraceOutput::RunQueueDepth: return "runqueue depth";
+    case FtraceOutput::Point: return "point";
   }
 
-  return false;
+  return "unknown";
+}
+
+struct FtraceEventSpec
+{
+  const char *name;
+  // A second name for the same event. The kernel renamed sched_wakeup to sched_waking, and traces from
+  // either era have to parse.
+  const char *alias;
+  FtraceOutput output;
+  // NULL for an event that is understood but produces nothing, which is the whole of `Point`.
+  void (*consume)(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state);
+  const char *emits;
+};
+
+// thunks: clk_enable and clk_disable share one handler, discriminated by an argument rather than by
+// the event name.
+void ConsumeClockEnableRequest(const SystraceRecord &rec, ChromeTraceBuilder &builder,
+                               SystraceState &state)
+{
+  ConsumeClockEnable(rec, builder, state, true);
+}
+
+void ConsumeClockDisableRequest(const SystraceRecord &rec, ChromeTraceBuilder &builder,
+                                SystraceState &state)
+{
+  ConsumeClockEnable(rec, builder, state, false);
+}
+
+// Every ftrace event this importer knows. An event that is missing here is reported as unmodelled
+// with its own name, so adding support for one is a single row rather than a new `else if`.
+const FtraceEventSpec kFtraceEvents[] = {
+    {"sched_switch", NULL, FtraceOutput::ThreadSlice, &ConsumeSchedSwitch,
+     "scheduled interval, per CPU"},
+    {"tracing_mark_write", NULL, FtraceOutput::AtraceSlice, &ConsumeAtrace,
+     "atrace slice on the writing thread"},
+    {"cpu_idle", NULL, FtraceOutput::CpuInterval, &ConsumeCpuIdle, "CPU idle interval"},
+    {"sched_waking", "sched_wakeup", FtraceOutput::ThreadState, &ConsumeWakeup,
+     "runnable interval on the woken thread"},
+    {"sched_blocked_reason", NULL, FtraceOutput::ThreadState, &ConsumeBlockedReason,
+     "blocked reason on the sleep it caused"},
+    {"sched_process_exit", NULL, FtraceOutput::ThreadState, &ConsumeProcessExit,
+     "closes the thread's sleep and running intervals"},
+    {"task_newtask", "task_rename", FtraceOutput::ThreadName, &ConsumeTaskName,
+     "lane caption for a thread"},
+    {"clk_enable", NULL, FtraceOutput::Level, &ConsumeClockEnableRequest, "clock user count"},
+    {"clk_disable", NULL, FtraceOutput::Level, &ConsumeClockDisableRequest, "clock user count"},
+    {"clk_set_rate", NULL, FtraceOutput::Level, &ConsumeClockSetRate, "clock rate series"},
+    {"irq_handler_entry", NULL, FtraceOutput::InterruptSlice, &ConsumeIrqEntry,
+     "irq handler interval, per CPU"},
+    {"irq_handler_exit", NULL, FtraceOutput::InterruptSlice, &ConsumeIrqExit,
+     "closes the irq handler interval"},
+    {"softirq_entry", NULL, FtraceOutput::InterruptSlice, &ConsumeSoftirqEntry,
+     "softirq interval, per CPU"},
+    {"softirq_exit", NULL, FtraceOutput::InterruptSlice, &ConsumeSoftirqExit,
+     "closes the softirq interval"},
+    {"workqueue_execute_start", NULL, FtraceOutput::WorkqueueSlice, &ConsumeWorkqueueStart,
+     "work item interval on the worker thread"},
+    {"workqueue_execute_end", NULL, FtraceOutput::WorkqueueSlice, &ConsumeWorkqueueEnd,
+     "closes the work item interval"},
+    {"cpu_frequency", NULL, FtraceOutput::CpuLevel, &ConsumeCpuFrequency, "CPU frequency level"},
+
+    // Understood, but nothing to draw: they are point events with no interval of their own, and
+    // reporting them as unmodelled would bury the events that really are missing.
+    {"binder_set_priority", NULL, FtraceOutput::Point, NULL, "nothing"},
+    {"binder_transaction", NULL, FtraceOutput::Point, NULL, "nothing"},
+    {"binder_transaction_alloc_buf", NULL, FtraceOutput::Point, NULL, "nothing"},
+    {"binder_transaction_received", NULL, FtraceOutput::Point, NULL, "nothing"},
+    {"oom_score_adj_update", NULL, FtraceOutput::Point, NULL, "nothing"},
+    {"sched_pi_setprio", NULL, FtraceOutput::Point, NULL, "nothing"},
+    {"softirq_raise", NULL, FtraceOutput::Point, NULL, "nothing"},
+    {"ipi_raise", NULL, FtraceOutput::Point, NULL, "nothing"},
+    {"workqueue_queue_work", NULL, FtraceOutput::Point, NULL, "nothing"},
+    {"workqueue_activate_work", NULL, FtraceOutput::Point, NULL, "nothing"},
+};
+
+const int kFtraceEventCount = int(sizeof(kFtraceEvents) / sizeof(kFtraceEvents[0]));
+
+// One hash lookup per record instead of up to twenty-eight name comparisons: a full capture is
+// millions of records and most of them are `tracing_mark_write`.
+const FtraceEventSpec *FindFtraceEvent(const QString &name)
+{
+  static const QHash<QString, const FtraceEventSpec *> lookup = []() {
+    QHash<QString, const FtraceEventSpec *> map;
+
+    for(const FtraceEventSpec &spec : kFtraceEvents)
+    {
+      map.insert(QString::fromLatin1(spec.name), &spec);
+
+      if(spec.alias != NULL)
+        map.insert(QString::fromLatin1(spec.alias), &spec);
+    }
+
+    return map;
+  }();
+
+  return lookup.value(name, NULL);
 }
 
 // Reads the whole ftrace text and closes everything it opened. Returns true when at least one
@@ -1946,83 +2133,19 @@ bool ConsumeSystemTraceEvents(const QString &ftrace, ChromeTraceBuilder &builder
     state.lastTimeSec = qMax(state.lastTimeSec, rec.timeSec);
     builder.stats.systraceEvents++;
 
-    if(rec.event == QLatin1String("sched_switch"))
-    {
-      ConsumeSchedSwitch(rec, builder, state);
-    }
-    else if(rec.event == QLatin1String("tracing_mark_write"))
-    {
-      ConsumeAtrace(rec, builder, state);
-    }
-    else if(rec.event == QLatin1String("cpu_idle"))
-    {
-      ConsumeCpuIdle(rec, builder, state);
-    }
-    else if(rec.event == QLatin1String("sched_waking") || rec.event == QLatin1String("sched_wakeup"))
-    {
-      ConsumeWakeup(rec, builder, state);
-    }
-    else if(rec.event == QLatin1String("sched_blocked_reason"))
-    {
-      ConsumeBlockedReason(rec, state);
-    }
-    else if(rec.event == QLatin1String("sched_process_exit"))
-    {
-      ConsumeProcessExit(rec, builder, state);
-    }
-    else if(rec.event == QLatin1String("task_newtask") || rec.event == QLatin1String("task_rename"))
-    {
-      ConsumeTaskName(rec, builder);
-    }
-    else if(rec.event == QLatin1String("clk_enable"))
-    {
-      ConsumeClockEnable(rec, builder, state, true);
-    }
-    else if(rec.event == QLatin1String("clk_disable"))
-    {
-      ConsumeClockEnable(rec, builder, state, false);
-    }
-    else if(rec.event == QLatin1String("irq_handler_entry"))
-    {
-      ConsumeIrqEntry(rec, state);
-    }
-    else if(rec.event == QLatin1String("irq_handler_exit"))
-    {
-      ConsumeIrqExit(rec, builder, state);
-    }
-    else if(rec.event == QLatin1String("softirq_entry"))
-    {
-      ConsumeSoftirqEntry(rec, state);
-    }
-    else if(rec.event == QLatin1String("softirq_exit"))
-    {
-      ConsumeSoftirqExit(rec, builder, state);
-    }
-    else if(rec.event == QLatin1String("workqueue_execute_start"))
-    {
-      ConsumeWorkqueueStart(rec, state);
-    }
-    else if(rec.event == QLatin1String("workqueue_execute_end"))
-    {
-      ConsumeWorkqueueEnd(rec, builder, state);
-    }
-    else if(rec.event == QLatin1String("cpu_frequency"))
-    {
-      ConsumeCpuFrequency(rec, builder, state);
-    }
-    else if(rec.event == QLatin1String("clk_set_rate"))
-    {
-      ConsumeClockSetRate(rec, builder, state);
-    }
-    else
-    {
-      builder.stats.systraceUnmodelled++;
+    const FtraceEventSpec *spec = FindFtraceEvent(rec.event);
 
-      // Point events are understood, they just have no interval to occupy; only report the ones this
-      // build has no idea about.
-      if(!IsPointOnlyEvent(rec.event))
-        builder.unmodelledEvents.insert(rec.event, 1);
+    if(spec == NULL)
+    {
+      // Reported with its name, so what a capture contains that this build cannot draw is visible
+      // instead of silently absent from the timeline.
+      builder.stats.systraceUnmodelled++;
+      builder.unmodelledEvents.insert(rec.event, 1);
+      continue;
     }
+
+    if(spec->consume != NULL)
+      spec->consume(rec, builder, state);
   }
 
   if(!state.any)
@@ -2048,7 +2171,7 @@ bool ConsumeSystemTraceEvents(const QString &ftrace, ChromeTraceBuilder &builder
 
     if(span.endSec >= span.beginSec)
     {
-      SystraceLaneFor(builder, state, -1, it->tid).spans.push_back(span);
+      SystraceLaneFor(builder, state, -1, it->tid, it.key(), it->comm).spans.push_back(span);
       builder.stats.spans++;
       builder.stats.systraceSpans++;
     }
@@ -2424,7 +2547,9 @@ SystemTrace BuildTraceFromBuilder(ChromeTraceBuilder &builder, const QString &pa
     // rather than one fixed name. A declared `thread_name` always wins over it.
     const QString commName = lane.tid >= 0 ? builder.commByTid.value(lane.tid) : QString();
 
-    if(!threadName.isEmpty())
+    if(!lane.fixedName.isEmpty())
+      track.name = lane.fixedName;
+    else if(!threadName.isEmpty())
       track.name = threadName;
     else if(!commName.isEmpty())
       track.name = commName;
@@ -2450,6 +2575,8 @@ SystemTrace BuildTraceFromBuilder(ChromeTraceBuilder &builder, const QString &pa
       track.kind = TraceTrackKind::Process;
 
     track.atrace = lane.atrace;
+    track.cpu = lane.cpu;
+    track.idle = lane.tid == 0 && lane.cpu >= 0;
     track.spans = lane.spans;
     trace.tracks.push_back(track);
   }
@@ -2530,11 +2657,16 @@ SystemTrace BuildTraceFromBuilder(ChromeTraceBuilder &builder, const QString &pa
 
     std::sort(names.begin(), names.end());
 
+    // The count of understood types is quoted next to the unknown ones: "3 of 28 known" says whether
+    // the capture is unusual or the importer is behind, which the list of unknown names alone does
+    // not.
     trace.warnings << QObject::tr(
-        "%1 ftrace event type(s) have no lane or metric in this build and are not drawn: %2%3")
+        "%1 ftrace event type(s) have no lane or metric in this build and are not drawn: %2%3. "
+        "This build understands %4 event type(s).")
                           .arg(total)
                           .arg(names.join(QStringLiteral(", ")))
-                          .arg(total > names.size() ? QStringLiteral(", ...") : QString());
+                          .arg(total > names.size() ? QStringLiteral(", ...") : QString())
+                          .arg(kFtraceEventCount);
   }
 
   if(stats.droppedClockSeries > 0)
@@ -2779,6 +2911,70 @@ SystemTrace ImportSystraceText(const QString &path)
 
 // Picks the importer from the file's own content rather than from its extension: `traceconv` writes
 // either a JSON document or a systrace text file and the caller is not required to know which.
+QString FormatThreadTimeCsv(const QVector<TraceThreadTime> &rows, double windowSec)
+{
+  // Quoted fields: a thread or process name can contain the separator.
+  auto field = [](const QString &text) {
+    QString escaped = text;
+    escaped.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+    return QStringLiteral("\"%1\"").arg(escaped);
+  };
+
+  QString csv = QStringLiteral(
+      "thread,tid,process,running_s,runnable_s,sleeping_s,cpu_percent,wait_percent,switches\n");
+
+  for(const TraceThreadTime &row : rows)
+  {
+    const double cpuPercent = windowSec > 0.0 ? row.runningSec * 100.0 / windowSec : 0.0;
+    const double waitPercent = windowSec > 0.0 ? row.runnableSec * 100.0 / windowSec : 0.0;
+
+    csv += field(row.name) + QLatin1Char(',') + QString::number(row.tid) + QLatin1Char(',') +
+           field(row.process) + QLatin1Char(',') + QString::number(row.runningSec, 'f', 6) +
+           QLatin1Char(',') + QString::number(row.runnableSec, 'f', 6) + QLatin1Char(',') +
+           QString::number(row.sleepingSec, 'f', 6) + QLatin1Char(',') +
+           QString::number(cpuPercent, 'f', 2) + QLatin1Char(',') +
+           QString::number(waitPercent, 'f', 2) + QLatin1Char(',') + QString::number(row.switches) +
+           QLatin1Char('\n');
+  }
+
+  return csv;
+}
+
+QStringList FtraceEventInventory()
+{
+  QStringList lines;
+
+  for(const FtraceEventSpec &spec : kFtraceEvents)
+  {
+    const QString name =
+        spec.alias == NULL
+            ? QString::fromLatin1(spec.name)
+            : QStringLiteral("%1 (%2)").arg(QString::fromLatin1(spec.name),
+                                            QString::fromLatin1(spec.alias));
+
+    lines << QStringLiteral("%1 [%2] - %3")
+                 .arg(name, QString::fromLatin1(FtraceOutputName(spec.output)),
+                      QString::fromLatin1(spec.emits));
+  }
+
+  return lines;
+}
+
+QStringList FtraceEventNames()
+{
+  QStringList names;
+
+  for(const FtraceEventSpec &spec : kFtraceEvents)
+  {
+    names << QString::fromLatin1(spec.name);
+
+    if(spec.alias != NULL)
+      names << QString::fromLatin1(spec.alias);
+  }
+
+  return names;
+}
+
 SystemTrace ImportSystemTraceFile(const QString &path)
 {
   QFile file(path);
