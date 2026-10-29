@@ -519,6 +519,14 @@ struct ChromeEventStats
   int atraceMarks = 0;
   int derivedFrames = 0;
   int droppedClockSeries = 0;
+  // GPU command batches and fence waits that were still open when the recording ended. Counted
+  // separately from the fatal cases so the warning can say the interval was truncated rather than
+  // mis-paired.
+  int gpuBatchesUnterminated = 0;
+  int gpuWaitsUnterminated = 0;
+  // GPU temperature zones seen. A capture on a device with no thermal zones reports zero, which is a
+  // different fact from "the GPU did not heat up".
+  int gpuThermalZones = 0;
 };
 
 // A trace can carry dozens of clocks. Every one of them is a real measurement, but a ceiling keeps
@@ -562,6 +570,10 @@ struct ChromeTraceBuilder
   // while still showing that the CPU was taken away from the thread it was running.
   QVector<RawLane> irqLanes;
   QVector<RawLane> softirqLanes;
+  // GPU work and GPU waits are not threads: a command batch runs on the GPU and a wait is entered by
+  // a context, so neither belongs on a tid lane. Both are their own lane under a "GPU" group.
+  RawLane gpuCmdLane;
+  RawLane gpuWaitLane;
   // tid -> the comm the scheduler last called it. This is the only thread identity a raw systrace
   // export carries: it has no `thread_name` metadata at all, and the comm travels with every
   // sched_switch record.
@@ -1045,6 +1057,13 @@ struct SystraceState
   // Per tid: open workqueue executions. A worker can process work that queues more work, so this is
   // a stack per thread rather than a single open span.
   QHash<int, QVector<TraceSpan>> workStacks;
+  // GPU command batches opened by `adreno_cmdbatch_submitted` and closed by
+  // `adreno_cmdbatch_retired`, keyed by the (context, batch timestamp) pair that both events carry.
+  // Keying by context alone would close the wrong batch: one context can have several in flight.
+  QHash<quint64, TraceSpan> gpuBatches;
+  // Per context: the GPU fence waits currently open. A context can enter more than one wait before
+  // one completes, so this is a stack like the interrupt and workqueue ones.
+  QHash<quint64, QVector<TraceSpan>> gpuWaits;
   // Clock name -> how many users currently hold it enabled. `clk_enable`/`clk_disable` nest.
   QHash<QString, int> clockEnableCount;
   // Per pid: the open atrace 'B' blocks, outermost last.
@@ -1627,6 +1646,291 @@ void ConsumeGpuPwrLevel(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
                     QObject::tr("GPU"), -1, rec.timeSec, mhz);
 }
 
+// `kgsl_gpubusy: d_name=kgsl-3d0 busy=<ns> elapsed=<ns>`. KGSL accounts the GPU's own busy time over
+// a fixed window, so the ratio measures that window rather than sampling an instantaneous value: it
+// is the number SDP publishes as "% Busy".
+//
+// Both fields are read by name, and a zero-length window is counted as malformed: dividing by it
+// would produce a value no measurement supports. The result is clamped to 0..100 because the two
+// counters are read separately and a retirement between the two reads can leave `busy` marginally
+// ahead of `elapsed`; clamping states that instead of drawing 103% utilisation.
+void ConsumeGpuBusy(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  static const QRegularExpression busyPattern(QStringLiteral("busy=(\\d+)"));
+  static const QRegularExpression elapsedPattern(QStringLiteral("elapsed=(\\d+)"));
+
+  const QRegularExpressionMatch busy = busyPattern.match(rec.payload);
+  const QRegularExpressionMatch elapsed = elapsedPattern.match(rec.payload);
+
+  if(!busy.hasMatch() || !elapsed.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const double elapsedNs = elapsed.captured(1).toDouble();
+  if(elapsedNs <= 0.0)
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const double percent = qBound(0.0, 100.0 * busy.captured(1).toDouble() / elapsedNs, 100.0);
+
+  AddSystraceSample(builder, state, QObject::tr("GPU Busy"), QStringLiteral("%"), false,
+                    QObject::tr("GPU"), -1, rec.timeSec, percent);
+}
+
+// The (context, batch timestamp) pair that identifies one command batch across its two events.
+// `adreno_cmdbatch_submitted` and `adreno_cmdbatch_retired` both print `id=` (the context) and
+// `timestamp=` (the batch timestamp within it), and nothing else is common to the pair.
+quint64 GpuBatchKey(const QString &context, const QString &timestamp)
+{
+  return ((quint64)context.toULongLong() << 32) | (timestamp.toULongLong() & 0xFFFFFFFFull);
+}
+
+// The batch's queue depth, as the driver counted it at the moment of the event. It is a level series:
+// the value holds until the next batch changes it, so interpolating between two of them would draw
+// depths that were never reported.
+void AddGpuInflight(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("inflight=(-?\\d+)"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+    return;
+
+  AddSystraceSample(builder, state, QObject::tr("GPU Batches In Flight"),
+                    QObject::tr("batches"), true, QObject::tr("GPU"), -1, rec.timeSec,
+                    match.captured(1).toDouble());
+}
+
+// `adreno_cmdbatch_submitted: ctx=%u ctx_prio=%d ts=%u inflight=%d ...` opens an interval that
+// `adreno_cmdbatch_retired` closes when the GPU has finished the batch. That interval is the closest
+// a stock kernel comes to "the GPU was executing this": there is no per-draw attribution, but it does
+// say when the GPU was busy, for how long, and how much work was queued behind it - which is what
+// separates a GPU-bound frame from one that is merely waiting for a fence.
+//
+// The whole payload is kept as one field rather than parsed into columns: the surrounding fields
+// (`flags`, `rptr`, `wptr`, `q_inflight`, ...) differ between KGSL releases, and the pair of records
+// is the evidence. Only the identifying pair and the inflight count are read by name.
+void ConsumeGpuCmdbatchSubmitted(const SystraceRecord &rec, ChromeTraceBuilder &builder,
+                                 SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("id=(\\d+) timestamp=(\\d+)"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  TraceSpan span;
+  span.beginSec = rec.timeSec;
+  span.endSec = rec.timeSec;
+  span.name = QObject::tr("ctx %1").arg(match.captured(1));
+  span.category = QStringLiteral("gpu");
+  span.fields << QStringLiteral("submit: %1").arg(rec.payload);
+
+  state.gpuBatches.insert(GpuBatchKey(match.captured(1), match.captured(2)), span);
+
+  AddGpuInflight(rec, builder, state);
+}
+
+void ConsumeGpuCmdbatchRetired(const SystraceRecord &rec, ChromeTraceBuilder &builder,
+                               SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("id=(\\d+) timestamp=(\\d+)"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const auto it = state.gpuBatches.find(GpuBatchKey(match.captured(1), match.captured(2)));
+
+  // A retirement without a submission means its submission was not in the trace - it happened before
+  // the recording started, or the buffer wrapped. Dropping it silently would leave the GPU looking
+  // idle when it was not, so it is kept as a zero-length span at the retirement time and counted.
+  TraceSpan span;
+  if(it != state.gpuBatches.end())
+  {
+    span = it.value();
+    state.gpuBatches.erase(it);
+  }
+  else
+  {
+    span.beginSec = rec.timeSec;
+    span.name = QObject::tr("ctx %1").arg(match.captured(1));
+    span.category = QStringLiteral("gpu");
+    span.fields << QStringLiteral("submission not in this trace");
+    builder.stats.unterminatedSpans++;
+  }
+
+  span.endSec = rec.timeSec;
+
+  if(span.endSec < span.beginSec)
+  {
+    builder.stats.reversedSpans++;
+    return;
+  }
+
+  span.fields << QStringLiteral("retire: %1").arg(rec.payload);
+
+  builder.gpuCmdLane.spans.push_back(span);
+  builder.stats.spans++;
+  builder.stats.systraceSpans++;
+
+  AddGpuInflight(rec, builder, state);
+}
+
+// `adreno_drawctxt_wait_start: rb=%u ctx=%u ts=%u` / `_wait_done: ... status=%d`. This is the CPU side
+// of GPU synchronisation: a context blocking until the GPU reaches a timestamp. It is what a fence
+// wait looks like from the CPU, and it is the direct evidence that a frame was waiting on the GPU
+// rather than being slow on the CPU - a distinction a frame-time graph alone cannot make.
+void ConsumeGpuWaitStart(const SystraceRecord &rec, ChromeTraceBuilder &, SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("rb=(\\d+) ctx=(\\d+) ts=(\\d+)"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+    return;
+
+  TraceSpan span;
+  span.beginSec = rec.timeSec;
+  span.endSec = rec.timeSec;
+  span.name = QObject::tr("wait ctx %1").arg(match.captured(2));
+  span.category = QStringLiteral("gpu-wait");
+  span.fields << QStringLiteral("start: %1").arg(rec.payload);
+
+  state.gpuWaits[match.captured(2).toULongLong()].push_back(span);
+}
+
+void ConsumeGpuWaitDone(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("ctx=(\\d+)"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const auto stack = state.gpuWaits.find(match.captured(1).toULongLong());
+  if(stack == state.gpuWaits.end() || stack->isEmpty())
+  {
+    builder.stats.unterminatedSpans++;
+    return;
+  }
+
+  TraceSpan span = stack->takeLast();
+  span.endSec = rec.timeSec;
+
+  if(span.endSec < span.beginSec)
+  {
+    builder.stats.reversedSpans++;
+    return;
+  }
+
+  span.fields << QStringLiteral("done: %1").arg(rec.payload);
+
+  builder.gpuWaitLane.spans.push_back(span);
+  builder.stats.spans++;
+  builder.stats.systraceSpans++;
+}
+
+// `thermal_query_temp: thermal_zone=gpu0-usr id=8 temp=49600`. The thermal framework reports a zone
+// only when something reads it, so this is a sampled series and not a level: the samples are the
+// moments the zone was queried, and between them the temperature is genuinely unknown.
+//
+// Only zones whose name contains `gpu` are kept. Every CPU, PMIC and battery zone emits the same
+// event, and mapping all of them would bury the GPU rows; the CPU side is already explained by
+// frequency and idle residency.
+void ConsumeThermalQueryTemp(const SystraceRecord &rec, ChromeTraceBuilder &builder,
+                             SystraceState &state)
+{
+  static const QRegularExpression zonePattern(QStringLiteral("thermal_zone=([^ ]+)"));
+  static const QRegularExpression tempPattern(QStringLiteral("temp=(-?\\d+)"));
+
+  const QRegularExpressionMatch zone = zonePattern.match(rec.payload);
+  const QRegularExpressionMatch temp = tempPattern.match(rec.payload);
+
+  if(!zone.hasMatch() || !temp.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const QString zoneName = zone.captured(1);
+  if(!zoneName.contains(QStringLiteral("gpu"), Qt::CaseInsensitive))
+    return;
+
+  // The thermal framework publishes millidegrees Celsius. A zero value means the zone has no reading
+  // rather than that the GPU is at 0 C, so it is not turned into a sample.
+  const double milliCelsius = temp.captured(1).toDouble();
+  if(milliCelsius == 0.0)
+    return;
+
+  const QString seriesName = QObject::tr("%1 Temperature").arg(zoneName);
+  if(!state.seriesIndex.contains(seriesName))
+    builder.stats.gpuThermalZones++;
+
+  AddSystraceSample(builder, state, seriesName, QObject::tr("C"), false, QObject::tr("GPU"), -1,
+                    rec.timeSec, milliCelsius / 1000.0);
+}
+
+// `thermal_power_devfreq_limit: type=%s freq=%u cdev_state=%lu power=%u`. The thermal framework
+// capping a devfreq device's frequency: the GPU being slowed down because of heat, which no GPU-side
+// counter can show, because those counters keep reporting the work still being submitted.
+//
+// The cap is a level: it holds until it moves again, so it is drawn as a step.
+void ConsumeThermalDevfreqLimit(const SystraceRecord &rec, ChromeTraceBuilder &builder,
+                                SystraceState &state)
+{
+  static const QRegularExpression typePattern(QStringLiteral("type=([^ ]+)"));
+  static const QRegularExpression freqPattern(QStringLiteral("freq=(\\d+)"));
+
+  const QRegularExpressionMatch type = typePattern.match(rec.payload);
+  const QRegularExpressionMatch freq = freqPattern.match(rec.payload);
+
+  if(!type.hasMatch() || !freq.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  AddSystraceSample(builder, state, QObject::tr("Thermal cap %1").arg(type.captured(1)),
+                    QStringLiteral("MHz"), true, QObject::tr("Thermal"), -1, rec.timeSec,
+                    freq.captured(1).toDouble() / 1.0e6);
+}
+
+// `cdev_update: type=%s target=%lu min_target=%lu`. Each cooling device's requested state: zero means
+// unthrottled, anything higher means the device is being held back. Kept per cooling device, because
+// the GPU's devfreq device and the CPU ones are separate and only the GPU one explains a frame that
+// got slower without getting busier.
+void ConsumeCdevUpdate(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  static const QRegularExpression typePattern(QStringLiteral("type=([^ ]+)"));
+  static const QRegularExpression targetPattern(QStringLiteral("target=(-?\\d+)"));
+
+  const QRegularExpressionMatch type = typePattern.match(rec.payload);
+  const QRegularExpressionMatch target = targetPattern.match(rec.payload);
+
+  if(!type.hasMatch() || !target.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  AddSystraceSample(builder, state, QObject::tr("Throttle %1").arg(type.captured(1)),
+                    QObject::tr("state"), true, QObject::tr("Thermal"), -1, rec.timeSec,
+                    target.captured(1).toDouble());
+}
+
 // `clk_enable: name=gcc_ufs_phy_axi_clk_src` / `clk_disable: name=...`. A rate series says how fast a
 // clock runs; this says whether anyone was using it, which is what explains a long clock-gated stall
 // on a peripheral (storage, display) that never shows up as CPU work.
@@ -2013,6 +2317,8 @@ enum class FtraceOutput
   WorkqueueSlice,
   // Runqueue accounting input, drawn as a per-CPU level.
   RunQueueDepth,
+  // An interval on the GPU lane group: GPU work, or a context waiting for the GPU.
+  GpuSlice,
   // Understood but carries no interval: counted as recognised, never reported as missing.
   Point,
 };
@@ -2031,6 +2337,7 @@ const char *FtraceOutputName(FtraceOutput output)
     case FtraceOutput::InterruptSlice: return "interrupt slice";
     case FtraceOutput::WorkqueueSlice: return "workqueue slice";
     case FtraceOutput::RunQueueDepth: return "runqueue depth";
+    case FtraceOutput::GpuSlice: return "gpu interval";
     case FtraceOutput::Point: return "point";
   }
 
@@ -2096,6 +2403,20 @@ const FtraceEventSpec kFtraceEvents[] = {
      "closes the work item interval"},
     {"cpu_frequency", NULL, FtraceOutput::CpuLevel, &ConsumeCpuFrequency, "CPU frequency level"},
     {"kgsl_pwrlevel", NULL, FtraceOutput::Level, &ConsumeGpuPwrLevel, "GPU frequency level"},
+    {"kgsl_gpubusy", NULL, FtraceOutput::Level, &ConsumeGpuBusy, "GPU utilisation"},
+    {"adreno_cmdbatch_submitted", NULL, FtraceOutput::GpuSlice, &ConsumeGpuCmdbatchSubmitted,
+     "GPU command batch interval, opened"},
+    {"adreno_cmdbatch_retired", NULL, FtraceOutput::GpuSlice, &ConsumeGpuCmdbatchRetired,
+     "GPU command batch interval, closed"},
+    {"adreno_drawctxt_wait_start", NULL, FtraceOutput::GpuSlice, &ConsumeGpuWaitStart,
+     "GPU fence wait, opened"},
+    {"adreno_drawctxt_wait_done", NULL, FtraceOutput::GpuSlice, &ConsumeGpuWaitDone,
+     "GPU fence wait, closed"},
+    {"thermal_query_temp", NULL, FtraceOutput::Level, &ConsumeThermalQueryTemp,
+     "thermal zone temperature"},
+    {"thermal_power_devfreq_limit", NULL, FtraceOutput::Level, &ConsumeThermalDevfreqLimit,
+     "thermal frequency cap"},
+    {"cdev_update", NULL, FtraceOutput::Level, &ConsumeCdevUpdate, "cooling device state"},
 
     // Understood, but nothing to draw: they are point events with no interval of their own, and
     // reporting them as unmodelled would bury the events that really are missing.
@@ -2238,6 +2559,43 @@ bool ConsumeSystemTraceEvents(const QString &ftrace, ChromeTraceBuilder &builder
     builder.stats.spans++;
     builder.stats.systraceSpans++;
   }
+
+  // A command batch or fence wait still open when the recording stopped was cut short by the end of
+  // the trace rather than finished, so it is closed at the last timestamp like every other open
+  // interval - and counted, because its true end is unknown.
+  for(auto it = state.gpuBatches.begin(); it != state.gpuBatches.end(); ++it)
+  {
+    TraceSpan span = it.value();
+    span.endSec = endSec;
+    span.fields << QStringLiteral("still open at the end of the trace");
+
+    if(span.endSec >= span.beginSec)
+    {
+      builder.gpuCmdLane.spans.push_back(span);
+      builder.stats.spans++;
+      builder.stats.systraceSpans++;
+      builder.stats.gpuBatchesUnterminated++;
+    }
+  }
+  state.gpuBatches.clear();
+
+  for(auto it = state.gpuWaits.begin(); it != state.gpuWaits.end(); ++it)
+  {
+    for(TraceSpan &span : it.value())
+    {
+      span.endSec = endSec;
+      span.fields << QStringLiteral("still open at the end of the trace");
+
+      if(span.endSec >= span.beginSec)
+      {
+        builder.gpuWaitLane.spans.push_back(span);
+        builder.stats.spans++;
+        builder.stats.systraceSpans++;
+        builder.stats.gpuWaitsUnterminated++;
+      }
+    }
+  }
+  state.gpuWaits.clear();
 
   // A thread still asleep when the trace stops sleeping was not woken within the window, so its
   // sleep is closed at the last timestamp like every other open interval.
@@ -2463,6 +2821,33 @@ SystemTrace BuildTraceFromBuilder(ChromeTraceBuilder &builder, const QString &pa
     trace.tracks.push_back(track);
   }
 
+  // GPU lanes sit directly under the GPU counters: the counters say what the GPU was doing, these say
+  // when. Neither is a thread - a command batch runs on the GPU and a wait is entered by a context -
+  // so both are their own group rather than a pid.
+  if(!builder.gpuCmdLane.spans.isEmpty())
+  {
+    AssignNestingDepth(builder.gpuCmdLane.spans);
+
+    TraceTrack track;
+    track.kind = TraceTrackKind::Process;
+    track.name = QObject::tr("GPU Commands");
+    track.group = QObject::tr("GPU");
+    track.spans = builder.gpuCmdLane.spans;
+    trace.tracks.push_back(track);
+  }
+
+  if(!builder.gpuWaitLane.spans.isEmpty())
+  {
+    AssignNestingDepth(builder.gpuWaitLane.spans);
+
+    TraceTrack track;
+    track.kind = TraceTrackKind::Process;
+    track.name = QObject::tr("GPU Waits");
+    track.group = QObject::tr("GPU");
+    track.spans = builder.gpuWaitLane.spans;
+    trace.tracks.push_back(track);
+  }
+
   // Per-CPU lanes next: which thread occupied each CPU. They are kept as their own group because
   // they answer "what was this CPU doing" rather than "where did this thread run".
   for(int cpu = 0; cpu < builder.cpuLanes.size(); cpu++)
@@ -2641,6 +3026,18 @@ SystemTrace BuildTraceFromBuilder(ChromeTraceBuilder &builder, const QString &pa
   if(stats.malformed > 0)
     trace.warnings << QObject::tr("%1 events could not be parsed and were skipped")
                           .arg(stats.malformed);
+
+  if(stats.gpuBatchesUnterminated > 0)
+    trace.warnings << QObject::tr(
+        "%1 GPU command batch(es) had no retirement in this trace and were closed at the last "
+        "recorded timestamp: their true duration is unknown")
+                          .arg(stats.gpuBatchesUnterminated);
+
+  if(stats.gpuWaitsUnterminated > 0)
+    trace.warnings << QObject::tr(
+        "%1 GPU fence wait(s) were still open at the end of the trace and were closed at the last "
+        "recorded timestamp")
+                          .arg(stats.gpuWaitsUnterminated);
 
   if(stats.unusableCounters > 0)
     trace.warnings << QObject::tr(
