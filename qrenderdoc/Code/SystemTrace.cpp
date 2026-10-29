@@ -954,6 +954,12 @@ struct SystraceState
   QHash<int, TraceSpan> cpuOpen;
   // tid -> the time it became runnable and has not run since.
   QHash<int, double> runnableSince;
+  // tid -> the CPU whose runqueue holds it while it is runnable. `sched_waking` names a target_cpu; a
+  // thread preempted with state 'R' stays on the runqueue of the CPU it was running on. Tids that are
+  // runnable without an entry here were queued on a CPU the trace did not name.
+  QHash<int, int> runnableRqCpu;
+  // cpu -> how many threads are waiting on it right now: the level of the "Runqueue CPU n" series.
+  QHash<int, int> rqDepth;
   // tid -> the time it stopped running because it blocked. The interval from here to the moment it
   // is woken is what a jank is usually made of, so it is drawn rather than left as a gap.
   QHash<int, double> sleepingSince;
@@ -980,6 +986,9 @@ struct SystraceState
   bool lanesSeeded = false;
   int clockSeries = 0;
   double lastTimeSec = 0.0;
+  // Earliest timestamp seen. A derived level series needs a value before its first change, and that
+  // point is the start of the trace rather than the first event that happened to change the level.
+  double firstTimeSec = -1.0;
   bool any = false;
 };
 
@@ -1055,6 +1064,59 @@ void AddSystraceSample(ChromeTraceBuilder &builder, SystraceState &state, const 
   builder.series[index].samples.push_back(sample);
 
   builder.stats.systraceCounterSamples++;
+}
+
+// Runqueue depth is a level, not an event: it only changes where a thread joins or leaves a CPU's
+// runqueue, so one sample per change is enough and the lane draws steps between them. This is the
+// series that explains a late frame: a thread that was runnable for milliseconds was waiting behind
+// other work, which no per-thread lane shows.
+void ChangeRunQueueDepth(ChromeTraceBuilder &builder, SystraceState &state, int cpu, int delta,
+                         double timeSec)
+{
+  if(cpu < 0 || delta == 0)
+    return;
+
+  int depth = state.rqDepth.value(cpu) + delta;
+  if(depth < 0)
+    depth = 0;
+  state.rqDepth.insert(cpu, depth);
+
+  const QString name = QStringLiteral("Runqueue CPU %1").arg(cpu);
+
+  // The first change is preceded by everything that happened on this CPU before it, so the level
+  // that held from the start of the trace is emitted as well - otherwise the lane would claim the
+  // new depth applied all the way back to the beginning.
+  if(!state.seriesIndex.contains(name) && state.firstTimeSec >= 0.0 &&
+     timeSec > state.firstTimeSec)
+    AddSystraceSample(builder, state, name, QStringLiteral("threads"), true,
+                      QStringLiteral("CPU Scheduling"), -1, state.firstTimeSec, depth - delta);
+
+  AddSystraceSample(builder, state, name, QStringLiteral("threads"), true,
+                    QStringLiteral("CPU Scheduling"), -1, timeSec, depth);
+}
+
+// A thread joins a runqueue when it is woken or preempted with state 'R'. Both events can be seen
+// twice for one transition (`sched_waking` then `sched_wakeup`), so joining is idempotent per tid.
+void EnqueueRunnable(ChromeTraceBuilder &builder, SystraceState &state, int tid, int cpu,
+                     double timeSec)
+{
+  if(tid < 0 || cpu < 0 || state.runnableRqCpu.contains(tid))
+    return;
+
+  state.runnableRqCpu.insert(tid, cpu);
+  ChangeRunQueueDepth(builder, state, cpu, +1, timeSec);
+}
+
+// Leaving happens on the CPU that was recorded when it joined, even when the thread then starts on a
+// different CPU: a migrated thread stops waiting on the runqueue it was queued on.
+void DequeueRunnable(ChromeTraceBuilder &builder, SystraceState &state, int tid, double timeSec)
+{
+  const auto it = state.runnableRqCpu.find(tid);
+  if(it == state.runnableRqCpu.constEnd())
+    return;
+
+  ChangeRunQueueDepth(builder, state, it.value(), -1, timeSec);
+  state.runnableRqCpu.erase(it);
 }
 
 // The per-CPU lane shows which thread occupied the CPU, which is what a scheduler timeline is read
@@ -1200,10 +1262,14 @@ void ConsumeSchedSwitch(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
   if(prevState.startsWith(QLatin1Char('R')))
   {
     state.runnableSince.insert(prevTid, rec.timeSec);
+    // Preempted, not blocked: it goes back onto the runqueue of the CPU it was just running on, which
+    // is what makes the runqueue depth jump at exactly the point where a frame was cut short.
+    EnqueueRunnable(builder, state, prevTid, rec.cpu, rec.timeSec);
   }
   else
   {
     state.runnableSince.remove(prevTid);
+    DequeueRunnable(builder, state, prevTid, rec.timeSec);
 
     // Only the first switch-out opens a sleep; a thread already asleep is not re-timed by a later
     // record, which would shorten the interval it is being judged on.
@@ -1239,6 +1305,10 @@ void ConsumeSchedSwitch(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
     state.runnableSince.erase(runnable);
   }
 
+  // Whether or not this thread was tracked as runnable, running on a CPU means it is no longer
+  // waiting on any runqueue.
+  DequeueRunnable(builder, state, nextTid, rec.timeSec);
+
   SystraceState::Running next;
   next.tid = nextTid;
   next.comm = nextComm;
@@ -1268,10 +1338,18 @@ void ConsumeWakeup(const SystraceRecord &rec, ChromeTraceBuilder &builder, Systr
   // interval; the duplicate is harmless because both are guarded by `contains`.
   const int tid = match.captured(1).toInt();
 
+  // `sched_waking` carries the CPU the thread was queued on. `sched_wakeup` repeats the transition
+  // once the CPU is final, so whichever arrives first contributes the runqueue sample.
+  static const QRegularExpression targetCpuPattern(QStringLiteral("target_cpu=(\\d+)"));
+  const QRegularExpressionMatch cpuMatch = targetCpuPattern.match(rec.payload);
+  const int targetCpu = cpuMatch.hasMatch() ? cpuMatch.captured(1).toInt() : -1;
+
   CloseSleepingSpan(builder, state, tid, rec.timeSec);
 
   if(!state.runnableSince.contains(tid))
     state.runnableSince.insert(tid, rec.timeSec);
+
+  EnqueueRunnable(builder, state, tid, targetCpu, rec.timeSec);
 }
 
 // `sched_blocked_reason: pid=4079 iowait=0 caller=1`. The payload is kept verbatim: `caller` is a
@@ -1336,6 +1414,10 @@ void ConsumeProcessExit(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
   }
 
   CloseSleepingSpan(builder, state, match.captured(2).toInt(), rec.timeSec);
+
+  // A thread that exits while it is still waiting on a runqueue is never scheduled again, so this is
+  // the only place that can take it off the count.
+  DequeueRunnable(builder, state, match.captured(2).toInt(), rec.timeSec);
 }
 
 void ConsumeCpuIdle(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
@@ -1803,6 +1885,11 @@ bool ConsumeSystemTraceEvents(const QString &ftrace, ChromeTraceBuilder &builder
       continue;
 
     state.any = true;
+    // The start of the trace is the earliest timestamp, for the same reason the end is the latest:
+    // Perfetto's own clock-sync marker carries a zero timestamp and must not define either end. Every
+    // real timestamp is seconds since boot, so zero is that marker rather than a time.
+    if(rec.timeSec > 0.0 && (state.firstTimeSec < 0.0 || rec.timeSec < state.firstTimeSec))
+      state.firstTimeSec = rec.timeSec;
     // The end of the trace is the latest timestamp, not the last one written: Perfetto appends its own
     // clock-sync marker with a zero timestamp, and taking that as the end would close every interval
     // still open at the end of the file at time zero.
