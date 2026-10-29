@@ -196,9 +196,16 @@ if(ANDROID)
         set(CLASS_PATH "${ANDROID_JAR}:obj")
     endif()
     set(KEYSTORE ${CMAKE_CURRENT_BINARY_DIR}/debug.keystore)
+    # The keystore is created by a script that does nothing when one already exists: `keytool`
+    # refuses to overwrite an existing alias, and this rule re-runs whenever the libraries it depends
+    # on are relinked, which used to fail every incremental build. Keeping the existing file also
+    # keeps the APK's signing identity stable so an installed Remote Server stays upgradeable.
     add_custom_command(OUTPUT ${KEYSTORE}
                        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-                       COMMAND ${JAVA_BIN}/keytool -genkey -keystore ${KEYSTORE} -storepass android -alias rdocandroidkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=, OU=, O=, L=, S=, C=")
+                       COMMAND ${CMAKE_COMMAND}
+                               "-DKEYTOOL=${JAVA_BIN}/keytool"
+                               "-DKEYSTORE=${KEYSTORE}"
+                               -P ${CMAKE_CURRENT_SOURCE_DIR}/MakeDebugKeystore.cmake)
 
     # APK_VERSION_CODE corresponds to android:versionCode, an internal integer value that can be queried. Higher numbers indicate more recent versions.
     # APK_VERSION_NAME corresponds to android:versionName, a string value that is displayed to the user.

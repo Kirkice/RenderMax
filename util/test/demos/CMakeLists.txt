@@ -425,9 +425,14 @@ if(ANDROID)
         set(CLASS_PATH "${ANDROID_JAR}:obj")
     endif()
     set(KEYSTORE ${CMAKE_CURRENT_BINARY_DIR}/debug.keystore)
+    # Same idempotent creation as the Remote Server APK in renderdoccmd: `keytool` cannot overwrite
+    # an existing alias, so regenerating unconditionally fails every incremental build.
     add_custom_command(OUTPUT ${KEYSTORE}
                        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-                       COMMAND ${JAVA_BIN}/keytool -genkey -keystore ${KEYSTORE} -storepass android -alias rdocandroidkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=, OU=, O=, L=, S=, C=")
+                       COMMAND ${CMAKE_COMMAND}
+                               "-DKEYTOOL=${JAVA_BIN}/keytool"
+                               "-DKEYSTORE=${KEYSTORE}"
+                               -P ${CMAKE_SOURCE_DIR}/renderdoccmd/MakeDebugKeystore.cmake)
 
     set(APK_VERSION_CODE "10")
     set(APK_VERSION_NAME "demos_build")
