@@ -189,15 +189,17 @@ const int kRulerHeight = 26;
 const int kRowHeight = 30;
 const int kGroupHeight = 20;
 const int kScrollBarWidth = 14;
-const int kSpanHeight = 14;
-const int kSpanStep = 16;
+const int kTimeScrollBarHeight = 14;
+const int kTimeScrollScale = 1000000;
+const int kSpanHeight = 18;
+const int kSpanStep = 20;
 
 // A compact lane packs the same nesting into less vertical space. Snapdragon Profiler's trace view
 // keeps most tracks at a single fixed height and lets the user open a track for detail; a trace that
 // stacks up to eight atrace nesting levels at 16 px per level otherwise spends 150 px on one thread
 // and pushes every other lane out of the window.
-const int kSpanHeightCompact = 11;
-const int kSpanStepCompact = 12;
+const int kSpanHeightCompact = 15;
+const int kSpanStepCompact = 16;
 const int kMaxDrawDepth = 8;
 
 // Snapdragon Profiler writes the element's name into every element wider than one character, so a
@@ -319,6 +321,20 @@ public:
       update();
     });
 
+    m_TimeScroll = new QScrollBar(Qt::Horizontal, this);
+    connect(m_TimeScroll, &QScrollBar::valueChanged, this, [this](int value) {
+      if(m_UpdatingTimeScroll || m_Data.trace == NULL)
+        return;
+
+      const double total = TotalSpan();
+      if(total <= 0.0)
+        return;
+
+      m_ViewStartSec = TraceStart() + total * double(value) / double(kTimeScrollScale);
+      ClampView();
+      update();
+    });
+
     SetNavMode(TraceNavMode::Pan);
   }
 
@@ -378,6 +394,7 @@ public:
     m_HoverSeries = -1;
     m_HoverText.clear();
     UpdateScrollBar();
+    UpdateTimeScrollBar();
     update();
   }
 
@@ -558,8 +575,11 @@ protected:
     const QRectF rows = RowsRect();
     m_Scroll->setGeometry(int(rows.right()) + 4, int(rows.top()), kScrollBarWidth,
                           qMax(10, int(rows.height())));
+    m_TimeScroll->setGeometry(int(rows.left()), int(rows.bottom()) + 4, qMax(10, int(rows.width())),
+                              kTimeScrollBarHeight);
 
     UpdateScrollBar();
+    UpdateTimeScrollBar();
   }
 
   void mousePressEvent(QMouseEvent *event) override
@@ -909,12 +929,19 @@ private:
     return start;
   }
 
+  bool TimeScrollVisible() const
+  {
+    const double total = TotalSpan();
+    return total > 0.0 && m_ViewSpanSec < total - qMax(1.0e-12, total * 1.0e-9);
+  }
+
   QRectF RowsRect() const
   {
     const double left = kHeaderWidth;
     const double top = kRulerHeight;
     const double w = qMax(40.0, double(width() - kHeaderWidth - kScrollBarWidth - 6));
-    const double h = qMax(40.0, double(height() - kRulerHeight - 2));
+    const int timeScrollSpace = TimeScrollVisible() ? kTimeScrollBarHeight + 4 : 0;
+    const double h = qMax(40.0, double(height() - kRulerHeight - 2 - timeScrollSpace));
 
     return QRectF(left, top, w, h);
   }
@@ -957,6 +984,8 @@ private:
     // scan, because the per-lane prefix index is built once per trace.
     if(m_ActiveOnly && m_Data.trace != NULL)
       RebuildRows();
+
+    UpdateTimeScrollBar();
   }
 
   void PanBy(double fraction)
@@ -1352,6 +1381,41 @@ private:
 
     if(m_Scroll->value() != m_ScrollY)
       m_Scroll->setValue(m_ScrollY);
+  }
+
+  void UpdateTimeScrollBar()
+  {
+    const double total = TotalSpan();
+    const bool visible = TimeScrollVisible();
+
+    m_UpdatingTimeScroll = true;
+    m_TimeScroll->setVisible(visible);
+
+    if(visible)
+    {
+      const int page = qMax(1, int(double(kTimeScrollScale) * m_ViewSpanSec / total));
+      const int maximum = qMax(0, kTimeScrollScale - page);
+      const int value = qBound(
+          0, int(double(kTimeScrollScale) * (m_ViewStartSec - TraceStart()) / total + 0.5), maximum);
+
+      m_TimeScroll->setRange(0, maximum);
+      m_TimeScroll->setPageStep(page);
+      m_TimeScroll->setSingleStep(qMax(1, page / 20));
+      m_TimeScroll->setValue(value);
+
+      const QRectF rows = RowsRect();
+      m_TimeScroll->setGeometry(int(rows.left()), int(rows.bottom()) + 4,
+                                qMax(10, int(rows.width())), kTimeScrollBarHeight);
+    }
+
+    // Showing or hiding the time scrollbar changes the lane viewport height. Keep the vertical
+    // scrollbar flush with that viewport immediately rather than waiting for a window resize.
+    const QRectF rows = RowsRect();
+    m_Scroll->setGeometry(int(rows.right()) + 4, int(rows.top()), kScrollBarWidth,
+                          qMax(10, int(rows.height())));
+
+    m_UpdatingTimeScroll = false;
+    UpdateScrollBar();
   }
 
   // The value a series holds at `t`: its most recent sample at or before that instant, plus the
@@ -2124,7 +2188,7 @@ private:
       if(hovered)
         base = base.lighter(118);
 
-      p.setPen(QPen(base.darker(150), 1));
+      p.setPen(QPen(base.darker(190), 1));
       p.setBrush(selected ? base.lighter(150) : base);
       p.drawRect(box);
 
@@ -2135,39 +2199,34 @@ private:
         p.drawRect(box.adjusted(-1.0, -1.0, 1.0, 1.0));
       }
 
-      // Snapdragon Profiler labels a block as soon as it is wider than one character: it truncates
-      // the name to the characters that fit, centres the result in the block, and never draws an
-      // ellipsis. That is what makes its trace view read as a labelled chart rather than as a wall
-      // of colour, and it is worth the same here -- at 8 px the block can hold exactly one glyph,
-      // so 8 px is the only width threshold that is needed. The character count comes from the
-      // average advance rather than from a measurement, so rejecting a block that cannot show a
-      // letter costs no layout work.
-      if(w > 8.0 && row.spanHeight >= 8 && !span.name.isEmpty() && m_LabelBudget > 0)
+      // Label any block wide enough for one readable glyph. The font is deliberately bold and
+      // larger than SDP's minimum: scheduler rows are dense, but a technically present 8 px label
+      // is not useful if it cannot be read on a high-DPI display.
+      if(w > 10.0 && row.spanHeight >= 10 && !span.name.isEmpty() && m_LabelBudget > 0)
       {
-        // Zoomed in, a span is easily wider than the window, and a label centred in the span
-        // itself would then sit outside the viewport: the widest spans would be the only ones
-        // without a name. Centre in the part of the block that is actually on screen instead.
-        QRectF area = box.adjusted(2.0, 0.0, -2.0, 0.0);
-        area.setLeft(qMax(area.left(), RowsRect().left() + 2.0));
-        area.setRight(qMin(area.right(), RowsRect().right() - 2.0));
+        // Zoomed in, a span is easily wider than the window. Centre in its visible portion so a
+        // long block does not hide its label beyond the viewport.
+        QRectF area = box.adjusted(3.0, 0.0, -3.0, 0.0);
+        area.setLeft(qMax(area.left(), RowsRect().left() + 3.0));
+        area.setRight(qMin(area.right(), RowsRect().right() - 3.0));
 
         QFont font = p.font();
-        font.setPixelSize(qBound(8, row.spanHeight - 3, 11));
+        font.setPixelSize(qBound(11, row.spanHeight - 3, 14));
+        font.setBold(true);
 
-        // One character per font size, which is what SDP divides by: an average glyph is narrower
-        // than that, so the truncation errs towards a short label instead of one clipped mid-letter.
-        const int maxChars = int(area.width()) / qMax(1, font.pixelSize());
-
-        if(area.width() > 1.0 && maxChars >= 1)
+        QFontMetrics metrics(font);
+        if(area.width() >= metrics.width(QLatin1Char('W')))
         {
-          QString label = span.name;
-          if(label.size() > maxChars)
-            label.truncate(maxChars);
+          const QString label = metrics.elidedText(span.name, Qt::ElideRight, int(area.width()));
 
           p.save();
           p.setClipRect(area);
           p.setFont(font);
-          p.setPen(QColor(0xf2, 0xf2, 0xf2));
+          // A dark halo preserves contrast on every category hue; pure white remains legible on
+          // the darkest fills without needing to change the category colour itself.
+          p.setPen(QPen(QColor(0x10, 0x12, 0x14, 230), 3.0));
+          p.drawText(area, Qt::AlignHCenter | Qt::AlignVCenter, label);
+          p.setPen(QColor(0xff, 0xff, 0xff));
           p.drawText(area, Qt::AlignHCenter | Qt::AlignVCenter, label);
           p.restore();
 
@@ -2524,6 +2583,8 @@ private:
   QVector<Row> m_Rows;
   QVector<Annotation> m_Annotations;
   QScrollBar *m_Scroll = NULL;
+  QScrollBar *m_TimeScroll = NULL;
+  bool m_UpdatingTimeScroll = false;
 
   // Which trace the current view window belongs to. When the viewer hands over a different trace
   // the window is reset to its full extent; an event-driven redraw leaves the zoom and pan alone.
