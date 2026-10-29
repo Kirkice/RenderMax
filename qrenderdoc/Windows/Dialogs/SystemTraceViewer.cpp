@@ -86,6 +86,24 @@ QString FormatValue(double value)
   return QString::number(value, 'g', 4);
 }
 
+// QTableWidget sorts text lexically, which puts "10 ms" before "2 ms". ThreadTime cells keep the
+// pretty display text but compare their raw numeric value, so every duration/count column sorts as
+// users expect. The value is stored in UserRole rather than parsed back out of translated text.
+class NumericTableItem : public QTableWidgetItem
+{
+public:
+  NumericTableItem(const QString &text, double value) : QTableWidgetItem(text)
+  {
+    setData(Qt::UserRole, value);
+    setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  }
+
+  bool operator<(const QTableWidgetItem &other) const override
+  {
+    return data(Qt::UserRole).toDouble() < other.data(Qt::UserRole).toDouble();
+  }
+};
+
 QString ConfidenceName(ClockDomainConfidence c)
 {
   switch(c)
@@ -1800,6 +1818,22 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   m_Frames->verticalHeader()->setVisible(false);
   m_Frames->setEditTriggers(QAbstractItemView::NoEditTriggers);
 
+  // Per-thread scheduler-state totals, the equivalent of SDP's ThreadTime view. These values are
+  // computed from exactly the running/runnable/sleeping spans that the timeline draws, so selecting
+  // either JSON or systrace input cannot produce a different summary.
+  m_ThreadTime = new QTableWidget(this);
+  m_ThreadTime->setColumnCount(9);
+  m_ThreadTime->setHorizontalHeaderLabels(
+      {tr("Thread"), tr("TID"), tr("Process"), tr("Running"), tr("Runnable"), tr("Sleeping"),
+       tr("CPU %"), tr("Wait %"), tr("Switches")});
+  m_ThreadTime->horizontalHeader()->setStretchLastSection(false);
+  m_ThreadTime->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+  m_ThreadTime->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+  m_ThreadTime->verticalHeader()->setVisible(false);
+  m_ThreadTime->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  m_ThreadTime->setSelectionBehavior(QAbstractItemView::SelectRows);
+  m_ThreadTime->setSortingEnabled(true);
+
   m_Warnings = new QListWidget(this);
 
   // The capture log is kept as a tab rather than a transient popup: it holds every device command
@@ -1829,6 +1863,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   QTabWidget *sideTabs = new QTabWidget(this);
   sideTabs->addTab(m_Series, tr("Tracks"));
   sideTabs->addTab(m_Frames, tr("Frames"));
+  sideTabs->addTab(m_ThreadTime, tr("Thread Time"));
   sideTabs->addTab(elementPane, tr("Element"));
   sideTabs->addTab(m_Warnings, tr("Warnings"));
   sideTabs->addTab(m_CaptureLog, tr("Capture Log"));
@@ -2024,6 +2059,8 @@ void SystemTraceViewer::loadTraceFrom(const QString &path)
     m_Frames->setItem(i, 1, timeItem);
   }
 
+  updateThreadTime();
+
   m_Warnings->clear();
   for(const QString &warning : m_Trace.warnings)
     m_Warnings->addItem(warning);
@@ -2177,6 +2214,50 @@ void SystemTraceViewer::setNavMode(TraceNavMode mode)
     m_ModePan->setChecked(mode == TraceNavMode::Pan);
   if(m_ModeZoom)
     m_ModeZoom->setChecked(mode == TraceNavMode::Zoom);
+}
+
+void SystemTraceViewer::updateThreadTime()
+{
+  if(m_ThreadTime == NULL)
+    return;
+
+  // Disable sorting while inserting rows: otherwise setItem() can move a half-populated row and the
+  // remaining cells land on a different thread. Restore it only after every row is complete.
+  m_ThreadTime->setSortingEnabled(false);
+  m_ThreadTime->setRowCount(0);
+
+  const QVector<TraceThreadTime> rows = m_Trace.ThreadTimes();
+  const double window = m_Trace.SpanSec();
+
+  m_ThreadTime->setRowCount(rows.size());
+  for(int row = 0; row < rows.size(); row++)
+  {
+    const TraceThreadTime &total = rows[row];
+    const double cpuPercent = window > 0.0 ? total.runningSec * 100.0 / window : 0.0;
+    const double waitPercent = window > 0.0 ? total.runnableSec * 100.0 / window : 0.0;
+
+    m_ThreadTime->setItem(row, 0, new QTableWidgetItem(total.name));
+    m_ThreadTime->setItem(row, 1, new NumericTableItem(QString::number(total.tid), total.tid));
+    m_ThreadTime->setItem(row, 2, new QTableWidgetItem(total.process));
+    m_ThreadTime->setItem(
+        row, 3, new NumericTableItem(FormatSeconds(total.runningSec), total.runningSec));
+    m_ThreadTime->setItem(
+        row, 4, new NumericTableItem(FormatSeconds(total.runnableSec), total.runnableSec));
+    m_ThreadTime->setItem(
+        row, 5, new NumericTableItem(FormatSeconds(total.sleepingSec), total.sleepingSec));
+    m_ThreadTime->setItem(row, 6,
+                          new NumericTableItem(QString::number(cpuPercent, 'f', 2), cpuPercent));
+    m_ThreadTime->setItem(row, 7,
+                          new NumericTableItem(QString::number(waitPercent, 'f', 2), waitPercent));
+    m_ThreadTime->setItem(row, 8,
+                          new NumericTableItem(QString::number(total.switches), total.switches));
+  }
+
+  m_ThreadTime->setSortingEnabled(true);
+  m_ThreadTime->sortItems(3, Qt::DescendingOrder);
+  m_ThreadTime->resizeColumnToContents(1);
+  for(int column = 3; column < m_ThreadTime->columnCount(); column++)
+    m_ThreadTime->resizeColumnToContents(column);
 }
 
 void SystemTraceViewer::showElementFields(const TraceSpan &span, const QString &trackName)

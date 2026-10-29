@@ -128,6 +128,10 @@ private:
   void setNavMode(TraceNavMode mode);
   // Describe the span selected in the timeline in the element pane.
   void showElementFields(const TraceSpan &span, const QString &trackName);
+  // Rebuild the per-thread scheduler-state summary from the imported lanes. This is deliberately
+  // derived from spans rather than maintained by the parser, so JSON and systrace imports use the
+  // exact same accounting and the table cannot drift from what the timeline draws.
+  void updateThreadTime();
 
   void updateHighlight();
   // Draw the imported series without any frame overlay (no capture open, so nothing to align to).
@@ -149,6 +153,7 @@ private:
   QLineEdit *m_TracePath = NULL;
   QListWidget *m_Series = NULL;
   QTableWidget *m_Frames = NULL;
+  QTableWidget *m_ThreadTime = NULL;
   QLabel *m_Alignment = NULL;
   QLabel *m_Selection = NULL;
   QLabel *m_Status = NULL;

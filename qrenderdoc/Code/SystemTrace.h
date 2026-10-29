@@ -160,6 +160,20 @@ struct TraceTrack
   bool atrace = false;
 };
 
+// Aggregated scheduler-state time for one thread. Values are measured independently over the trace
+// window: sleeping can cover nearly all of it while running/runnable divide the active periods.
+// This is the data behind the Thread Time table and deliberately excludes atrace/userspace spans.
+struct TraceThreadTime
+{
+  QString name;
+  QString process;
+  int tid = -1;
+  double runningSec = 0.0;
+  double runnableSec = 0.0;
+  double sleepingSec = 0.0;
+  int switches = 0;
+};
+
 // How confidently trace time could be related to RenderDoc time.
 enum class ClockDomainConfidence
 {
@@ -220,6 +234,10 @@ struct SystemTrace
   double SpanSec() const;
   // Number of spans across all tracks, for status reporting.
   int SpanCount() const;
+  // Sum scheduler state per tid from the same spans the timeline draws. CPU scheduler lanes are
+  // excluded because they duplicate each thread's running interval; metadata/atrace-only lanes
+  // with no scheduler state are omitted.
+  QVector<TraceThreadTime> ThreadTimes() const;
 };
 
 // Parse a trace in the documented JSON-lines interchange. This function never throws and never

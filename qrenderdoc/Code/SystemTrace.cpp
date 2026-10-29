@@ -240,6 +240,56 @@ int SystemTrace::SpanCount() const
   return count;
 }
 
+QVector<TraceThreadTime> SystemTrace::ThreadTimes() const
+{
+  QHash<int, TraceThreadTime> totals;
+
+  for(const TraceTrack &track : tracks)
+  {
+    // CPU lanes duplicate the running intervals already stored on thread lanes. Counter lanes do
+    // not represent a thread at all. Excluding both here makes this aggregation safe for callers
+    // other than the viewer as well.
+    if(track.kind == TraceTrackKind::Cpu || track.kind == TraceTrackKind::Counter || track.tid < 0)
+      continue;
+
+    TraceThreadTime &total = totals[track.tid];
+    total.tid = track.tid;
+    if(total.name.isEmpty() || total.name.startsWith(QStringLiteral("Thread ")))
+      total.name = track.name;
+    if(total.process.isEmpty())
+      total.process = track.group;
+
+    for(const TraceSpan &span : track.spans)
+    {
+      const double duration = qMax(0.0, span.endSec - span.beginSec);
+
+      if(span.category == QLatin1String("sched"))
+      {
+        total.runningSec += duration;
+        total.switches++;
+      }
+      else if(span.category == QLatin1String("sched-runnable"))
+      {
+        total.runnableSec += duration;
+      }
+      else if(span.category == QLatin1String("sched-sleeping"))
+      {
+        total.sleepingSec += duration;
+      }
+    }
+  }
+
+  QVector<TraceThreadTime> ret;
+  ret.reserve(totals.size());
+  for(auto it = totals.constBegin(); it != totals.constEnd(); ++it)
+  {
+    if(it->runningSec > 0.0 || it->runnableSec > 0.0 || it->sleepingSec > 0.0)
+      ret.push_back(it.value());
+  }
+
+  return ret;
+}
+
 bool SystemTrace::HasDeclaredFrameNumbers() const
 {
   for(const TraceFrameBoundary &b : frameBoundaries)
