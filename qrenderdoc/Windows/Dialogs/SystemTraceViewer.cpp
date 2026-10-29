@@ -32,6 +32,7 @@
 
 #include <QAbstractItemView>
 #include <QBrush>
+#include <QCheckBox>
 #include <QColor>
 #include <QFile>
 #include <QFileInfo>
@@ -54,6 +55,7 @@
 #include <QPolygonF>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QSpinBox>
 #include <QStringList>
 #include <QTableWidget>
@@ -189,6 +191,20 @@ const int kScrollBarWidth = 14;
 const int kSpanHeight = 14;
 const int kSpanStep = 16;
 
+// A compact lane packs the same nesting into less vertical space. Snapdragon Profiler's trace view
+// keeps most tracks at a single fixed height and lets the user open a track for detail; a trace that
+// stacks up to eight atrace nesting levels at 16 px per level otherwise spends 150 px on one thread
+// and pushes every other lane out of the window.
+const int kSpanHeightCompact = 9;
+const int kSpanStepCompact = 10;
+const int kMaxDrawDepth = 8;
+
+// How many lanes of a group are laid out before the rest are summarised in a single "more" row.
+// A phone capture produces one lane per thread; painting all of them on first open is exactly the
+// wall of information this view has to avoid, so the busiest lanes of each process are shown and
+// the remainder is one click away.
+const int kLanesPerGroup = 12;
+
 // Mixes two colours, `t` being the weight of `b`. Used for shades the palette has no role for; the
 // result follows whichever scheme RDStyle installed instead of being fixed to one.
 QColor Blend(const QColor &a, const QColor &b, double t)
@@ -307,7 +323,12 @@ public:
     const bool traceChanged = newData.trace != m_LastTrace;
     m_Data = newData;
     if(traceChanged)
+    {
       m_RowsDirty = true;
+      // Expanded lanes are remembered by index, which is only meaningful for the trace it came from.
+      // Group collapse is remembered by name and survives, as does the filter text.
+      m_ExpandedTracks.clear();
+    }
     // The trace object is reassigned in the viewer, but the timeline receives the same member
     // address each time. Rebuilding rows on every selection/hover repaint therefore rescans every
     // span in the trace. Rows only change on a new import, Clear/ResetView, or a new annotation.
@@ -385,6 +406,66 @@ public:
   }
 
   TraceNavMode NavMode() const { return m_Mode; }
+
+  // --- lane visibility -----------------------------------------------------------------------
+  // The importer produces one lane per thread, which on a real phone capture is several hundred
+  // lanes for a five second trace. Snapdragon Profiler never presents that set unfiltered: its flow
+  // view is populated from a metric catalogue and the user narrows it down. These three controls are
+  // the equivalent, applied to the lanes the importer did produce.
+  void SetTrackFilter(const QString &text)
+  {
+    if(m_FilterText == text)
+      return;
+
+    m_FilterText = text.trimmed();
+    m_ScrollY = 0;
+    RebuildRows();
+    update();
+  }
+
+  // "Active only" hides every lane that has nothing inside the current time window. It is the single
+  // biggest reduction in visible information at frame-level zoom, and it costs one binary search per
+  // lane when the window changes.
+  void SetActiveOnly(bool active)
+  {
+    if(m_ActiveOnly == active)
+      return;
+
+    m_ActiveOnly = active;
+    m_ScrollY = 0;
+    RebuildRows();
+    update();
+  }
+
+  bool ActiveOnly() const { return m_ActiveOnly; }
+
+  void SetGroupsCollapsed(bool collapsed)
+  {
+    m_CollapsedGroups.clear();
+    m_ExpandedGroups.clear();
+
+    if(collapsed && m_Data.trace != NULL)
+    {
+      for(const TraceTrack &track : m_Data.trace->tracks)
+        m_CollapsedGroups.insert(GroupOf(track));
+    }
+
+    m_ScrollY = 0;
+    RebuildRows();
+    update();
+  }
+
+  void SelectTrack(int trackIndex)
+  {
+    ScrollToTrack(trackIndex);
+
+    if(trackIndex < 0 || m_Data.trace == NULL || trackIndex >= m_Data.trace->tracks.size())
+      return;
+
+    const TraceTrack &track = m_Data.trace->tracks[trackIndex];
+    if(!track.spans.isEmpty())
+      SelectSpan(trackIndex, 0);
+  }
 
   // --- theme ---------------------------------------------------------------------------------
   // This widget draws its whole surface with QPainter, so it cannot inherit the theme the way a
@@ -487,6 +568,18 @@ protected:
     }
 
     const QRectF rows = RowsRect();
+
+    // The caption column is interactive: a group header toggles its lanes, and a lane's leading
+    // glyph switches between the compact and expanded nesting heights. Treating the column as part
+    // of the plot would make the most useful affordances in the panel unreachable.
+    if(event->pos().x() < kHeaderWidth && event->pos().y() >= rows.top() &&
+       event->pos().y() <= rows.bottom())
+    {
+      HandleCaptionClick(event->pos());
+      event->accept();
+      return;
+    }
+
     if(!rows.contains(event->pos()))
     {
       QWidget::mousePressEvent(event);
@@ -748,6 +841,16 @@ private:
     int height = 0;
     bool header = false;
     bool annotation = false;
+    // A group header can be collapsed to hide its lanes; a lane can be expanded from the compact
+    // drawing to the full per-nesting-level drawing.
+    bool collapsed = false;
+    bool expanded = false;
+    int trackCount = 0;
+    int visibleTrackCount = 0;
+    // Non-zero on the summary row that stands in for the lanes a group did not lay out.
+    int moreCount = 0;
+    int spanStep = kSpanStepCompact;
+    int spanHeight = kSpanHeightCompact;
     QString group;
     QString annotationGroup;
   };
@@ -826,6 +929,12 @@ private:
 
     const double start = TraceStart();
     m_ViewStartSec = qMin(qMax(start, m_ViewStartSec), start + total - m_ViewSpanSec);
+
+    // With "active only" on, the set of lanes that have something to show depends on the window, so
+    // every pan and zoom has to re-evaluate it. The test is one binary search per lane, not a span
+    // scan, because the per-lane prefix index is built once per trace.
+    if(m_ActiveOnly && m_Data.trace != NULL)
+      RebuildRows();
   }
 
   void PanBy(double fraction)
@@ -890,6 +999,7 @@ private:
     }
 
     const SystemTrace &trace = *m_Data.trace;
+    EnsureTrackIndex();
     int y = 0;
 
     if(!trace.tracks.isEmpty())
@@ -909,32 +1019,82 @@ private:
         groupTracks[group].push_back(i);
       }
 
+      const double t0 = m_ViewStartSec;
+      const double t1 = t0 + m_ViewSpanSec;
+
       for(const QString &group : groupOrder)
       {
+        // Lanes are ordered by weight, busiest first, before anything is filtered out: a group's
+        // cap must not reshuffle as the time window moves, or the lanes would jump around while
+        // panning. Weight is the lane's own element count, so the threads that actually did work in
+        // the capture are the ones that survive the cap.
+        QVector<int> ranked = groupTracks.value(group);
+        std::stable_sort(ranked.begin(), ranked.end(), [&trace](int a, int b) {
+          return TrackWeight(trace.tracks[a]) > TrackWeight(trace.tracks[b]);
+        });
+
+        // Filtering and the activity test happen per lane, before any row is emitted: a hidden
+        // lane costs nothing to paint, and a group with nothing left disappears entirely instead
+        // of leaving an empty header behind.
+        QVector<int> visible;
+        for(int trackIndex : ranked)
+        {
+          const TraceTrack &track = trace.tracks[trackIndex];
+
+          if(!TrackMatchesFilter(track, group))
+            continue;
+
+          if(m_ActiveOnly && !TrackOverlapsView(trackIndex, t0, t1))
+            continue;
+
+          visible.push_back(trackIndex);
+        }
+
+        if(visible.isEmpty() && (m_ActiveOnly || !m_FilterText.isEmpty()))
+          continue;
+
+        const bool collapsed = m_CollapsedGroups.contains(group);
+
         Row header;
         header.header = true;
         header.group = group;
+        header.collapsed = collapsed;
+        header.trackCount = groupTracks.value(group).size();
+        header.visibleTrackCount = visible.size();
         header.top = y;
         header.height = kGroupHeight;
         m_Rows.push_back(header);
         y += kGroupHeight;
 
-        for(int trackIndex : groupTracks.value(group))
+        if(collapsed)
+          continue;
+
+        // The cap only applies until the user asks for the whole group; when it does apply, the
+        // omitted lanes are reported in one row rather than silently dropped.
+        int moreCount = 0;
+        if(!m_ExpandedGroups.contains(group) && visible.size() > kLanesPerGroup)
+        {
+          moreCount = visible.size() - kLanesPerGroup;
+          visible.resize(kLanesPerGroup);
+        }
+
+        for(int trackIndex : visible)
         {
           const TraceTrack &track = trace.tracks[trackIndex];
-
-          int maxDepth = 0;
-          for(const TraceSpan &span : track.spans)
-            maxDepth = qMax(maxDepth, span.depth);
+          const int maxDepth = m_TrackMaxDepth.value(trackIndex, 0);
 
           Row row;
           row.track = trackIndex;
+          row.expanded = m_ExpandedTracks.contains(trackIndex);
+          row.spanStep = row.expanded ? kSpanStep : kSpanStepCompact;
+          row.spanHeight = row.expanded ? kSpanHeight : kSpanHeightCompact;
           row.top = y;
           // A counter lane is a single curve; a span lane is as tall as its nesting needs, capped
           // so one deeply nested lane cannot push every other lane off the screen.
           row.height = track.kind == TraceTrackKind::Counter
                            ? kRowHeight
-                           : qMax(kRowHeight, 6 + (qMin(8, maxDepth) + 1) * kSpanStep);
+                           : qMax(kRowHeight, 6 + (qMin(kMaxDrawDepth, maxDepth) + 1) * row.spanStep);
+
           if(track.kind == TraceTrackKind::Counter && track.counterSeries >= 0 &&
              track.counterSeries < trace.series.size())
           {
@@ -942,18 +1102,24 @@ private:
             row.counterMax = trace.series[track.counterSeries].MaxValue();
             row.counterRange = true;
           }
-          else if(track.kind != TraceTrackKind::Counter)
+          else if(track.kind != TraceTrackKind::Counter && trackIndex < m_TrackMaxEnd.size())
           {
-            row.maxEndPrefix.reserve(track.spans.size());
-            double maxEnd = -HUGE_VAL;
-            for(const TraceSpan &span : track.spans)
-            {
-              maxEnd = qMax(maxEnd, span.endSec);
-              row.maxEndPrefix.push_back(maxEnd);
-            }
+            row.maxEndPrefix = m_TrackMaxEnd[trackIndex];
           }
+
           m_Rows.push_back(row);
           y += row.height;
+        }
+
+        if(moreCount > 0)
+        {
+          Row row;
+          row.moreCount = moreCount;
+          row.group = group;
+          row.top = y;
+          row.height = kGroupHeight;
+          m_Rows.push_back(row);
+          y += kGroupHeight;
         }
 
         if(GroupHasAnnotations(group))
@@ -988,6 +1154,163 @@ private:
 
     m_ContentHeight = y;
     UpdateScrollBar();
+  }
+
+  // Per-lane lookup tables, built once per imported trace rather than per layout pass: a prefix
+  // maximum of span end times (for binary-searched overlap tests) and the deepest nesting level.
+  void EnsureTrackIndex()
+  {
+    if(m_Data.trace == NULL)
+      return;
+
+    const SystemTrace &trace = *m_Data.trace;
+
+    if(m_IndexedTrace == m_Data.trace && m_TrackMaxEnd.size() == trace.tracks.size())
+      return;
+
+    m_IndexedTrace = m_Data.trace;
+    m_TrackMaxEnd.clear();
+    m_TrackMaxDepth.clear();
+    m_TrackMaxEnd.resize(trace.tracks.size());
+    m_TrackMaxDepth.resize(trace.tracks.size());
+
+    for(int i = 0; i < trace.tracks.size(); i++)
+    {
+      const TraceTrack &track = trace.tracks[i];
+      int maxDepth = 0;
+
+      if(track.kind != TraceTrackKind::Counter)
+      {
+        m_TrackMaxEnd[i].reserve(track.spans.size());
+        double maxEnd = -HUGE_VAL;
+
+        for(const TraceSpan &span : track.spans)
+        {
+          maxEnd = qMax(maxEnd, span.endSec);
+          maxDepth = qMax(maxDepth, span.depth);
+          m_TrackMaxEnd[i].push_back(maxEnd);
+        }
+      }
+
+      m_TrackMaxDepth[i] = maxDepth;
+    }
+  }
+
+  // Does this lane contribute anything to the visible time window? Spans are sorted by begin time
+  // and the prefix index is monotone, so the first prefix entry that reaches the window's left edge
+  // is the only candidate that has to be checked: if it starts after the right edge, nothing later
+  // can overlap either.
+  bool TrackOverlapsView(int trackIndex, double t0, double t1) const
+  {
+    if(m_Data.trace == NULL || trackIndex < 0 || trackIndex >= m_Data.trace->tracks.size())
+      return false;
+
+    const TraceTrack &track = m_Data.trace->tracks[trackIndex];
+
+    if(track.kind == TraceTrackKind::Counter)
+    {
+      if(track.counterSeries < 0 || track.counterSeries >= m_Data.trace->series.size())
+        return false;
+
+      const TraceSeries &series = m_Data.trace->series[track.counterSeries];
+      if(series.samples.isEmpty())
+        return false;
+
+      return series.samples.first().timeSec <= t1 && series.samples.last().timeSec >= t0;
+    }
+
+    if(trackIndex >= m_TrackMaxEnd.size() || m_TrackMaxEnd[trackIndex].isEmpty())
+      return false;
+
+    const QVector<double> &prefix = m_TrackMaxEnd[trackIndex];
+    const auto it = std::lower_bound(prefix.constBegin(), prefix.constEnd(), t0);
+
+    if(it == prefix.constEnd())
+      return false;
+
+    const int candidate = int(it - prefix.constBegin());
+
+    // A sleeping span covers most of a thread's life, so counting it would make nearly every lane
+    // look active in every window and defeat the whole point of the toggle. "Active" means the
+    // thread did something in this window: ran, waited to run, or logged an atrace slice.
+    for(int i = candidate; i < track.spans.size() && track.spans[i].beginSec <= t1; i++)
+    {
+      const TraceSpan &span = track.spans[i];
+
+      if(span.endSec < t0)
+        continue;
+
+      if(span.category == QLatin1String("sched-sleeping"))
+        continue;
+
+      return true;
+    }
+
+    return false;
+  }
+
+  // The size of a lane, used to decide which lanes of a group are shown before the rest are folded
+  // into a summary row. Counters weigh their sample count, span lanes their element count.
+  static int TrackWeight(const TraceTrack &track) { return track.spans.size(); }
+
+  // Substring match on the lane caption and its group, which is what a user types when looking for
+  // one thread or one process. A leading '-' or '!' negates the term, so "-idle" drops the idle
+  // lanes from an otherwise complete view.
+  bool TrackMatchesFilter(const TraceTrack &track, const QString &group) const
+  {
+    if(m_FilterText.isEmpty())
+      return true;
+
+    const QStringList terms = m_FilterText.split(QLatin1Char(' '), QString::SkipEmptyParts);
+
+    for(const QString &raw : terms)
+    {
+      const bool negated = raw.startsWith(QLatin1Char('-')) || raw.startsWith(QLatin1Char('!'));
+      const QString term = negated ? raw.mid(1) : raw;
+
+      if(term.isEmpty())
+        continue;
+
+      const bool match = track.name.contains(term, Qt::CaseInsensitive) ||
+                         group.contains(term, Qt::CaseInsensitive);
+
+      if(match == negated)
+        return false;
+    }
+
+    return true;
+  }
+
+  // The row index of a lane's track, or -1 when the lane is currently hidden by a collapsed group
+  // or the filter. Used by the Tracks list to jump to a lane the user picked there.
+  int RowForTrack(int trackIndex) const
+  {
+    for(int i = 0; i < m_Rows.size(); i++)
+    {
+      if(m_Rows[i].track == trackIndex && !m_Rows[i].header)
+        return i;
+    }
+
+    return -1;
+  }
+
+  void ScrollToTrack(int trackIndex)
+  {
+    const int row = RowForTrack(trackIndex);
+
+    if(row < 0)
+      return;
+
+    const int viewport = qMax(0, int(RowsRect().height()));
+    const int top = m_Rows[row].top;
+
+    if(top < m_ScrollY || top + m_Rows[row].height > m_ScrollY + viewport)
+    {
+      m_ScrollY = qMax(0, top - viewport / 3);
+      UpdateScrollBar();
+    }
+
+    update();
   }
 
   void UpdateScrollBar()
@@ -1061,6 +1384,68 @@ private:
     }
 
     return ref;
+  }
+
+  // Row index under a y position in the lane area, -1 when the point is past the last row.
+  int RowAt(double y) const
+  {
+    const double contentY = y + m_ScrollY;
+
+    for(int i = 0; i < m_Rows.size(); i++)
+    {
+      if(contentY >= m_Rows[i].top && contentY < m_Rows[i].top + m_Rows[i].height)
+        return i;
+    }
+
+    return -1;
+  }
+
+  void HandleCaptionClick(const QPoint &pos)
+  {
+    const int index = RowAt(double(pos.y() - RowsRect().top()));
+
+    if(index < 0 || index >= m_Rows.size())
+      return;
+
+    const Row row = m_Rows[index];
+
+    if(row.header)
+    {
+      // Anywhere on a group header collapses or expands it: the header is short and the whole band
+      // is a bigger target than the glyph alone.
+      if(m_CollapsedGroups.contains(row.group))
+        m_CollapsedGroups.remove(row.group);
+      else
+        m_CollapsedGroups.insert(row.group);
+
+      RebuildRows();
+      update();
+      return;
+    }
+
+    if(row.moreCount > 0)
+    {
+      m_ExpandedGroups.insert(row.group);
+      RebuildRows();
+      update();
+      return;
+    }
+
+    if(row.track < 0)
+      return;
+
+    // The lane body toggles the compact/expanded nesting height, which is the per-row equivalent of
+    // SDP's track expand control. The leading +/- glyph is inside the same target.
+    if(m_TrackMaxDepth.value(row.track, 0) > 2)
+    {
+      if(m_ExpandedTracks.contains(row.track))
+        m_ExpandedTracks.remove(row.track);
+      else
+        m_ExpandedTracks.insert(row.track);
+
+      RebuildRows();
+      update();
+    }
   }
 
   void SelectAt(const QPoint &pos)
@@ -1263,18 +1648,37 @@ private:
         p.setPen(QPen(Grid(), 1));
         p.drawLine(QPointF(0, row.top), QPointF(rightEdge, row.top));
 
+        // A disclosure triangle, as SDP's group headers have: the header is a control, not just a
+        // label, and its state is what decides whether the group's lanes are laid out at all.
+        const QString handle = row.collapsed ? QStringLiteral("\u25B8") : QStringLiteral("\u25BE");
+        p.setPen(row.collapsed ? DimText() : Text());
+        p.drawText(QRectF(4, row.top, 14, row.height), Qt::AlignCenter, handle);
+
         QFont font = p.font();
         font.setBold(true);
         p.setFont(font);
-        p.setPen(Text());
-        p.drawText(QRectF(8, row.top, rightEdge - 16, row.height), Qt::AlignLeft | Qt::AlignVCenter,
-                   row.group);
+        p.setPen(row.collapsed ? DimText() : Text());
+        const QString counts =
+            row.visibleTrackCount == row.trackCount
+                ? QObject::tr("%1").arg(row.trackCount)
+                : QObject::tr("%1/%2").arg(row.visibleTrackCount).arg(row.trackCount);
+        const QString label = QStringLiteral("%1  (%2)").arg(row.group, counts);
+        p.drawText(QRectF(20, row.top, rightEdge - 28, row.height), Qt::AlignLeft | Qt::AlignVCenter,
+                   label);
         font.setBold(false);
         p.setFont(font);
         continue;
       }
 
       p.fillRect(band, (i % 2) == 0 ? Surface() : SurfaceAlt());
+
+      if(row.moreCount > 0)
+      {
+        p.setPen(QPen(Grid(), 1));
+        p.drawLine(QPointF(0, row.top + row.height - 1),
+                   QPointF(rightEdge, row.top + row.height - 1));
+        continue;
+      }
 
       p.setPen(QPen(Grid(), 1));
       p.drawLine(QPointF(0, row.top + row.height - 1),
@@ -1433,7 +1837,8 @@ private:
         continue;
 
       const double w = qMax(1.5, rawWidth);
-      const QRectF box(xa, double(row.top) + 3.0 + span.depth * kSpanStep, w, double(kSpanHeight));
+      const QRectF box(xa, double(row.top) + 3.0 + span.depth * row.spanStep, w,
+                       double(row.spanHeight));
 
       QColor base = SpanColour(span.category);
       if(hovered)
@@ -1441,16 +1846,18 @@ private:
 
       p.setPen(QPen(base.darker(150), 1));
       p.setBrush(selected ? base.lighter(150) : base);
-      p.drawRoundedRect(box, 2, 2);
+      p.drawRect(box);
 
       if(selected || hovered)
       {
         p.setPen(QPen(selected ? Highlight() : AccentHover().lighter(160), 2));
         p.setBrush(Qt::NoBrush);
-        p.drawRoundedRect(box.adjusted(-1.0, -1.0, 1.0, 1.0), 2, 2);
+        p.drawRect(box.adjusted(-1.0, -1.0, 1.0, 1.0));
       }
 
-      if(w > 34.0)
+      // A compact lane is 9 px tall, which cannot hold 11 px text without clipping it. The label is
+      // only drawn where it fits; expanding the lane brings it back.
+      if(w > 34.0 && row.spanHeight >= 12)
       {
         const QString label =
             p.fontMetrics().elidedText(span.name, Qt::ElideRight, int(w) - 6);
@@ -1520,10 +1927,23 @@ private:
       p.drawLine(QPointF(0, row.top + row.height - 1),
                  QPointF(double(kHeaderWidth), row.top + row.height - 1));
 
-      const double captionWidth = double(kHeaderWidth) - 30.0;
+      const double captionWidth = double(kHeaderWidth) - 40.0;
       QString caption;
       QString detail;
       QColor swatch(0x80, 0x80, 0x80);
+
+      if(row.moreCount > 0)
+      {
+        // The summary row is a control: it says exactly how many lanes of this group are not on
+        // screen and shows them when clicked.
+        const QString label =
+            QObject::tr("  %1 more lane(s) \u2014 click to show").arg(row.moreCount);
+        p.setPen(Accent());
+        p.drawText(QRectF(4.0, double(row.top), double(kHeaderWidth) - 8.0, double(row.height)),
+                   Qt::AlignLeft | Qt::AlignVCenter,
+                   p.fontMetrics().elidedText(label, Qt::ElideRight, kHeaderWidth - 12));
+        continue;
+      }
 
       if(row.annotation)
       {
@@ -1551,10 +1971,15 @@ private:
         {
           swatch = SpanColour(track.spans.isEmpty() ? QString() : track.spans[0].category);
 
-          if(track.kind == TraceTrackKind::Cpu)
-            detail = QObject::tr("%1 slices").arg(track.spans.size());
-          else
-            detail = QObject::tr("%1 spans").arg(track.spans.size());
+          // SDP's track header names the thread and then quantifies it; the id and the slice count
+          // are what disambiguate two threads that share a caption.
+          QStringList parts;
+          if(track.tid >= 0)
+            parts << QObject::tr("tid %1").arg(track.tid);
+
+          parts << (track.kind == TraceTrackKind::Cpu ? QObject::tr("%1 slices").arg(track.spans.size())
+                                                      : QObject::tr("%1 spans").arg(track.spans.size()));
+          detail = parts.join(QStringLiteral("  \u00B7  "));
         }
       }
       else if(row.series >= 0 && row.series < trace.series.size())
@@ -1571,18 +1996,30 @@ private:
       if(caption.isEmpty())
         continue;
 
-      p.fillRect(QRectF(6.0, double(row.top) + 6.0, 8.0, 8.0), swatch);
+      // A lane with more nesting than is being drawn says so, rather than silently looking shallower
+      // than it is. Clicking the lane toggles between the compact and the fully expanded drawing.
+      const int maxDepth = row.track >= 0 ? m_TrackMaxDepth.value(row.track, 0) : 0;
+      const bool canExpand = row.track >= 0 && maxDepth > 2;
+
+      if(canExpand)
+      {
+        p.setPen(row.expanded ? Text() : DimText());
+        p.drawText(QRectF(4.0, double(row.top), 12.0, double(row.height)), Qt::AlignCenter,
+                   row.expanded ? QStringLiteral("\u2212") : QStringLiteral("+"));
+      }
+
+      p.fillRect(QRectF(18.0, double(row.top) + 6.0, 8.0, 8.0), swatch);
 
       const QString elided = p.fontMetrics().elidedText(caption, Qt::ElideRight, int(captionWidth));
 
       p.setPen(Text());
-      p.drawText(QRectF(20.0, double(row.top) + 3.0, captionWidth, 13.0),
+      p.drawText(QRectF(32.0, double(row.top) + 3.0, captionWidth, 13.0),
                  Qt::AlignLeft | Qt::AlignVCenter, elided);
 
-      if(!detail.isEmpty())
+      if(!detail.isEmpty() && row.height >= 26)
       {
         p.setPen(DimText());
-        p.drawText(QRectF(20.0, double(row.top) + 16.0, captionWidth, 12.0),
+        p.drawText(QRectF(32.0, double(row.top) + 16.0, captionWidth, 12.0),
                    Qt::AlignLeft | Qt::AlignVCenter,
                    p.fontMetrics().elidedText(detail, Qt::ElideRight, int(captionWidth)));
       }
@@ -1803,6 +2240,19 @@ private:
 
   bool m_RowsDirty = true;
 
+  // Lane visibility state. Kept separate from m_Data because it describes the user's view of the
+  // trace, not the trace itself, and must survive a data refresh that keeps the same trace.
+  QString m_FilterText;
+  bool m_ActiveOnly = true;
+  QSet<QString> m_CollapsedGroups;
+  // Groups whose lane cap the user has lifted, by name so it survives a re-import.
+  QSet<QString> m_ExpandedGroups;
+  QSet<int> m_ExpandedTracks;
+
+  const SystemTrace *m_IndexedTrace = NULL;
+  QVector<QVector<double>> m_TrackMaxEnd;
+  QVector<int> m_TrackMaxDepth;
+
   bool m_CaliperASet = false;
   bool m_CaliperBSet = false;
   double m_CaliperA = 0.0;
@@ -1888,6 +2338,46 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   modeRow->addWidget(m_ModeZoom);
   modeRow->addWidget(modeHint, 1);
 
+  // Lane visibility. The importer cannot know which of the several hundred threads matters for the
+  // question being asked, so the panel exposes the same three narrowing tools SDP's flow view has:
+  // a text filter, "only what happens in this window", and collapsing by group.
+  m_TrackFilter = new QLineEdit(this);
+  m_TrackFilter->setClearButtonEnabled(true);
+  m_TrackFilter->setPlaceholderText(tr("Filter tracks, e.g. Unity -idle"));
+  m_TrackFilter->setToolTip(
+      tr("Show only tracks whose name or process contains every word. A leading '-' or '!' excludes "
+         "a word instead, so \"-idle\" hides the idle lanes. Press / to focus this box."));
+
+  m_ActiveOnly = new QCheckBox(tr("Active in view"), this);
+  m_ActiveOnly->setChecked(true);
+  m_ActiveOnly->setToolTip(
+      tr("Hide tracks that have nothing inside the visible time range. Frame-level zoom then shows "
+         "only the threads that ran in that frame."));
+
+  m_CollapseGroups = new QPushButton(tr("Collapse all"), this);
+  m_CollapseGroups->setToolTip(tr("Reduce the timeline to the list of processes."));
+
+  m_ExpandGroups = new QPushButton(tr("Show every lane"), this);
+  m_ExpandGroups->setToolTip(
+      tr("Lay out every track of every process. A large capture can produce hundreds of lanes; this "
+         "is the command that brings them all back."));
+
+  connect(m_TrackFilter, &QLineEdit::textChanged, this,
+          [this](const QString &text) { m_Chart->SetTrackFilter(text); });
+  connect(m_ActiveOnly, &QCheckBox::toggled, this,
+          [this](bool checked) { m_Chart->SetActiveOnly(checked); });
+  connect(m_CollapseGroups, &QPushButton::clicked, this,
+          [this] { m_Chart->SetGroupsCollapsed(true); });
+  connect(m_ExpandGroups, &QPushButton::clicked, this,
+          [this] { m_Chart->SetGroupsCollapsed(false); });
+
+  QHBoxLayout *filterRow = new QHBoxLayout();
+  filterRow->addWidget(new QLabel(tr("Tracks:"), this));
+  filterRow->addWidget(m_TrackFilter, 1);
+  filterRow->addWidget(m_ActiveOnly);
+  filterRow->addWidget(m_CollapseGroups);
+  filterRow->addWidget(m_ExpandGroups);
+
   m_Chart = new SystemTraceTimeline(this);
   m_Chart->OnSelectEvent = [this](uint32_t eventId) { selectEvent(eventId); };
   m_Chart->OnSelectSpan = [this](const TraceSpan &span, const QString &trackName) {
@@ -1895,7 +2385,27 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   };
   m_Chart->OnNavModeChanged = [this](TraceNavMode mode) { setNavMode(mode); };
 
+  // '/' focuses the lane filter while the timeline has focus, the way SDP's filter entries are one
+  // keystroke away. The shortcut is scoped to the timeline widget so that typing '/' inside the
+  // filter box itself still inserts a character.
+  QShortcut *focusFilter = new QShortcut(QKeySequence(Qt::Key_Slash), m_Chart);
+  focusFilter->setContext(Qt::WidgetShortcut);
+  connect(focusFilter, &QShortcut::activated, this, [this]() {
+    m_TrackFilter->setFocus(Qt::ShortcutFocusReason);
+    m_TrackFilter->selectAll();
+  });
+
   m_Series = new QListWidget(this);
+  m_Series->setToolTip(tr("Double-click a track to scroll the timeline to it and select its first "
+                          "span."));
+  connect(m_Series, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+    if(item == NULL || m_Chart == NULL)
+      return;
+
+    const QVariant index = item->data(Qt::UserRole);
+    if(index.isValid())
+      m_Chart->SelectTrack(index.toInt());
+  });
 
   m_Frames = new QTableWidget(this);
   m_Frames->setColumnCount(2);
@@ -1994,6 +2504,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   QVBoxLayout *layout = new QVBoxLayout(this);
   layout->addLayout(fileRow);
   layout->addLayout(modeRow);
+  layout->addLayout(filterRow);
   layout->addWidget(middle, 1);
   layout->addWidget(m_Alignment);
   layout->addWidget(m_Selection);
@@ -2097,26 +2608,33 @@ void SystemTraceViewer::loadTraceFrom(const QString &path)
   // Fill the informational side panels. These are static for a given import, so they are not
   // touched on every frame change.
   m_Series->clear();
-  for(const TraceTrack &track : m_Trace.tracks)
+  for(int i = 0; i < m_Trace.tracks.size(); i++)
   {
+    const TraceTrack &track = m_Trace.tracks[i];
+    QListWidgetItem *item = NULL;
+
     if(track.kind == TraceTrackKind::Counter)
     {
       QString unit;
       if(track.counterSeries >= 0 && track.counterSeries < m_Trace.series.size())
         unit = m_Trace.series[track.counterSeries].unit;
 
-      m_Series->addItem(unit.isEmpty()
-                            ? tr("Metric: %1").arg(track.name)
-                            : tr("Metric: %1 [%2]").arg(track.name, unit));
+      item = new QListWidgetItem(unit.isEmpty()
+                                     ? tr("Metric: %1").arg(track.name)
+                                     : tr("Metric: %1 [%2]").arg(track.name, unit));
     }
     else
     {
-      m_Series->addItem(tr("Track: %1 (%2 spans)%3")
-                            .arg(track.name)
-                            .arg(track.spans.size())
-                            .arg(track.group.isEmpty() ? QString()
-                                                       : tr(" in %1").arg(track.group)));
+      item = new QListWidgetItem(tr("Track: %1 (%2 spans)%3")
+                                     .arg(track.name)
+                                     .arg(track.spans.size())
+                                     .arg(track.group.isEmpty()
+                                              ? QString()
+                                              : tr(" in %1").arg(track.group)));
     }
+
+    item->setData(Qt::UserRole, i);
+    m_Series->addItem(item);
   }
 
   // A trace that carried only counters has no lanes, so the list falls back to the series it does

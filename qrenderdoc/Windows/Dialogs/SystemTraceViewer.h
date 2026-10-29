@@ -34,6 +34,7 @@
 #include "Code/SystemTrace.h"
 #include "Code/SystemTraceCorrelation.h"
 
+class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -168,6 +169,14 @@ private:
   QToolButton *m_ModeSelect = NULL;
   QToolButton *m_ModePan = NULL;
   QToolButton *m_ModeZoom = NULL;
+
+  // Lane visibility controls. A phone trace has several hundred thread lanes; these are the means
+  // of narrowing that to the handful a user is actually looking at, matching how Snapdragon
+  // Profiler's flow view is driven from a metric selection instead of from every thread.
+  QLineEdit *m_TrackFilter = NULL;
+  QCheckBox *m_ActiveOnly = NULL;
+  QPushButton *m_CollapseGroups = NULL;
+  QPushButton *m_ExpandGroups = NULL;
 
   // Device capture controls. The log is kept visible after the capture finishes because every
   // command the driver issued and every tool result is recorded there: a failure is diagnosable
