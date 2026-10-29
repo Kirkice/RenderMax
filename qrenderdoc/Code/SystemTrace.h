@@ -154,10 +154,14 @@ struct TraceTrack
   int counterSeries = -1;
   // Display unit for a counter lane, copied from the series so the header can show it.
   QString unit;
-  // CPU index for a Cpu lane, or -1.
+  // CPU index for a Cpu lane, and for the idle thread's lane - the kernel's idle thread reports tid
+  // 0 on every CPU, so its lane belongs to one CPU and is named for it. -1 otherwise.
   int cpu = -1;
   // True when the lane's spans are atrace marks rather than scheduler slices.
   bool atrace = false;
+  // True for the kernel's idle thread. It is a lane per CPU and it is not work: ranking and capping
+  // treat it as the least interesting lane so that idle cannot crowd real threads out of a group.
+  bool idle = false;
 };
 
 // Aggregated scheduler-state time for one thread. Values are measured independently over the trace
@@ -237,8 +241,19 @@ struct SystemTrace
   // Sum scheduler state per tid from the same spans the timeline draws. CPU scheduler lanes are
   // excluded because they duplicate each thread's running interval; metadata/atrace-only lanes
   // with no scheduler state are omitted.
-  QVector<TraceThreadTime> ThreadTimes() const;
+  //
+  // `windowBeginSec`/`windowEndSec` clip every interval to that window before summing, which is what
+  // turns the table from "what this capture did" into "what this frame did". An empty window
+  // (`windowEndSec <= windowBeginSec`) aggregates the whole trace.
+  QVector<TraceThreadTime> ThreadTimes(double windowBeginSec = 0.0,
+                                       double windowEndSec = 0.0) const;
 };
+
+// Render the thread-time table as CSV, one row per thread: the same file the viewer's
+// "Export CSV..." button writes. `windowSec` is what the percentage columns are shares of, so the
+// file states the same percentages the table showed. Lives here rather than in the dialog so the
+// exported text is covered by the importer tests instead of only by clicking a button.
+QString FormatThreadTimeCsv(const QVector<TraceThreadTime> &rows, double windowSec);
 
 // Parse a trace in the documented JSON-lines interchange. This function never throws and never
 // asserts: on any failure it returns an invalid SystemTrace whose `warnings` explain why.
@@ -286,3 +301,12 @@ SystemTrace ImportSystraceText(const QString &path);
 // Chrome Trace Event Format, anything else as systrace text. `traceconv` can write either, so the
 // caller does not have to know which one it asked for.
 SystemTrace ImportSystemTraceFile(const QString &path);
+
+// The ftrace events the systrace importer understands, one line per event:
+// `"sched_switch (thread slice) - scheduled interval, per CPU"`. The importer consults a single table
+// of these, so this is the authoritative answer to "would this trace's events be drawn", and the
+// Warnings tab quotes its size next to the events that were not recognised.
+QStringList FtraceEventInventory();
+
+// The names alone, for callers that only need to check a specific event type is supported.
+QStringList FtraceEventNames();

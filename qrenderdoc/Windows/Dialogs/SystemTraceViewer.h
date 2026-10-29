@@ -133,6 +133,11 @@ private:
   // derived from spans rather than maintained by the parser, so JSON and systrace imports use the
   // exact same accounting and the table cannot drift from what the timeline draws.
   void updateThreadTime();
+  // The trace-time extent of the frame currently correlated with the capture, for clipping the
+  // thread-time table to it. False when there is no capture or the frame was not matched.
+  bool frameWindow(double &beginSec, double &endSec) const;
+  // Write the thread-time rows currently shown, percentages included, as CSV.
+  void exportThreadTime();
 
   void updateHighlight();
   // Draw the imported series without any frame overlay (no capture open, so nothing to align to).
@@ -155,6 +160,13 @@ private:
   QListWidget *m_Series = NULL;
   QTableWidget *m_Frames = NULL;
   QTableWidget *m_ThreadTime = NULL;
+  QCheckBox *m_ThreadTimeFrame = NULL;
+  QLabel *m_ThreadTimeCaption = NULL;
+  QPushButton *m_ThreadTimeExport = NULL;
+  // The rows behind the table, kept for export so the file matches what is on screen.
+  QVector<TraceThreadTime> m_ThreadTimeRows;
+  // Seconds the percentages are shares of: the frame window when clipping, else the whole trace.
+  double m_ThreadTimeWindowSec = 0.0;
   QLabel *m_Alignment = NULL;
   QLabel *m_Selection = NULL;
   QLabel *m_Status = NULL;
