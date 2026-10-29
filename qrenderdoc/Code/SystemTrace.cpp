@@ -1598,6 +1598,35 @@ void ConsumeClockSetRate(const SystraceRecord &rec, ChromeTraceBuilder &builder,
                     -1, rec.timeSec, match.captured(2).toDouble() / 1.0e6);
 }
 
+// `kgsl_pwrlevel: d_name=kgsl-3d0 gpu_id=0 active_pwrlevel=3 freq=257000000`. The GPU's operating
+// point, which is the only GPU frequency source the kernel offers: the GPU clock is not part of the
+// common clock framework on these SoCs, so it never appears as a `clk_set_rate` in `Clocks`.
+//
+// Only the `freq=` field is read, by name, and the rest of the payload is ignored. That is
+// deliberate: the surrounding fields differ between KGSL releases, but the frequency is what the
+// event exists to report, so matching it by name survives those differences where a positional
+// pattern would silently parse the wrong column. A payload without `freq=` is counted as malformed
+// rather than guessed at.
+//
+// The value is in Hz and is published in MHz, matching `cpu_frequency` so a GPU and a CPU lane can
+// be compared without the reader converting one of them.
+void ConsumeGpuPwrLevel(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
+{
+  static const QRegularExpression pattern(QStringLiteral("freq=(\\d+)"));
+
+  const QRegularExpressionMatch match = pattern.match(rec.payload);
+  if(!match.hasMatch())
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  const double mhz = match.captured(1).toDouble() / 1.0e6;
+
+  AddSystraceSample(builder, state, QObject::tr("GPU Frequency"), QStringLiteral("MHz"), true,
+                    QObject::tr("GPU"), -1, rec.timeSec, mhz);
+}
+
 // `clk_enable: name=gcc_ufs_phy_axi_clk_src` / `clk_disable: name=...`. A rate series says how fast a
 // clock runs; this says whether anyone was using it, which is what explains a long clock-gated stall
 // on a peripheral (storage, display) that never shows up as CPU work.
@@ -2066,6 +2095,7 @@ const FtraceEventSpec kFtraceEvents[] = {
     {"workqueue_execute_end", NULL, FtraceOutput::WorkqueueSlice, &ConsumeWorkqueueEnd,
      "closes the work item interval"},
     {"cpu_frequency", NULL, FtraceOutput::CpuLevel, &ConsumeCpuFrequency, "CPU frequency level"},
+    {"kgsl_pwrlevel", NULL, FtraceOutput::Level, &ConsumeGpuPwrLevel, "GPU frequency level"},
 
     // Understood, but nothing to draw: they are point events with no interval of their own, and
     // reporting them as unmodelled would bury the events that really are missing.

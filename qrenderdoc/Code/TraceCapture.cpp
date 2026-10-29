@@ -281,7 +281,7 @@ void PersistCaptureLog(TraceCaptureResult &result)
 
 }    // anonymous namespace
 
-QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
+QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb, bool includeGpuClock)
 {
   // Every data source and event named here is part of the standard Android Perfetto surface, so
   // the config does not assume a vendor-specific probe or a rooted device. The events chosen are the
@@ -317,6 +317,7 @@ QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
              "            ftrace_events: \"sched/task_newtask\"\n"
              "            ftrace_events: \"sched/task_rename\"\n"
              "            ftrace_events: \"power/cpu_frequency\"\n"
+             "%3"
              "            ftrace_events: \"power/cpu_idle\"\n"
              "            ftrace_events: \"power/suspend_resume\"\n"
              "            ftrace_events: \"clk/clk_set_rate\"\n"
@@ -368,7 +369,10 @@ QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
              "    }\n"
              "}\n")
       .arg(durationMs)
-      .arg(bufferSizeKb);
+      .arg(bufferSizeKb)
+      .arg(includeGpuClock
+               ? QStringLiteral("            ftrace_events: \"kgsl/kgsl_pwrlevel\"\n")
+               : QString());
 }
 
 TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QString &url,
@@ -390,6 +394,9 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   Log(result, QStringLiteral("device: %1 / protocol %2")
                   .arg(url, ToQStringDisplay(protocol->GetProtocolName())));
 
+  // Filled in by the GPU clock probe below; the default config is built from it.
+  bool includeGpuClock = false;
+
   // -----------------------------------------------------------------------------------------------
   // Step 1: probe perfetto. A device without it cannot be traced by this path at all, and saying so
   // up front is far more useful than a failure part-way through the pipeline.
@@ -410,6 +417,55 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
     }
 
     Log(result, QStringLiteral("perfetto: %1").arg(Summarise(ToQStringDisplay(out), 200)));
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Step 1b: probe whether this device will report a GPU clock. This decides whether
+  // `kgsl/kgsl_pwrlevel` goes into the config, so it has to run before the config is written.
+  //
+  // Two independent gates are checked, because either one alone is misleading:
+  //   * the sysfs node `gpuclk` is what any userland tool reads. If the shell user cannot read it,
+  //     the GPU clock is not published to userland at all.
+  //   * `traced_probes` may still be refused even when the node is readable, because the KGSL
+  //     tracepoint's format file carries the `debugfs_tracing_debug` label. That failure is silent
+  //     from Perfetto's point of view - it cannot decode the event so it records nothing - which is
+  //     why the recording only asks for the event when the probe succeeded.
+  // -----------------------------------------------------------------------------------------------
+  {
+    rdcstr gpuClkOut;
+    const ResultDetails gpuClk = protocol->ExecCommand(
+        urlStr, QStringLiteral("cat /sys/class/kgsl/kgsl-3d0/gpuclk"), &gpuClkOut);
+
+    // A refused `cat` exits non-zero, and the protocol reports the reason on the failed result
+    // rather than on stdout, so both are consulted: the value from stdout, the reason from the
+    // error. Either one saying the node is not readable is enough.
+    const QString gpuClkText = ToQStringDisplay(gpuClkOut).trimmed();
+    const QString gpuClkError = gpuClk.OK() ? QString() : ToQStringDisplay(gpuClk.Message());
+    const QString gpuClkReason = gpuClkText.isEmpty() ? gpuClkError : gpuClkText;
+
+    const bool gpuClkReadable =
+        gpuClk.OK() && !gpuClkText.isEmpty() &&
+        !gpuClkReason.contains(QStringLiteral("Permission denied")) &&
+        !gpuClkReason.contains(QStringLiteral("No such file"));
+
+    if(gpuClkReadable)
+    {
+      includeGpuClock = true;
+      Log(result, QStringLiteral("GPU clock: %1 Hz (kgsl/kgsl_pwrlevel requested)")
+                      .arg(gpuClkText));
+    }
+    else
+    {
+      Log(result, QStringLiteral("GPU clock probe failed: %1").arg(Summarise(gpuClkReason, 200)));
+
+      result.warnings << QStringLiteral(
+          "No GPU clock lane: this device will not report the GPU frequency. "
+          "/sys/class/kgsl/kgsl-3d0/gpuclk was refused (%1), and the KGSL tracepoint that would "
+          "carry it is labelled debugfs_tracing_debug, which an Enforcing SELinux build does not "
+          "let traced_probes read. CPU frequency, idle residency, scheduling and atrace slices "
+          "are unaffected.")
+                             .arg(Summarise(gpuClkReason, 160));
+    }
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -473,9 +529,10 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   // who knows which counters they want is not limited to the default surface.
   // -----------------------------------------------------------------------------------------------
   {
-    const QString configText = opts.configText.isEmpty()
-                                   ? DefaultPerfettoConfig(opts.durationMs, opts.bufferSizeKb)
-                                   : opts.configText;
+    const QString configText =
+        opts.configText.isEmpty()
+            ? DefaultPerfettoConfig(opts.durationMs, opts.bufferSizeKb, includeGpuClock)
+            : opts.configText;
 
     QFile configFile(localConfig);
     if(!configFile.open(QIODevice::WriteOnly | QIODevice::Truncate))

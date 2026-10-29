@@ -102,6 +102,10 @@ struct TraceCaptureResult
   QString traceconvPath;
   // Non-empty only on failure, and always names the step that failed plus the tool's own output.
   QString error;
+  // Things the capture did not fail on but that make the resulting timeline incomplete, e.g. a
+  // device that will not report its GPU clock. Shown next to the trace so the absence of a lane is
+  // explained rather than left for the user to guess at.
+  QStringList warnings;
   // Every command issued and every tool result, in order. The UI shows this so a capture failure
   // is diagnosable from what actually ran rather than from a generic message.
   QStringList log;
@@ -111,7 +115,11 @@ struct TraceCaptureResult
 // switches, per-CPU frequency and idle residency, the atrace `gfx`/`sched` categories, and Android
 // system memory/CPU statistics. Every event name here is part of the standard Android ftrace
 // surface, so the config does not assume an Adreno- or vendor-specific probe exists.
-QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb);
+//
+// `includeGpuClock` adds the one vendor-shaped event, `kgsl/kgsl_pwrlevel`. It is off by default
+// because the probe in RunTraceCapture only turns it on when the device actually reports a GPU
+// clock; see the comment on that event in the implementation.
+QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb, bool includeGpuClock = false);
 
 // Runs the capture pipeline. Owns no state and must be called off the UI thread, because every
 // device command blocks until it completes. Never throws: every failure is returned in `error`

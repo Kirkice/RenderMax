@@ -369,6 +369,9 @@ public:
     m_ScrollY = 0;
     m_Hover = SpanRef();
     m_Selected = SpanRef();
+    m_HoverRow = -1;
+    m_HoverSeries = -1;
+    m_HoverText.clear();
     UpdateScrollBar();
     update();
   }
@@ -501,6 +504,10 @@ public:
   // Called when the mode changed from inside the timeline (the 1/2/3 shortcuts), so the toolbar
   // buttons can follow.
   std::function<void(TraceNavMode)> OnNavModeChanged;
+  // Called while the cursor is over a counter lane, with a readable "series = value unit" line, and
+  // with an empty string when it leaves. A counter lane is sampled measurement drawn as a curve: it
+  // has no elements to click and no axis, so this text is the only way to read a number off it.
+  std::function<void(const QString &)> OnHoverReadout;
 
 protected:
   void paintEvent(QPaintEvent *) override
@@ -653,7 +660,16 @@ protected:
       update();
     }
 
+    UpdateCounterHover(event->pos());
+
     QWidget::mouseMoveEvent(event);
+  }
+
+  void leaveEvent(QEvent *event) override
+  {
+    ClearCounterHover();
+
+    QWidget::leaveEvent(event);
   }
 
   void mouseReleaseEvent(QMouseEvent *event) override
@@ -1333,6 +1349,129 @@ private:
       m_Scroll->setValue(m_ScrollY);
   }
 
+  // The value a series holds at `t`: its most recent sample at or before that instant, plus the
+  // timestamp of that sample. A level series must never be interpolated - that would report a
+  // frequency the device never ran at - and for a sampled series the enclosing sample is the
+  // measurement that actually exists.
+  bool SampleHeldValue(const TraceSeries &series, double t, double &value,
+                       double &sampleTimeSec) const
+  {
+    if(series.samples.isEmpty())
+      return false;
+
+    if(t <= series.samples.first().timeSec)
+    {
+      value = series.samples.first().value;
+      sampleTimeSec = series.samples.first().timeSec;
+      return true;
+    }
+
+    int lo = 0;
+    int hi = series.samples.size() - 1;
+    int best = 0;
+
+    while(lo <= hi)
+    {
+      const int mid = (lo + hi) / 2;
+
+      if(series.samples[mid].timeSec <= t)
+      {
+        best = mid;
+        lo = mid + 1;
+      }
+      else
+      {
+        hi = mid - 1;
+      }
+    }
+
+    value = series.samples[best].value;
+    sampleTimeSec = series.samples[best].timeSec;
+    return true;
+  }
+
+  void ClearCounterHover()
+  {
+    if(m_HoverRow < 0 && m_HoverSeries < 0 && m_HoverText.isEmpty())
+      return;
+
+    m_HoverRow = -1;
+    m_HoverSeries = -1;
+    m_HoverText.clear();
+
+    if(OnHoverReadout)
+      OnHoverReadout(QString());
+
+    update();
+  }
+
+  // Resolves the counter lane under the cursor into a number. Repainting happens only when the
+  // held sample changes, not on every mouse move: the readout describes a sample, so a new pixel
+  // inside the same held interval cannot change it and would only cost a full timeline repaint.
+  void UpdateCounterHover(const QPoint &pos)
+  {
+    const QRectF rows = RowsRect();
+
+    if(m_Data.trace == NULL || !rows.contains(pos))
+    {
+      ClearCounterHover();
+      return;
+    }
+
+    const SystemTrace &trace = *m_Data.trace;
+    const int rowIndex = RowAt(double(pos.y() - rows.top()));
+
+    if(rowIndex < 0 || rowIndex >= m_Rows.size())
+    {
+      ClearCounterHover();
+      return;
+    }
+
+    const Row &row = m_Rows[rowIndex];
+    int seriesIndex = -1;
+
+    if(row.series >= 0)
+      seriesIndex = row.series;
+    else if(row.track >= 0 && row.track < trace.tracks.size() &&
+            trace.tracks[row.track].kind == TraceTrackKind::Counter)
+      seriesIndex = trace.tracks[row.track].counterSeries;
+
+    double value = 0.0;
+    double sampleTimeSec = 0.0;
+
+    if(seriesIndex < 0 || seriesIndex >= trace.series.size() ||
+       !SampleHeldValue(trace.series[seriesIndex], TimeAtX(pos.x()), value, sampleTimeSec))
+    {
+      ClearCounterHover();
+      return;
+    }
+
+    const TraceSeries &series = trace.series[seriesIndex];
+
+    const QString text =
+        series.unit.isEmpty()
+            ? QObject::tr("%1 = %2   (sample at %3)")
+                  .arg(series.name, FormatValue(value), FormatSeconds(sampleTimeSec))
+            : QObject::tr("%1 = %2 %3   (sample at %4)")
+                  .arg(series.name, FormatValue(value), series.unit,
+                       FormatSeconds(sampleTimeSec));
+
+    const bool rowChanged = rowIndex != m_HoverRow || seriesIndex != m_HoverSeries;
+    const bool textChanged = text != m_HoverText;
+
+    m_HoverRow = rowIndex;
+    m_HoverSeries = seriesIndex;
+    m_HoverTimeSec = sampleTimeSec;
+    m_HoverValue = value;
+    m_HoverText = text;
+
+    if(textChanged && OnHoverReadout)
+      OnHoverReadout(text);
+
+    if(rowChanged || textChanged)
+      update();
+  }
+
   SpanRef SpanAt(const QPoint &pos) const
   {
     SpanRef ref;
@@ -1707,8 +1846,10 @@ private:
     p.setClipRect(QRectF(rows.left(), rows.top(), rows.width(), rows.height()));
     p.translate(0, -m_ScrollY);
 
-    for(const Row &row : m_Rows)
+    for(int rowIndex = 0; rowIndex < m_Rows.size(); rowIndex++)
     {
+      const Row &row = m_Rows[rowIndex];
+
       if(row.top + row.height < m_ScrollY || row.top > m_ScrollY + rows.height())
         continue;
       if(row.header)
@@ -1727,7 +1868,8 @@ private:
         if(track.kind == TraceTrackKind::Counter && track.counterSeries >= 0 &&
            track.counterSeries < trace.series.size())
         {
-          PaintCounterLane(p, trace.series[track.counterSeries], row, track.counterSeries, t0, t1);
+          PaintCounterLane(p, trace.series[track.counterSeries], row, track.counterSeries, t0, t1,
+                           rowIndex);
         }
         else
         {
@@ -1738,14 +1880,14 @@ private:
       }
 
       if(row.series >= 0 && row.series < trace.series.size())
-        PaintCounterLane(p, trace.series[row.series], row, row.series, t0, t1);
+        PaintCounterLane(p, trace.series[row.series], row, row.series, t0, t1, rowIndex);
     }
 
     p.restore();
   }
 
   void PaintCounterLane(QPainter &p, const TraceSeries &series, const Row &row, int colourIndex,
-                        double t0, double t1)
+                        double t0, double t1, int rowIndex)
   {
     double vmin = row.counterRange ? row.counterMin : series.MinValue();
     double vmax = row.counterRange ? row.counterMax : series.MaxValue();
@@ -1755,6 +1897,18 @@ private:
 
     const double top = double(row.top) + 4.0;
     const double bottom = double(row.top + row.height) - 5.0;
+
+    const QRectF rows = RowsRect();
+    const QString unit = series.unit.isEmpty() ? QString() : QStringLiteral(" ") + series.unit;
+
+    // Without these two numbers the curve only says "higher than before". Per-lane rather than per-
+    // shared-axis on purpose: each counter has its own range, so a shared axis would flatten the
+    // small ones to a line.
+    p.setPen(DimText());
+    p.drawText(QRectF(rows.left() + 4.0, double(row.top) + 1.0, 140.0, 11.0),
+               Qt::AlignLeft | Qt::AlignTop, FormatValue(vmax) + unit);
+    p.drawText(QRectF(rows.left() + 4.0, double(row.top + row.height) - 12.0, 140.0, 11.0),
+               Qt::AlignLeft | Qt::AlignTop, FormatValue(vmin) + unit);
 
     QPolygonF poly;
     int first = 0;
@@ -1805,6 +1959,38 @@ private:
     p.setPen(QPen(SeriesColour(colourIndex), 1.4));
     p.setBrush(Qt::NoBrush);
     p.drawPolyline(poly);
+
+    if(rowIndex < 0 || rowIndex != m_HoverRow || m_HoverSeries < 0)
+      return;
+
+    // The value under the cursor, drawn where the eye already is. A tooltip would cover the curve
+    // it describes and the caption column is a whole panel away from the point being read.
+    const double x = XForTime(m_HoverTimeSec);
+    const double y = bottom - ((m_HoverValue - vmin) / (vmax - vmin)) * (bottom - top);
+
+    p.setPen(QPen(Highlight(), 1, Qt::DashLine));
+    p.drawLine(QPointF(x, double(row.top) + 1.0), QPointF(x, double(row.top + row.height) - 1.0));
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(SeriesColour(colourIndex));
+    p.drawRect(QRectF(x - 2.5, y - 2.5, 5.0, 5.0));
+    p.setBrush(Qt::NoBrush);
+
+    const QString label = FormatValue(m_HoverValue) + unit;
+    const double labelWidth = double(p.fontMetrics().width(label) + 8);
+    double labelX = x + 6.0;
+
+    if(labelX + labelWidth > rows.right() - 2.0)
+      labelX = x - 6.0 - labelWidth;
+
+    const QRectF box(labelX, qBound(rows.top() + 1.0, y - 7.0, rows.bottom() - 15.0), labelWidth,
+                     14.0);
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(SurfaceAlt());
+    p.drawRect(box);
+    p.setPen(Text());
+    p.drawText(box, Qt::AlignCenter, label);
   }
 
   void PaintSpanLane(QPainter &p, const TraceTrack &track, const Row &row, double t0, double t1)
@@ -2242,6 +2428,15 @@ private:
   SpanRef m_Hover;
   SpanRef m_Selected;
 
+  // Counter readout state: the row under the cursor, the series it draws, the value that series
+  // holds at the cursor, and the sample that value came from. Kept so a repaint draws the same
+  // number the caption was told about, instead of resolving it twice and risking a mismatch.
+  int m_HoverRow = -1;
+  int m_HoverSeries = -1;
+  double m_HoverTimeSec = 0.0;
+  double m_HoverValue = 0.0;
+  QString m_HoverText;
+
   bool m_RowsDirty = true;
 
   // Lane visibility state. Kept separate from m_Data because it describes the user's view of the
@@ -2388,6 +2583,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
     showElementFields(span, trackName);
   };
   m_Chart->OnNavModeChanged = [this](TraceNavMode mode) { setNavMode(mode); };
+  m_Chart->OnHoverReadout = [this](const QString &text) { m_HoverReadout->setText(text); };
 
   // '/' focuses the lane filter while the timeline has focus, the way SDP's filter entries are one
   // keystroke away. The shortcut is scoped to the timeline widget so that typing '/' inside the
@@ -2523,6 +2719,12 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   sideTabs->setMinimumWidth(180);
   sideTabs->setMaximumWidth(900);
 
+  // The counter value under the cursor. Placed directly above the alignment text because it is
+  // the same kind of readout, and because a painter-drawn number inside the timeline is invisible
+  // to assistive tooling.
+  m_HoverReadout = new QLabel(this);
+  m_HoverReadout->setWordWrap(true);
+
   m_Alignment = new QLabel(this);
   m_Alignment->setWordWrap(true);
 
@@ -2539,6 +2741,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   layout->addLayout(modeRow);
   layout->addLayout(filterRow);
   layout->addWidget(middle, 1);
+  layout->addWidget(m_HoverReadout);
   layout->addWidget(m_Alignment);
   layout->addWidget(m_Selection);
   layout->addWidget(m_Status);
@@ -2713,6 +2916,9 @@ void SystemTraceViewer::loadTraceFrom(const QString &path)
   if(m_ElementCaption)
     m_ElementCaption->setText(tr("No element selected"));
 
+  if(m_HoverReadout)
+    m_HoverReadout->clear();
+
   rebuild();
   updateStatusText();
 }
@@ -2808,6 +3014,23 @@ void SystemTraceViewer::captureTrace()
     // The captured timeline is a document the importer accepts as-is, so it is loaded through the
     // normal path: one code path for both captured and manually opened traces.
     loadTraceFrom(result.localTimelinePath);
+
+    // Anything the capture could not collect is listed beside the trace's own warnings, so a lane
+    // that is missing because the device refused to report it reads as a device limitation rather
+    // than as an importer that failed to parse something. loadTraceFrom() has just replaced the
+    // list, so these go in after it.
+    if(!result.warnings.isEmpty())
+    {
+      for(const QString &warning : result.warnings)
+        m_Warnings->addItem(tr("Capture: %1").arg(warning));
+
+      if(m_CaptureLog)
+      {
+        m_CaptureLog->appendPlainText(QStringLiteral("\nWarnings:"));
+        for(const QString &warning : result.warnings)
+          m_CaptureLog->appendPlainText(tr("  %1").arg(warning));
+      }
+    }
   });
 }
 
