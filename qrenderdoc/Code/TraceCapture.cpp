@@ -340,7 +340,11 @@ QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
              "            atrace_categories: \"res\"\n"
              "            atrace_categories: \"sync\"\n"
              "            atrace_categories: \"hal\"\n"
-             "            atrace_categories: \"workq\"\n"
+             // No "workq": on a non-rooted device traced_probes rejects the whole atrace session
+             // with 'category "workq" requires root privileges' and then enables no tags at all,
+             // so every app run silently loses tracing_mark_write - no userspace lanes and no frame
+             // boundaries. The `workqueue/workqueue_execute_*` ftrace events requested above are what
+             // the importer actually reads, and those do not need the atrace category.
              "            atrace_categories: \"power\"\n"
              "            atrace_apps: \"*\"\n"
              "        }\n"
