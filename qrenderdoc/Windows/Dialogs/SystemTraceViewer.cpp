@@ -304,8 +304,18 @@ public:
   // that name would shadow it (C4458).
   void SetData(const SystemTraceTimelineData &newData)
   {
+    const bool traceChanged = newData.trace != m_LastTrace;
     m_Data = newData;
-    RebuildRows();
+    if(traceChanged)
+      m_RowsDirty = true;
+    // The trace object is reassigned in the viewer, but the timeline receives the same member
+    // address each time. Rebuilding rows on every selection/hover repaint therefore rescans every
+    // span in the trace. Rows only change on a new import, Clear/ResetView, or a new annotation.
+    if(m_RowsDirty)
+    {
+      RebuildRows();
+      m_RowsDirty = false;
+    }
 
     // The view window is only reset when the trace changed. A redraw caused by an event or
     // selection change must keep the user's zoom and pan.
@@ -331,6 +341,7 @@ public:
   void Clear()
   {
     m_Data = SystemTraceTimelineData();
+    m_RowsDirty = true;
     m_Rows.clear();
     m_ContentHeight = 0;
     m_ScrollY = 0;
@@ -354,6 +365,7 @@ public:
 
     m_ResetPending = true;
     m_LastTrace = NULL;
+    m_RowsDirty = true;
 
     update();
   }
@@ -412,7 +424,10 @@ protected:
   void paintEvent(QPaintEvent *) override
   {
     QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing, true);
+    // The timeline contains many small rectangles. Anti-aliasing makes every one substantially
+    // more expensive while adding no information at this zoom level; text and the ruler remain
+    // crisp with the raster painter's normal integer coverage.
+    p.setRenderHint(QPainter::Antialiasing, false);
     p.fillRect(rect(), Surface());
 
     const QRectF rows = RowsRect();
@@ -718,6 +733,15 @@ private:
     // Index into SystemTrace::tracks, -1 for a group header, an annotation row, or a counter row
     // synthesised from a trace that carried no lanes.
     int track = -1;
+    // Prefix maximum of span end times. It lets hit-testing/rendering binary-search the first span
+    // that can overlap the visible window, while preserving correctness for an early long span that
+    // contains many later short spans.
+    QVector<double> maxEndPrefix;
+    // Counter value range, computed once when rows are rebuilt instead of rescanning all samples
+    // on every paint. `counterRange` distinguishes a real [0,0] range from no counter.
+    double counterMin = 0.0;
+    double counterMax = 0.0;
+    bool counterRange = false;
     // Index into SystemTrace::series for a synthesised counter row, otherwise -1.
     int series = -1;
     int top = 0;
@@ -911,6 +935,23 @@ private:
           row.height = track.kind == TraceTrackKind::Counter
                            ? kRowHeight
                            : qMax(kRowHeight, 6 + (qMin(8, maxDepth) + 1) * kSpanStep);
+          if(track.kind == TraceTrackKind::Counter && track.counterSeries >= 0 &&
+             track.counterSeries < trace.series.size())
+          {
+            row.counterMin = trace.series[track.counterSeries].MinValue();
+            row.counterMax = trace.series[track.counterSeries].MaxValue();
+            row.counterRange = true;
+          }
+          else if(track.kind != TraceTrackKind::Counter)
+          {
+            row.maxEndPrefix.reserve(track.spans.size());
+            double maxEnd = -HUGE_VAL;
+            for(const TraceSpan &span : track.spans)
+            {
+              maxEnd = qMax(maxEnd, span.endSec);
+              row.maxEndPrefix.push_back(maxEnd);
+            }
+          }
           m_Rows.push_back(row);
           y += row.height;
         }
@@ -937,6 +978,9 @@ private:
         row.series = i;
         row.top = y;
         row.height = kRowHeight;
+        row.counterMin = trace.series[i].MinValue();
+        row.counterMax = trace.series[i].MaxValue();
+        row.counterRange = true;
         m_Rows.push_back(row);
         y += kRowHeight;
       }
@@ -989,7 +1033,14 @@ private:
 
       const TraceTrack &track = m_Data.trace->tracks[row.track];
 
-      for(int i = 0; i < track.spans.size(); i++)
+      int first = 0;
+      if(!row.maxEndPrefix.isEmpty())
+      {
+        const auto it = std::lower_bound(row.maxEndPrefix.constBegin(), row.maxEndPrefix.constEnd(), t);
+        first = int(it - row.maxEndPrefix.constBegin());
+      }
+
+      for(int i = first; i < track.spans.size(); i++)
       {
         const TraceSpan &span = track.spans[i];
 
@@ -1177,7 +1228,9 @@ private:
     annotation.group = group;
     m_Annotations.push_back(annotation);
 
+    m_RowsDirty = true;
     RebuildRows();
+    m_RowsDirty = false;
     update();
   }
 
@@ -1199,6 +1252,8 @@ private:
     for(int i = 0; i < m_Rows.size(); i++)
     {
       const Row &row = m_Rows[i];
+      if(row.top + row.height < m_ScrollY || row.top > m_ScrollY + rows.height())
+        continue;
       const QRectF band(0, row.top, rightEdge, row.height);
 
       if(row.header)
@@ -1246,6 +1301,8 @@ private:
 
     for(const Row &row : m_Rows)
     {
+      if(row.top + row.height < m_ScrollY || row.top > m_ScrollY + rows.height())
+        continue;
       if(row.header)
         continue;
 
@@ -1282,21 +1339,31 @@ private:
   void PaintCounterLane(QPainter &p, const TraceSeries &series, const Row &row, int colourIndex,
                         double t0, double t1)
   {
-    double vmin = series.MinValue();
-    double vmax = series.MaxValue();
+    double vmin = row.counterRange ? row.counterMin : series.MinValue();
+    double vmax = row.counterRange ? row.counterMax : series.MaxValue();
 
     if(vmax <= vmin)
       vmax = vmin + 1.0;
 
     const double top = double(row.top) + 4.0;
     const double bottom = double(row.top + row.height) - 5.0;
-    const double span = qMax(1.0e-9, t1 - t0);
 
     QPolygonF poly;
-    for(const TraceSample &sample : series.samples)
+    int first = 0;
+    if(!series.samples.isEmpty())
     {
-      if(sample.timeSec < t0 - span)
-        continue;
+      const auto it = std::lower_bound(
+          series.samples.constBegin(), series.samples.constEnd(), t0,
+          [](const TraceSample &sample, double time) { return sample.timeSec < time; });
+      first = int(it - series.samples.constBegin());
+      // Keep one sample before the viewport so a step/curve remains connected at the left edge.
+      if(first > 0)
+        first--;
+    }
+
+    for(int i = first; i < series.samples.size(); i++)
+    {
+      const TraceSample &sample = series.samples[i];
       if(sample.timeSec > t1)
         break;
 
@@ -1334,7 +1401,14 @@ private:
 
   void PaintSpanLane(QPainter &p, const TraceTrack &track, const Row &row, double t0, double t1)
   {
-    for(int i = 0; i < track.spans.size(); i++)
+    int first = 0;
+    if(!row.maxEndPrefix.isEmpty())
+    {
+      const auto it = std::lower_bound(row.maxEndPrefix.constBegin(), row.maxEndPrefix.constEnd(), t0);
+      first = int(it - row.maxEndPrefix.constBegin());
+    }
+
+    for(int i = first; i < track.spans.size(); i++)
     {
       const TraceSpan &span = track.spans[i];
 
@@ -1346,12 +1420,20 @@ private:
 
       const double xa = XForTime(span.beginSec);
       const double xb = XForTime(span.endSec);
-      const double w = qMax(1.5, xb - xa);
-
-      const QRectF box(xa, double(row.top) + 3.0 + span.depth * kSpanStep, w, double(kSpanHeight));
+      const double rawWidth = xb - xa;
 
       const bool selected = (m_Selected.track == row.track && m_Selected.span == i);
       const bool hovered = (m_Hover.track == row.track && m_Hover.span == i);
+
+      // At the full 5-second view a Pixel trace can contain hundreds of thousands of scheduler
+      // slices. Sub-pixel slices cannot be distinguished by the raster display, but drawing each
+      // rounded rectangle still costs a painter operation. Keep selected/hovered elements visible;
+      // dense unselected slices are omitted until zoom makes them at least one pixel wide.
+      if(track.spans.size() > 2000 && rawWidth < 1.0 && !selected && !hovered)
+        continue;
+
+      const double w = qMax(1.5, rawWidth);
+      const QRectF box(xa, double(row.top) + 3.0 + span.depth * kSpanStep, w, double(kSpanHeight));
 
       QColor base = SpanColour(span.category);
       if(hovered)
@@ -1420,6 +1502,8 @@ private:
     for(int i = 0; i < m_Rows.size(); i++)
     {
       const Row &row = m_Rows[i];
+      if(row.top + row.height < m_ScrollY || row.top > m_ScrollY + rows.height())
+        continue;
 
       // Group headers are painted by PaintLanes across the full width, label included, and that
       // label starts inside this column. They are left alone so the label survives.
@@ -1716,6 +1800,8 @@ private:
 
   SpanRef m_Hover;
   SpanRef m_Selected;
+
+  bool m_RowsDirty = true;
 
   bool m_CaliperASet = false;
   bool m_CaliperBSet = false;
