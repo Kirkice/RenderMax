@@ -1025,6 +1025,9 @@
     <ClInclude Include="$(IntDir)generated\ui_BufferFormatSpecifier.h">
       <Filter>Generated Files</Filter>
     </ClInclude>
+    <ClInclude Include="Windows\SceneViewer.h">
+      <Filter>Windows</Filter>
+    </ClInclude>
     <ClInclude Include="$(IntDir)generated\ui_BufferViewer.h">
       <Filter>Generated Files</Filter>
     </ClInclude>

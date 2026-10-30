@@ -203,6 +203,21 @@ void ReplayOutput::SetTextureDisplay(const TextureDisplay &o)
   }
 }
 
+bool ReplayOutput::SetSceneCamera(uint32_t anchor, const FloatVector &translation,
+                                   const FloatVector &rotation, bool enabled, uint32_t endEvent)
+{
+  CHECK_REPLAY_THREAD();
+  m_SceneEnabled = enabled;
+  m_SceneAnchor = anchor;
+  m_SceneEnd = endEvent ? endEvent : m_EventID;
+  m_SceneTranslation = translation;
+  m_SceneRotation = rotation;
+  m_MainOutput.dirty = true;
+  if(m_pController->GetAPIProperties().pipelineType != GraphicsAPI::OpenGL)
+    return false;
+  return true;
+}
+
 void ReplayOutput::SetMeshDisplay(const MeshDisplay &o)
 {
   CHECK_REPLAY_THREAD();
@@ -961,8 +976,15 @@ void ReplayOutput::DisplayTex()
     texDisplay.overlay = DebugOverlay::NoOverlay;
   }
 
+  bool scene = m_SceneEnabled && m_pDevice->BeginSceneReplay(
+      m_SceneAnchor, m_SceneEnd, m_SceneTranslation, m_SceneRotation);
+  // Scene replay changes the current context/FBO; restore the output binding before sampling.
+  if(scene)
+    m_pDevice->BindOutputWindow(m_MainOutput.outputID, false);
   m_pDevice->RenderTexture(texDisplay);
   m_pController->FatalErrorCheck();
+  if(scene)
+    m_pDevice->EndSceneReplay(m_EventID);
 
   ResourceId id = m_RenderData.texDisplay.resourceId;
 

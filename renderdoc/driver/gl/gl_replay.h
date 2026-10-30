@@ -303,6 +303,10 @@ public:
                          rdcstr &errors);
   void FreeCustomShader(ResourceId id);
 
+  uint32_t m_SceneCachedAnchor = 0;
+  bool BeginSceneReplay(uint32_t anchor, uint32_t end, const FloatVector &translation,
+                        const FloatVector &rotation) override;
+  void EndSceneReplay(uint32_t eventId) override;
   bool RenderTexture(TextureDisplay cfg);
   bool RenderTextureInternal(TextureDisplay cfg, TexDisplayFlags flags);
 

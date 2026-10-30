@@ -315,6 +315,8 @@ private:
   // loading a layout that omits it runs the orphan cleanup in LoadLayout, which force-closes and
   // *deletes* the widget. A raw pointer here would then be dangling.
   QPointer<SystemTraceViewer> m_SystemTraceViewer;
+  QPointer<QWidget> m_SceneViewer;
+  QWidget *ensureSceneViewer();
 
   // Creates the panel on first use and returns the existing one afterwards. Also used as the tool
   // window manager's create callback so a saved layout can re-create the tab; keeping it here (and

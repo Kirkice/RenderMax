@@ -1003,6 +1003,7 @@
     <ClInclude Include="$(IntDir)generated\ui_ComputeDebugSelector.h" />
     <ClInclude Include="$(IntDir)generated\ui_FindReplace.h" />
     <ClInclude Include="$(IntDir)generated\ui_BufferViewer.h" />
+    <ClInclude Include="Windows\SceneViewer.h" />
     <ClInclude Include="$(IntDir)generated\ui_CaptureDialog.h" />
     <ClInclude Include="$(IntDir)generated\ui_D3D11PipelineStateViewer.h" />
     <ClInclude Include="$(IntDir)generated\ui_D3D12PipelineStateViewer.h" />

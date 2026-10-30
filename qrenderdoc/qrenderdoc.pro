@@ -355,6 +355,7 @@ HEADERS += Code/CaptureContext.h \
     Widgets/Extended/RDTreeWidget.h \
     Widgets/BufferFormatSpecifier.h \
     Windows/BufferViewer.h \
+    Windows/SceneViewer.h \
     Widgets/Extended/RDTableView.h \
     Windows/DebugMessageView.h \
     Windows/LogView.h \

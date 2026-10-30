@@ -65,6 +65,7 @@
 #include "Windows/Dialogs/SettingsDialog.h"
 #include "Windows/Dialogs/SuggestRemoteDialog.h"
 #include "Windows/Dialogs/SystemTraceViewer.h"
+#include "Windows/SceneViewer.h"
 #include "Windows/Dialogs/TipsDialog.h"
 #include "Windows/Dialogs/UpdateDialog.h"
 #include "toolwindowmanager/ToolWindowManagerArea.h"
@@ -128,6 +129,15 @@ void MainWindow::MakeNetworkRequest(QUrl url, std::function<void(QByteArray)> su
 MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::MainWindow), m_Ctx(ctx)
 {
   ui->setupUi(this);
+  QAction *scene = ui->menu_Window->addAction(tr("Scene Viewer"));
+  connect(scene, &QAction::triggered, this, [this] {
+    QWidget *viewer = ensureSceneViewer();
+    if(!ui->toolWindowManager->toolWindows().contains(viewer))
+      ui->toolWindowManager->addToolWindow(viewer, mainToolArea(), ToolWindowManager::HideOnClose);
+    else if(!ui->toolWindowManager->areaOf(viewer))
+      ui->toolWindowManager->moveToolWindow(viewer, mainToolArea());
+    ToolWindowManager::raiseToolWindow(viewer);
+  });
 
   setProperty("ICaptureContext", QVariant::fromValue((void *)&ctx));
 
@@ -536,6 +546,8 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
     // by a menu action and must survive being hidden by its dock tab. Restoring a saved layout
     // asks for it by objectName, because a restored layout cannot reference a widget that was
     // never created this session, so re-create the very same retained instance here.
+    if(objectName == lit("sceneViewer") || objectName == lit("sceneView"))
+      return ensureSceneViewer();
     if(objectName == lit("systemTraceViewer"))
       return ensureSystemTraceViewer()->Widget();
 
@@ -3016,6 +3028,13 @@ void MainWindow::on_action_Open_Snapdragon_Profile_triggered()
     return;
 
   m_Ctx.OpenQCProfile(path);
+}
+
+QWidget *MainWindow::ensureSceneViewer()
+{
+  if(m_SceneViewer.isNull())
+    m_SceneViewer = new SceneViewer(m_Ctx, ui->toolWindowManager);
+  return m_SceneViewer.data();
 }
 
 SystemTraceViewer *MainWindow::ensureSystemTraceViewer()

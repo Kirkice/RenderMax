@@ -692,6 +692,21 @@ public:
   // replay interface
   void Initialise(GLInitParams &params, uint64_t sectionVersion, const ReplayOptions &opts);
   void ReplayLog(uint32_t startEventID, uint32_t endEventID, ReplayLogType replayType);
+  bool m_SceneReplay = false;
+  bool m_SceneDiscover = false;
+  struct SceneCandidate
+  {
+    float matrix[16];
+    uint64_t weight = 0;
+    uint32_t eventId = 0;
+  };
+  rdcarray<SceneCandidate> m_SceneCandidates;
+  float m_SceneReference[16] = {};
+  float m_SceneMatrix[16] = {};
+  void SceneUniforms(bool restore);
+  GLuint m_SceneProgram = 0;
+  GLint m_SceneLocation = -1;
+  float m_SceneSaved[16] = {};
   RDResult ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBuffers);
 
   GLuint GetFakeVAO0() { return m_Global_VAO0; }

@@ -5461,11 +5461,82 @@ RDResult WrappedOpenGL::ContextReplayLog(CaptureState readType, uint32_t startEv
   return ResultCode::Succeeded;
 }
 
+void WrappedOpenGL::SceneUniforms(bool restore)
+{
+  if(restore)
+  {
+    if(m_SceneLocation >= 0)
+      GL.glProgramUniform4fv(m_SceneProgram, m_SceneLocation, 4, m_SceneSaved);
+    m_SceneLocation = -1;
+    return;
+  }
+  m_SceneLocation = -1;
+  GLint program = 0;
+  GL.glGetIntegerv(eGL_CURRENT_PROGRAM, &program);
+  if(!program)
+    return;
+  GLint loc = GL.glGetUniformLocation(program, "hlslcc_mtx4x4unity_MatrixVP[0]");
+  if(loc < 0)
+    return;
+  for(int col = 0; col < 4; col++)
+  {
+    rdcstr name = StringFormat::Fmt("hlslcc_mtx4x4unity_MatrixVP[%d]", col);
+    GLint el = GL.glGetUniformLocation(program, name.c_str());
+    if(el < 0)
+      return;
+    GL.glGetUniformfv(program, el, m_SceneSaved + col * 4);
+  }
+  if(m_SceneDiscover)
+  {
+    // An affine/orthographic VP has constant homogeneous W: the xyz part of
+    // the last row is zero. A perspective camera has a nonzero last-row xyz.
+    float w = m_SceneSaved[3] * m_SceneSaved[3] +
+              m_SceneSaved[7] * m_SceneSaved[7] + m_SceneSaved[11] * m_SceneSaved[11];
+    const ActionDescription *a = GetAction(m_CurEventID);
+    if(!a || !std::isfinite(w) || w < 1.0e-8f) return;
+    // Depth-only shadow passes are not candidates for the scene colour camera.
+    bool colour = false;
+    for(ResourceId output : a->outputs) colour |= output != ResourceId();
+    if(!colour) return;
+    for(SceneCandidate &candidate : m_SceneCandidates)
+    {
+      bool match = true;
+      for(int i = 0; i < 16; i++)
+        match &= fabsf(candidate.matrix[i] - m_SceneSaved[i]) <=
+                 0.00001f * RDCMAX(1.0f, fabsf(candidate.matrix[i]));
+      if(match) { candidate.weight += uint64_t(a->numIndices) * RDCMAX(1U, a->numInstances); return; }
+    }
+    SceneCandidate candidate;
+    memcpy(candidate.matrix, m_SceneSaved, sizeof(candidate.matrix));
+    candidate.eventId = a->eventId;
+    candidate.weight = uint64_t(a->numIndices) * RDCMAX(1U, a->numInstances);
+    m_SceneCandidates.push_back(candidate);
+    return;
+  }
+  // Matrix identity across programs identifies the selected main camera, leaving shadow,
+  // reflection, UI and other cameras untouched. Never guess by replacing every mat4.
+  for(int i = 0; i < 16; i++)
+    if(fabsf(m_SceneSaved[i] - m_SceneReference[i]) >
+       0.00001f * RDCMAX(1.0f, fabsf(m_SceneReference[i])))
+      return;
+  m_SceneProgram = program;
+  m_SceneLocation = loc;
+  GL.glProgramUniform4fv(program, loc, 4, m_SceneMatrix);
+}
+
 bool WrappedOpenGL::ContextProcessChunk(ReadSerialiser &ser, GLChunk chunk)
 {
   m_AddedAction = false;
 
+  // Patch only around draw execution: recorded uniform uploads, shadow cameras and
+  // subsequent UI replay must never inherit the temporary scene camera.
+  const ActionDescription *sceneAction = (m_SceneReplay || m_SceneDiscover) ? GetAction(m_CurEventID) : NULL;
+  bool sceneDraw = sceneAction && (sceneAction->flags & ActionFlags::Drawcall);
+  if(sceneDraw)
+    SceneUniforms(false);
   bool success = ProcessChunk(ser, chunk);
+  if(sceneDraw)
+    SceneUniforms(true);
 
   if(!success)
     return false;

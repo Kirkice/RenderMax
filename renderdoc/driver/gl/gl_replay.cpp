@@ -3745,6 +3745,97 @@ void GLReplay::BuildTargetShader(ShaderEncoding sourceEncoding, const bytebuf &s
     id = m_pDriver->GetResourceManager()->GetResID(ShaderRes(m_pDriver->GetCtx(), shader));
 }
 
+bool GLReplay::BeginSceneReplay(uint32_t anchor, uint32_t end,
+                                 const FloatVector &translation, const FloatVector &rotation)
+{
+  UseReplayContext();
+  if(anchor == ~0U && m_SceneCachedAnchor != anchor)
+  {
+    m_pDriver->m_SceneCandidates.clear();
+    m_pDriver->m_SceneDiscover = true;
+    m_pDriver->ReplayLog(0, end, eReplay_Full);
+    m_pDriver->m_SceneDiscover = false;
+    const WrappedOpenGL::SceneCandidate *best = NULL;
+    for(const auto &candidate : m_pDriver->m_SceneCandidates)
+      if(!best || candidate.weight > best->weight) best = &candidate;
+    if(!best) return false;
+    memcpy(m_pDriver->m_SceneReference, best->matrix, sizeof(best->matrix));
+    RDCLOG("SceneViewer auto camera EID %u, geometry weight %llu", best->eventId,
+           (unsigned long long)best->weight);
+    m_SceneCachedAnchor = anchor;
+  }
+  if(m_SceneCachedAnchor != anchor)
+  {
+  m_pDriver->ReplayLog(0, anchor, eReplay_WithoutDraw);
+  GLint program = 0;
+  GL.glGetIntegerv(eGL_CURRENT_PROGRAM, &program);
+  if(!program)
+  {
+    m_pDriver->ReplayLog(0, end, eReplay_Full);
+    return false;
+  }
+  for(int col = 0; col < 4; col++)
+  {
+    rdcstr name = StringFormat::Fmt("hlslcc_mtx4x4unity_MatrixVP[%d]", col);
+    GLint loc = GL.glGetUniformLocation(program, name.c_str());
+    if(loc < 0)
+    {
+      m_pDriver->ReplayLog(0, end, eReplay_Full);
+      return false;
+    }
+    GL.glGetUniformfv(program, loc, m_pDriver->m_SceneReference + col * 4);
+  }
+  m_SceneCachedAnchor = anchor;
+  }
+  Matrix4f original;
+  for(int i = 0; i < 16; i++)
+    original[i] = m_pDriver->m_SceneReference[i];
+  // Unity exposes VP rather than a separate V. Right-multiplying a world-space rigid
+  // camera delta is equivalent to P * (V * delta), preserving captured projection.
+  // Recover the captured perspective eye from inverse(VP) * (0,0,1,0).
+  // Rotate around that eye, not around the world origin.
+  Matrix4f inv = original.Inverse();
+  Vec3f eye(0, 0, 0);
+  if(fabsf(inv[11]) > 1.0e-8f)
+    eye = Vec3f(inv[8] / inv[11], inv[9] / inv[11], inv[10] / inv[11]);
+  // Extract orthonormal captured camera axes from VP rows (perspective projection).
+  // Unity GL uses a right-handed view, looking along -Z. Position is expressed in
+  // this captured camera basis so WASD is independent of its world-space heading.
+  Vec3f right(original[0], original[4], original[8]);
+  Vec3f up(original[1], original[5], original[9]);
+  right.Normalise(); up.Normalise();
+  Vec3f back = right.Cross(up);
+  back.Normalise();
+  up = back.Cross(right);
+  Matrix4f basis = Matrix4f::Identity();
+  basis[0] = right.x; basis[1] = right.y; basis[2] = right.z;
+  basis[4] = up.x; basis[5] = up.y; basis[6] = up.z;
+  basis[8] = back.x; basis[9] = back.y; basis[10] = back.z;
+  Vec3f shift = right * translation.x + up * translation.y + back * translation.z;
+  Matrix4f delta = Matrix4f::Translation(eye)
+      .Mul(basis)
+      .Mul(Matrix4f::RotationX(-rotation.x).Mul(Matrix4f::RotationY(-rotation.y)))
+      .Mul(basis.Transpose())
+      .Mul(Matrix4f::Translation(Vec3f(-eye.x - shift.x, -eye.y - shift.y, -eye.z - shift.z)));
+  Matrix4f changed = original.Mul(delta);
+  if(translation.x == 0 && translation.y == 0 && translation.z == 0 &&
+     rotation.x == 0 && rotation.y == 0 && rotation.z == 0)
+    changed = original;
+  for(int i = 0; i < 16; i++)
+    m_pDriver->m_SceneMatrix[i] = changed[i];
+  m_pDriver->m_SceneReplay = true;
+  m_pDriver->ReplayLog(0, end, eReplay_Full);
+  m_pDriver->m_SceneReplay = false;
+  return true;
+}
+
+void GLReplay::EndSceneReplay(uint32_t eventId)
+{
+  UseReplayContext();
+  m_pDriver->m_SceneReplay = false;
+  m_pDriver->ReplayLog(0, eventId, eReplay_Full);
+}
+
 void GLReplay::ReplaceResource(ResourceId from, ResourceId to)
 {
   MakeCurrentReplayContext(&m_ReplayCtx);
