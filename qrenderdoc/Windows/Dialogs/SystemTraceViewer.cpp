@@ -2730,6 +2730,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   setObjectName(lit("systemTraceViewer"));
 
   m_TracePath = new QLineEdit(this);
+  m_TracePath->setObjectName(lit("tracePath"));
   m_TracePath->setReadOnly(true);
   m_TracePath->setPlaceholderText(tr("No trace loaded"));
 
@@ -2746,6 +2747,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   // roughly thirty megabytes per second on a busy device, and every one of those lines is parsed on
   // this machine afterwards.
   m_CaptureSeconds = new QSpinBox(this);
+  m_CaptureSeconds->setObjectName(lit("captureDuration"));
   m_CaptureSeconds->setRange(1, 10);
   m_CaptureSeconds->setValue(3);
   m_CaptureSeconds->setSuffix(tr(" s"));
@@ -2757,6 +2759,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   // only decides how much of what is available is worth recording, because the per-command events are
   // the only ones whose volume follows what the application is doing.
   m_CaptureDetail = new QComboBox(this);
+  m_CaptureDetail->setObjectName(lit("captureDetail"));
   m_CaptureDetail->addItem(tr("GPU: metrics"), int(GpuTraceDetail::Metrics));
   m_CaptureDetail->addItem(tr("GPU: metrics + command lanes"), int(GpuTraceDetail::Commands));
   m_CaptureDetail->addItem(tr("GPU: off"), int(GpuTraceDetail::Off));
@@ -2769,6 +2772,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
          "lanes only."));
 
   m_Capture = new QPushButton(tr("Capture Trace..."), this);
+  m_Capture->setObjectName(lit("primaryCaptureButton"));
 
   connect(browse, &QPushButton::clicked, this, [this] { browseForTrace(); });
   connect(reload, &QPushButton::clicked, this, [this] { reloadTrace(); });
@@ -2824,6 +2828,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   // question being asked, so the panel exposes the same three narrowing tools SDP's flow view has:
   // a text filter, "only what happens in this window", and collapsing by group.
   m_TrackFilter = new QLineEdit(this);
+  m_TrackFilter->setObjectName(lit("trackFilter"));
   m_TrackFilter->setClearButtonEnabled(true);
   m_TrackFilter->setPlaceholderText(tr("Filter tracks, e.g. Unity -idle"));
   m_TrackFilter->setToolTip(
@@ -3006,6 +3011,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   // the same kind of readout, and because a painter-drawn number inside the timeline is invisible
   // to assistive tooling.
   m_HoverReadout = new QLabel(this);
+  m_HoverReadout->setObjectName(lit("traceReadout"));
   m_HoverReadout->setWordWrap(true);
 
   m_Alignment = new QLabel(this);
@@ -3015,11 +3021,17 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   m_Selection->setWordWrap(true);
 
   m_Status = new QLabel(this);
+  m_Status->setObjectName(lit("traceStatus"));
   m_Status->setWordWrap(true);
 
   // No close button: the panel is closed through its dock tab, and hiding it via the tab keeps
   // the imported trace and the capture log alive for when it is re-opened.
   QVBoxLayout *layout = new QVBoxLayout(this);
+  layout->setContentsMargins(12, 10, 12, 10);
+  layout->setSpacing(7);
+  fileRow->setContentsMargins(0, 0, 0, 2);
+  modeRow->setContentsMargins(0, 0, 0, 0);
+  filterRow->setContentsMargins(0, 0, 0, 4);
   layout->addLayout(fileRow);
   layout->addLayout(modeRow);
   layout->addLayout(filterRow);

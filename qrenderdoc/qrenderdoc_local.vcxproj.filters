@@ -666,6 +666,9 @@
     <ClCompile Include="Styles\RDTweakedNativeStyle\RDTweakedNativeStyle.cpp">
       <Filter>Styles\RDTweakedNativeStyle</Filter>
     </ClCompile>
+    <ClCompile Include="Styles\UEStyle\UEStyle.cpp">
+      <Filter>Styles</Filter>
+    </ClCompile>
     <ClCompile Include="Styles\StyleData.cpp">
       <Filter>Styles</Filter>
     </ClCompile>

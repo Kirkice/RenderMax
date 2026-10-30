@@ -27,6 +27,7 @@
 #include "Code/QRDUtils.h"
 #include "RDStyle/RDStyle.h"
 #include "RDTweakedNativeStyle/RDTweakedNativeStyle.h"
+#include "UEStyle/UEStyle.h"
 
 namespace StyleData
 {
@@ -48,6 +49,12 @@ const ThemeDescriptor availStyles[] = {
         QApplication::translate("RDStyle",
                                 "Native: uses the built-in Qt native widgets for your platform."),
         []() { return new RDTweakedNativeStyle(NULL); }),
+
+    ThemeDescriptor(
+        lit("UE"), QApplication::translate("RDStyle", "Unreal Editor"),
+        QApplication::translate("RDStyle",
+                                "Unreal Editor: dark Slate/Starship-inspired colours with the existing RenderMax layout and controls."),
+        []() { return new UEStyle(); }),
 };
 
 const int numAvailable = sizeof(availStyles) / sizeof(ThemeDescriptor);

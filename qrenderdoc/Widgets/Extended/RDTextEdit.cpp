@@ -87,6 +87,7 @@ void RDTextEdit::setDropDown()
     return;
 
   m_Drop = new RDTextEditDropDownButton(this);
+  m_Drop->setObjectName(lit("rdTextEditDropDown"));
   m_Drop->setToolButtonStyle(Qt::ToolButtonIconOnly);
   m_Drop->setArrowType(Qt::DownArrow);
   QObject::connect(m_Drop, &QToolButton::clicked, [this]() { emit(dropDownClicked()); });
@@ -95,10 +96,12 @@ void RDTextEdit::setDropDown()
   opt.rect = rect();
   QRect r = style()->subControlRect(QStyle::CC_ComboBox, &opt, QStyle::SC_ComboBoxArrow, this);
 
+  // Use the style-provided geometry so the editor remains compact and its text metrics stay
+  // aligned with the surrounding Event Browser controls.
   setViewportMargins(0, 0, r.width(), 0);
   setMinimumHeight(r.height() + 2);
 
-  m_Drop->setFixedSize(r.size());
+  m_Drop->setFixedWidth(r.width());
 
   updateDropButtonGeometry();
 }
@@ -384,9 +387,10 @@ void RDTextEdit::updateDropButtonGeometry()
 {
   if(m_Drop)
   {
+    // Follow the editor's actual content height, not the size sampled before layout.
+    // Otherwise the button can extend below a compact single-line editor and be clipped.
     QRect r = contentsRect();
-    r.setLeft(r.right() - m_Drop->rect().width() + 1);
-    r.setSize(m_Drop->size());
+    r.setLeft(qMax(r.left(), r.right() - m_Drop->width() + 1));
     m_Drop->setGeometry(r);
   }
 }
@@ -420,17 +424,19 @@ void RDTextEditDropDownButton::paintEvent(QPaintEvent *e)
 
   initStyleOption(&butt);
 
-  QStyleOptionComboBox opt;
+  // This widget already IS the arrow subcontrol. Painting a whole combo box into
+  // its small rectangle computes a second, inset arrow region and can clip the glyph.
+  if(butt.state & QStyle::State_MouseOver)
+  {
+    QColor hover = butt.palette.color(QPalette::Highlight);
+    hover.setAlpha(50);
+    p.fillRect(rect(), hover);
+  }
 
-  opt.direction = butt.direction;
-  opt.rect = butt.rect;
-  opt.fontMetrics = butt.fontMetrics;
-  opt.palette = butt.palette;
-  opt.state = butt.state;
-  opt.subControls = QStyle::SC_ComboBoxArrow;
-  opt.activeSubControls = QStyle::SC_ComboBoxArrow;
-  opt.editable = true;
-  opt.frame = false;
-
-  style()->drawComplexControl(QStyle::CC_ComboBox, &opt, &p, this);
+  QStyleOption arrow;
+  arrow.palette = butt.palette;
+  arrow.state = butt.state;
+  arrow.direction = butt.direction;
+  arrow.rect = QStyle::alignedRect(butt.direction, Qt::AlignCenter, QSize(10, 10), rect());
+  style()->drawPrimitive(QStyle::PE_IndicatorArrowDown, &arrow, &p, this);
 }
