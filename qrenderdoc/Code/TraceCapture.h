@@ -66,6 +66,27 @@ class QObject;
 //     visible as evidence instead of being smoothed over.
 // ---------------------------------------------------------------------------------------------
 
+// How much of the GPU's own ftrace surface to record. This is a size/coverage trade-off, not a
+// capability one: every tracepoint below is requested only when the probe found it present and
+// enable-able, so asking for more than a device can give simply yields fewer lanes.
+//
+// The cost is dominated by the command and fence-wait events, which fire once per submission and
+// once per fence. A 5 s capture of a running 3D application produces tens of thousands of them, and
+// `traceconv systrace` then writes a text file several times larger than the metrics-only one, all
+// of which the host importer has to parse. The default therefore stops at the metrics that answer
+// "how busy was the GPU", and the per-command lanes are opt-in.
+enum class GpuTraceDetail
+{
+  // No GPU events at all: the smallest trace, schedule and CPU lanes only.
+  Off = 0,
+  // Frequency, utilisation, temperature, thermal frequency cap and throttling state. These are
+  // sampled or event-driven at a rate the device chooses, so they add tens of events per second.
+  Metrics = 1,
+  // Metrics plus the per-cmdbatch and per-fence intervals, which become the GPU Commands and GPU
+  // Waits lanes. Opt-in, because they dominate the size of the recorded trace.
+  Commands = 2,
+};
+
 struct TraceCaptureOptions
 {
   // Perfetto textproto config. When empty, DefaultPerfettoConfig() is used.
@@ -73,6 +94,9 @@ struct TraceCaptureOptions
   // Recording length and ring buffer size baked into the default config. Ignored when
   // `configText` is supplied, because then the config owns those values.
   int durationMs = 5000;
+  // Which GPU tracepoints to ask for. The probe decides what is actually available; this decides
+  // what is worth the space among what is available.
+  GpuTraceDetail gpuDetail = GpuTraceDetail::Metrics;
   // A ring buffer rather than a filling one, so a long recording keeps its tail instead of stopping
   // at the ceiling. The default leaves room for the scheduler, interrupt, clock and atrace streams
   // the config enables on a busier device.
@@ -111,6 +135,9 @@ struct GpuTraceCapabilities
   // into the recording config: an event that is requested and cannot be enabled records nothing and
   // reports no error, which looks identical to a device that has no GPU.
   QStringList eventNames;
+  // The detail level this probe was run for. Kept in the result so a trace without command lanes can
+  // be read back as either "they were not asked for" or "the device refused them".
+  GpuTraceDetail requestedDetail = GpuTraceDetail::Metrics;
   // Raw probe values, kept verbatim for the capture log.
   QString gpuClock;
   QString gpuBusyPercent;

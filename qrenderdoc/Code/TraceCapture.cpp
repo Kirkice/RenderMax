@@ -87,25 +87,50 @@ QString RootedCommand(bool root, const QString &command)
 }
 
 // The KGSL and thermal tracepoints that make up the GPU lane group, with the reason each one is
-// wanted. They are requested only when the probe found the event present and enable-able: an event
-// that is requested but cannot be enabled records nothing and reports no error, which is
-// indistinguishable from a device whose GPU never did anything.
+// wanted and the cheapest detail level that asks for it. They are requested only when the probe
+// found the event present and enable-able: an event that is requested but cannot be enabled records
+// nothing and reports no error, which is indistinguishable from a device whose GPU never did
+// anything.
+//
+// The `needs` column is what keeps a default capture small. The command and fence events are the
+// expensive ones -- one pair per submission, tens of thousands per second on a busy application --
+// so they are only requested when the caller asked for the command lanes explicitly.
 const struct
 {
   const char *event;
   const char *purpose;
+  GpuTraceDetail needs;
 } kGpuFtraceEvents[] = {
-    {"kgsl/kgsl_pwrlevel", "GPU clock"},
-    {"kgsl/kgsl_gpubusy", "GPU utilisation"},
-    {"kgsl/adreno_cmdbatch_submitted", "GPU command submission"},
-    {"kgsl/adreno_cmdbatch_retired", "GPU command retirement"},
-    {"kgsl/adreno_drawctxt_wait_start", "GPU fence waits"},
-    {"kgsl/adreno_drawctxt_wait_done", "GPU fence waits"},
-    {"kgsl/adreno_drawctxt_switch", "GPU context switches"},
-    {"thermal/thermal_query_temp", "GPU temperature"},
-    {"thermal/thermal_power_devfreq_limit", "GPU thermal frequency cap"},
-    {"thermal/cdev_update", "GPU throttling state"},
+    {"kgsl/kgsl_pwrlevel", "GPU clock", GpuTraceDetail::Metrics},
+    {"kgsl/kgsl_gpubusy", "GPU utilisation", GpuTraceDetail::Metrics},
+    {"kgsl/adreno_cmdbatch_submitted", "GPU command submission", GpuTraceDetail::Commands},
+    {"kgsl/adreno_cmdbatch_retired", "GPU command retirement", GpuTraceDetail::Commands},
+    {"kgsl/adreno_drawctxt_wait_start", "GPU fence waits", GpuTraceDetail::Commands},
+    {"kgsl/adreno_drawctxt_wait_done", "GPU fence waits", GpuTraceDetail::Commands},
+    {"kgsl/adreno_drawctxt_switch", "GPU context switches", GpuTraceDetail::Commands},
+    {"thermal/thermal_query_temp", "GPU temperature", GpuTraceDetail::Metrics},
+    {"thermal/thermal_power_devfreq_limit", "GPU thermal frequency cap", GpuTraceDetail::Metrics},
+    {"thermal/cdev_update", "GPU throttling state", GpuTraceDetail::Metrics},
 };
+
+// True when `detail` asks for an event that costs `needs` to record.
+bool DetailCovers(GpuTraceDetail detail, GpuTraceDetail needs)
+{
+  return int(detail) >= int(needs);
+}
+
+// Names the requested level for the capture log, so a trace with no command lanes can be read back
+// as "the level asked for them" or "the level did not" without consulting the UI.
+const char *GpuDetailName(GpuTraceDetail detail)
+{
+  switch(detail)
+  {
+    case GpuTraceDetail::Off: return "off";
+    case GpuTraceDetail::Metrics: return "metrics";
+    case GpuTraceDetail::Commands: return "metrics + command lanes";
+  }
+  return "unknown";
+}
 
 // Reads one device file and returns its trimmed contents, or an empty string when it could not be
 // read. The reason is logged rather than returned, because every caller treats "unreadable" the same
@@ -137,10 +162,23 @@ QString ReadDeviceFile(IDeviceProtocolController *protocol, const rdcstr &url, b
 // device can actually collect. Both halves need the same privilege, so they are probed together once
 // and the result decides the config.
 GpuTraceCapabilities ProbeGpuCapabilities(IDeviceProtocolController *protocol, const rdcstr &url,
-                                          bool root, TraceCaptureResult &result)
+                                          bool root, GpuTraceDetail detail,
+                                          TraceCaptureResult &result)
 {
   GpuTraceCapabilities gpu;
   gpu.rootAvailable = root;
+  gpu.requestedDetail = detail;
+
+  Log(result, QStringLiteral("GPU detail level: %1").arg(QLatin1String(GpuDetailName(detail))));
+
+  // The probe only asks about the events the requested level wants. An unnecessary `chmod` of a
+  // tracepoint that will not be requested is a device change this feature has no reason to make.
+  QStringList candidates;
+  for(const auto &entry : kGpuFtraceEvents)
+  {
+    if(DetailCovers(detail, entry.needs))
+      candidates << QLatin1String(entry.event);
+  }
 
   const QString kgsl = QStringLiteral("/sys/class/kgsl/kgsl-3d0/");
 
@@ -162,12 +200,8 @@ GpuTraceCapabilities ProbeGpuCapabilities(IDeviceProtocolController *protocol, c
   // root-owned mode 0644, so the probe can see the events exist and still be unable to turn any of
   // them on. `chmod` is the whole fix and it needs root, so it is attempted only when root is
   // available and the resulting writability is then measured rather than assumed.
-  QStringList candidates;
-  for(const auto &entry : kGpuFtraceEvents)
-    candidates << QLatin1String(entry.event);
-
   QStringList parts;
-  if(root)
+  if(root && !candidates.isEmpty())
   {
     parts << QStringLiteral(
         "chmod 666 /sys/kernel/tracing/events/kgsl/*/enable "
@@ -207,10 +241,15 @@ GpuTraceCapabilities ProbeGpuCapabilities(IDeviceProtocolController *protocol, c
   for(const auto &entry : kGpuFtraceEvents)
   {
     const QString name = QLatin1String(entry.event);
-    Log(result, QStringLiteral("tracepoint %1 (%2): %3")
-                    .arg(name, QLatin1String(entry.purpose),
-                         gpu.eventNames.contains(name) ? QStringLiteral("enabled")
-                                                       : QStringLiteral("unavailable")));
+
+    // An event this level did not ask for is not "unavailable": saying so would make a metrics-only
+    // capture look like it had lost the command lanes.
+    const QString state = !DetailCovers(detail, entry.needs)
+                              ? QStringLiteral("not requested at this detail level")
+                              : (gpu.eventNames.contains(name) ? QStringLiteral("enabled")
+                                                               : QStringLiteral("unavailable"));
+
+    Log(result, QStringLiteral("tracepoint %1 (%2): %3").arg(name, QLatin1String(entry.purpose), state));
   }
 
   Log(result, QStringLiteral("GPU probe: root=%1 sysfs=%2 perfcounter=%3 clock=%4 busy=%5 max=%6")
@@ -591,12 +630,20 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   //     its own user, and the file is root-owned mode 0644 - so a device can list the event as
   //     available and still record nothing for it, without any error anywhere.
   // -----------------------------------------------------------------------------------------------
-  result.gpu = ProbeGpuCapabilities(protocol, urlStr, root, result);
+  result.gpu = ProbeGpuCapabilities(protocol, urlStr, root, opts.gpuDetail, result);
   const GpuTraceCapabilities &gpu = result.gpu;
 
   // GPU lanes: the lanes exist exactly when their events were enabled, and the reason they do not is
   // reported rather than left as an unexplained absence from the timeline.
-  if(gpu.eventNames.isEmpty())
+  if(gpu.eventNames.isEmpty() && opts.gpuDetail == GpuTraceDetail::Off)
+  {
+    result.warnings << QStringLiteral(
+        "No GPU lanes: this capture was recorded with the GPU detail set to `off`, so no KGSL or "
+        "thermal tracepoint was requested. The trace is smaller as a result; choose `metrics` or "
+        "`metrics + command lanes` to record GPU frequency, utilisation, temperature and command "
+        "intervals.");
+  }
+  else if(gpu.eventNames.isEmpty())
   {
     result.warnings << QStringLiteral(
         "No GPU lanes: none of the KGSL/thermal tracepoints could be enabled on this device. The "
@@ -606,6 +653,14 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
                            .arg(gpu.rootAvailable ? QStringLiteral("root, but no event became "
                                                                    "writable")
                                                   : QStringLiteral("no root"));
+  }
+  else if(opts.gpuDetail == GpuTraceDetail::Metrics)
+  {
+    // Logged rather than warned about: this is the default level, so a warning would appear on every
+    // ordinary capture. It still needs to be said somewhere, because an empty GPU Commands lane group
+    // would otherwise read as a broken importer.
+    Log(result, QStringLiteral("GPU command and fence-wait lanes are not recorded at the `metrics` "
+                 "detail level; choose `metrics + command lanes` to include them"));
   }
 
   if(!gpu.perfcounterNode)

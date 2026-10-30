@@ -35,6 +35,7 @@
 #include "Code/SystemTraceCorrelation.h"
 
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -102,9 +103,17 @@ public:
 private:
   void browseForTrace();
   void reloadTrace();
-  // Two importers exist, so the format is chosen from the file itself: the JSON-lines interchange,
-  // or the Chrome Trace Event Format that a device capture produces.
+  // Starts an import on a worker thread: a phone capture's systrace text is large enough that parsing
+  // it on the UI thread froze the panel for minutes. The trace arrives through finishImport() on this
+  // object's thread.
   void loadTraceFrom(const QString &path);
+  // Applies a parsed trace, unless a newer load has superseded it (the serial is compared).
+  void finishImport(const SystemTrace &trace, const QString &path, uint64_t serial);
+  // Fills the side panels and the timeline from m_Trace. Always runs on the UI thread.
+  void applyImportedTrace(const QString &path);
+  // Keeps the record controls in step with the import state. Opening a different file stays allowed
+  // while an import runs: it supersedes the parse in flight instead of being refused.
+  void updateImportControls();
 
   // Record a system trace from the connected device. The capture is driven entirely through the
   // device protocol (ExecCommand / PushFile / PullFile), so it works on any device the protocol can
@@ -150,6 +159,15 @@ private:
   SystemTrace m_Trace;
   bool m_Loaded = false;
   TraceCorrelation m_Correlation;
+
+  // Import bookkeeping. The serial identifies the newest request, so a parse that finishes after the
+  // user has already opened a different file is discarded instead of overwriting it.
+  uint64_t m_ImportSerial = 0;
+  bool m_Importing = false;
+  QString m_ImportPath;
+  // Capture warnings waiting for the import that the capture triggered to finish, so they land next
+  // to the trace's own warnings rather than on the previous trace's list.
+  QStringList m_PendingCaptureWarnings;
 
   // Cache so a redraw does not need to re-fetch counters.
   QHash<uint32_t, double> m_FrameEventTimes;
@@ -199,6 +217,9 @@ private:
   // from what actually ran instead of from a single generic message.
   QPushButton *m_Capture = NULL;
   QSpinBox *m_CaptureSeconds = NULL;
+  // How much of the GPU's ftrace surface to record. Metrics only by default: the per-cmdbatch events
+  // are the ones that make a phone trace large enough to be slow to import.
+  QComboBox *m_CaptureDetail = NULL;
   QPlainTextEdit *m_CaptureLog = NULL;
   bool m_Capturing = false;
 };
