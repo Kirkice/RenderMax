@@ -106,11 +106,15 @@ private:
   // Starts an import on a worker thread: a phone capture's systrace text is large enough that parsing
   // it on the UI thread froze the panel for minutes. The trace arrives through finishImport() on this
   // object's thread.
-  void loadTraceFrom(const QString &path);
+  void loadTraceFrom(const QString &path, const QStringList &captureWarnings = QStringList());
+  // Starts one parser worker. Requests are serialized so superseded large imports do not all run
+  // concurrently.
+  void startImport(const QString &path, uint64_t serial, const QStringList &captureWarnings);
   // Applies a parsed trace, unless a newer load has superseded it (the serial is compared).
-  void finishImport(const SystemTrace &trace, const QString &path, uint64_t serial);
+  void finishImport(const SystemTrace &trace, const QString &path, uint64_t serial,
+                    const QStringList &captureWarnings);
   // Fills the side panels and the timeline from m_Trace. Always runs on the UI thread.
-  void applyImportedTrace(const QString &path);
+  void applyImportedTrace(const QString &path, const QStringList &captureWarnings);
   // Keeps the record controls in step with the import state. Opening a different file stays allowed
   // while an import runs: it supersedes the parse in flight instead of being refused.
   void updateImportControls();
@@ -164,10 +168,12 @@ private:
   // user has already opened a different file is discarded instead of overwriting it.
   uint64_t m_ImportSerial = 0;
   bool m_Importing = false;
+  bool m_ImportWorkerRunning = false;
   QString m_ImportPath;
-  // Capture warnings waiting for the import that the capture triggered to finish, so they land next
-  // to the trace's own warnings rather than on the previous trace's list.
-  QStringList m_PendingCaptureWarnings;
+  // At most one newest request waits behind the active parser. Its warnings travel with that request,
+  // so capture diagnostics can never be attached to an unrelated manually opened trace.
+  QString m_PendingImportPath;
+  QStringList m_PendingImportWarnings;
 
   // Cache so a redraw does not need to re-fetch counters.
   QHash<uint32_t, double> m_FrameEventTimes;

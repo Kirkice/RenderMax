@@ -3127,16 +3127,8 @@ SystemTrace ImportTraceFile(const QString &path)
   return SystemTrace();
 }
 
-void SystemTraceViewer::loadTraceFrom(const QString &path)
+void SystemTraceViewer::loadTraceFrom(const QString &path, const QStringList &captureWarnings)
 {
-  // Parsing a systrace is done on a worker thread. The importer is pure string work with no widget
-  // access, and a five-second phone capture converts to a text file well over a hundred megabytes:
-  // doing that on the UI thread froze the application for minutes, with no way to tell a slow
-  // import from a hung one. The result is delivered back to this object's thread and applied there.
-  //
-  // Re-entrancy: a second request supersedes the first instead of being refused. The superseded
-  // worker still finishes its parse (there is no cancellation token inside the importer) but its
-  // result is dropped on arrival, so the newest file the user picked is always the one that wins.
   const uint64_t serial = ++m_ImportSerial;
   m_Importing = true;
   m_ImportPath = path;
@@ -3147,23 +3139,34 @@ void SystemTraceViewer::loadTraceFrom(const QString &path)
   updateImportControls();
   updateStatusText();
 
+  // Do not start several hundred-megabyte parses concurrently. Keep only the newest request and
+  // start it when the current worker reports back; the warnings are part of that request as well.
+  if(m_ImportWorkerRunning)
+  {
+    m_PendingImportPath = path;
+    m_PendingImportWarnings = captureWarnings;
+    return;
+  }
+
+  startImport(path, serial, captureWarnings);
+}
+
+void SystemTraceViewer::startImport(const QString &path, uint64_t serial,
+                                    const QStringList &captureWarnings)
+{
+  m_ImportWorkerRunning = true;
   QPointer<QObject> guard(this);
 
-  LambdaThread *thread = new LambdaThread([path, serial, guard]() {
+  LambdaThread *thread = new LambdaThread([path, serial, captureWarnings, guard]() {
     SystemTrace trace = ImportTraceFile(path);
-
-    // The panel may have been closed while the file was being parsed. There is nothing to deliver
-    // the trace to then, and the parse result is not worth keeping alive for a widget that is gone.
     if(!guard)
       return;
 
-    GUIInvoke::call(guard, [trace, path, serial, guard]() {
-      // The panel is a QFrame without a Q_OBJECT macro, so qobject_cast is not available here; the
-      // guard is the only thing that can have gone away, and it is checked before the downcast.
+    GUIInvoke::call(guard, [trace, path, serial, captureWarnings, guard]() {
       if(guard.isNull())
         return;
-
-      static_cast<SystemTraceViewer *>(guard.data())->finishImport(trace, path, serial);
+      static_cast<SystemTraceViewer *>(guard.data())
+          ->finishImport(trace, path, serial, captureWarnings);
     });
   });
 
@@ -3173,27 +3176,36 @@ void SystemTraceViewer::loadTraceFrom(const QString &path)
 }
 
 void SystemTraceViewer::finishImport(const SystemTrace &trace, const QString &path,
-                                     uint64_t serial)
+                                     uint64_t serial, const QStringList &captureWarnings)
 {
-  // A newer load replaced this one while it was parsing. Dropping the stale result keeps the panel
-  // consistent with the file name it is showing.
+  m_ImportWorkerRunning = false;
+
+  // The result is stale, but a newer request is waiting. Start exactly that newest request; do not
+  // apply the old trace and do not let its capture warnings leak into the newer document.
   if(serial != m_ImportSerial)
+  {
+    if(!m_PendingImportPath.isEmpty())
+    {
+      const QString nextPath = m_PendingImportPath;
+      const QStringList nextWarnings = m_PendingImportWarnings;
+      m_PendingImportPath.clear();
+      m_PendingImportWarnings.clear();
+      startImport(nextPath, m_ImportSerial, nextWarnings);
+    }
     return;
+  }
 
   m_Importing = false;
   m_ImportPath.clear();
   m_Trace = trace;
   m_Loaded = true;
 
-  // The record button was disabled when the import started and nothing else re-checks it on a plain
-  // successful load, so without this a device that is still connected could not be recorded from
-  // again until some other event -- a host change, a capture closing -- happened to refresh it.
   updateImportControls();
-
-  applyImportedTrace(path);
+  applyImportedTrace(path, captureWarnings);
 }
 
-void SystemTraceViewer::applyImportedTrace(const QString &path)
+void SystemTraceViewer::applyImportedTrace(const QString &path,
+                                           const QStringList &captureWarnings)
 {
   m_TracePath->setText(path);
   m_Loaded = true;
@@ -3262,12 +3274,10 @@ void SystemTraceViewer::applyImportedTrace(const QString &path)
   for(const QString &warning : m_Trace.warnings)
     m_Warnings->addItem(warning);
 
-  // Warnings the capture collected about the device, as opposed to about the document. They are
-  // added here rather than when the capture finished so that they sit next to the trace's own
-  // warnings and do not appear against the previously loaded trace.
-  for(const QString &warning : m_PendingCaptureWarnings)
+  // Warnings travel with the import request, so they cannot be attached to a newer manually opened
+  // trace if the capture result was superseded while parsing.
+  for(const QString &warning : captureWarnings)
     m_Warnings->addItem(tr("Capture: %1").arg(warning));
-  m_PendingCaptureWarnings.clear();
 
   // A newly imported trace starts from its full extent, and any previous annotations and
   // calipers belong to the trace that is gone.
@@ -3397,11 +3407,10 @@ void SystemTraceViewer::captureTrace()
     // that is missing because the device refused to report it reads as a device limitation rather
     // than as an importer that failed to parse something. The import is asynchronous, so these are
     // parked and added by applyImportedTrace() once the trace is actually in place.
-    m_PendingCaptureWarnings = result.warnings;
-
     // The captured timeline is a document the importer accepts as-is, so it is loaded through the
-    // normal path: one code path for both captured and manually opened traces.
-    loadTraceFrom(result.localTimelinePath);
+    // normal path: one code path for both captured and manually opened traces. Warnings are attached
+    // to this request rather than stored globally while another import may supersede it.
+    loadTraceFrom(result.localTimelinePath, result.warnings);
   });
 }
 

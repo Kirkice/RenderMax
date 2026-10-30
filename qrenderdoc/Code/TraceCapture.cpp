@@ -663,6 +663,25 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
                  "detail level; choose `metrics + command lanes` to include them"));
   }
 
+  // A non-empty eventNames list is not sufficient to prove that the requested detail is complete:
+  // a device may expose the metrics events while refusing the command or wait pair. Report that
+  // partial downgrade explicitly, otherwise selecting `Commands` can silently produce only metrics.
+  QStringList missingGpuEvents;
+  for(const auto &entry : kGpuFtraceEvents)
+  {
+    if(DetailCovers(opts.gpuDetail, entry.needs) &&
+       !gpu.eventNames.contains(QLatin1String(entry.event)))
+      missingGpuEvents << QLatin1String(entry.event);
+  }
+  if(!missingGpuEvents.isEmpty() && !gpu.eventNames.isEmpty())
+  {
+    result.warnings << QStringLiteral(
+        "GPU detail is partially unavailable: the requested tracepoints that could not be enabled "
+        "are %1. The corresponding GPU lanes may be incomplete; see the Capture Log for each event "
+        "and its reason.")
+                           .arg(missingGpuEvents.join(QStringLiteral(", ")));
+  }
+
   if(!gpu.perfcounterNode)
   {
     result.warnings << QStringLiteral(
