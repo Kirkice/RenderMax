@@ -1377,7 +1377,11 @@ RDResult WrappedID3D11DeviceContext::ReplayLog(CaptureState readType, uint32_t s
 
     m_ChunkMetadata = ser.ChunkMetadata();
 
+    const ActionDescription *sceneAction = m_SceneDrawCallback ? m_pDevice->GetAction(m_CurEventID) : NULL;
+    bool sceneDraw = sceneAction && (sceneAction->flags & ActionFlags::Drawcall);
+    if(sceneDraw) m_SceneDrawCallback(m_CurEventID, false);
     bool success = ProcessChunk(ser, chunktype);
+    if(sceneDraw) m_SceneDrawCallback(m_CurEventID, true);
 
     ser.EndChunk();
 

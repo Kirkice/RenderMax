@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include "d3d12_replay.h"
+#include "replay/scene_camera.h"
 #include "core/plugins.h"
 #include "core/settings.h"
 #include "driver/dx/official/d3dcompiler.h"
@@ -349,6 +350,159 @@ APIProperties D3D12Replay::GetAPIProperties()
   ret.pixelHistory = true;
 
   return ret;
+}
+
+namespace
+{
+struct SceneD3D12Callback : D3D12ActionCallback
+{
+  std::function<void(uint32_t, ID3D12GraphicsCommandListX *, bool)> draw;
+  void PreDraw(uint32_t eid, ID3D12GraphicsCommandListX *cmd) override { draw(eid, cmd, false); }
+  bool PostDraw(uint32_t eid, ID3D12GraphicsCommandListX *cmd) override { draw(eid, cmd, true); return false; }
+  void PostRedraw(uint32_t, ID3D12GraphicsCommandListX *) override {}
+  void PreDispatch(uint32_t, ID3D12GraphicsCommandListX *) override {}
+  bool PostDispatch(uint32_t, ID3D12GraphicsCommandListX *) override { return false; }
+  void PostRedispatch(uint32_t, ID3D12GraphicsCommandListX *) override {}
+  void PreMisc(uint32_t, ActionFlags, ID3D12GraphicsCommandListX *) override {}
+  bool PostMisc(uint32_t, ActionFlags, ID3D12GraphicsCommandListX *) override { return false; }
+  void PostRemisc(uint32_t, ActionFlags, ID3D12GraphicsCommandListX *) override {}
+  void PreCloseCommandList(ID3D12GraphicsCommandListX *) override {}
+  void AliasEvent(uint32_t, uint32_t) override {}
+};
+}
+
+bool D3D12Replay::BeginSceneReplay(uint32_t anchor, uint32_t end,
+                                 const FloatVector &translation, const FloatVector &rotation)
+{
+  auto *commandData = m_pDevice->GetQueue()->GetCommandData();
+  if(commandData->m_ActionCallback) return false;
+  auto *rm = m_pDevice->GetResourceManager();
+  if(m_SceneAnchor != anchor)
+  {
+    m_SceneDraws.clear();
+    rdcarray<uint32_t> events;
+    std::function<void(const rdcarray<ActionDescription> &)> visit = [&](const rdcarray<ActionDescription> &actions) {
+      for(const auto &a : actions) {
+        if(a.eventId <= end && (a.flags & ActionFlags::Drawcall)) events.push_back(a.eventId);
+        visit(a.children);
+      }
+    };
+    visit(m_FrameRecord.actionList);
+    uint64_t presentationArea = 0;
+    for(const TextureDescription &texture : GetTextures())
+      if(texture.creationFlags & TextureCategory::SwapBuffer)
+        presentationArea = RDCMAX(presentationArea, uint64_t(texture.width) * texture.height);
+    uint64_t bestWeight = 0;
+    for(uint32_t eid : events)
+    {
+      m_pDevice->ReplayLog(0, eid, eReplay_WithoutDraw);
+      auto &state = commandData->m_RenderState;
+      auto *pipe = rm->GetResAs<WrappedID3D12PipelineState>(state.pipe);
+      if(!pipe || !pipe->graphics) continue;
+      auto *shader = (WrappedID3D12Shader *)pipe->graphics->VS.pShaderBytecode;
+      if(!shader || !shader->GetDXBC()) continue;
+      rdcstr text = shader->GetWriteableDXBC()->GetDisassembly(false);
+      int offset = -1;
+      for(uint32_t c = 0; c < 256; c++)
+        if(text.contains(StringFormat::Fmt("yyyy, cb0[%u].xyzw", c + 1)) &&
+           text.contains(StringFormat::Fmt("cb0[%u].xyzw", c)) &&
+           text.contains(StringFormat::Fmt("cb0[%u].xyzw, r0.zzzz", c + 2)) &&
+           text.contains(StringFormat::Fmt("cb0[%u].xyzw", c + 3))) { offset = int(c * 16); break; }
+      if(offset < 0) continue;
+      auto *sig = rm->GetResAs<WrappedID3D12RootSignature>(state.graphics.rootsig);
+      if(!sig) continue;
+      for(uint32_t root = 0; root < sig->sig.Parameters.size() && root < state.graphics.sigelems.size(); root++)
+      {
+        const auto &param = sig->sig.Parameters[root];
+        const auto &el = state.graphics.sigelems[root];
+        if(param.ParameterType != D3D12_ROOT_PARAMETER_TYPE_CBV || param.Descriptor.ShaderRegister != 0 ||
+           param.Descriptor.RegisterSpace != 0 || el.type != eRootCBV ||
+           (param.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL && param.ShaderVisibility != D3D12_SHADER_VISIBILITY_VERTEX)) continue;
+        SceneDraw draw; draw.eventId = eid; draw.rootIndex = root; draw.matrixOffset = offset;
+        GetBufferData(el.id, el.offset, 4096, draw.bytes);
+        if(draw.bytes.size() < size_t(offset + 64)) continue;
+        float matrix[16]; memcpy(matrix, draw.bytes.data() + offset, 64);
+        if(!ScenePerspective(matrix)) continue;
+        const auto *a = m_pDevice->GetAction(eid);
+        bool colour = false; for(ResourceId output : a->outputs) colour |= output != ResourceId();
+        uint64_t targetArea = 1;
+        bool swap = false;
+        for(ResourceId output : a->outputs)
+        {
+          if(output == ResourceId()) continue;
+          TextureDescription target = GetTexture(output);
+          targetArea = RDCMAX(targetArea, uint64_t(target.width) * target.height);
+          swap |= bool(target.creationFlags & TextureCategory::SwapBuffer);
+        }
+        // Reject small shadow-map targets even when their draw has a large
+        // index count. Main-scene colour passes are presentation-sized.
+        if(presentationArea && targetArea < presentationArea / 4)
+          continue;
+        uint64_t weight = colour && (anchor == ~0U || eid == anchor) ?
+            uint64_t(a->numIndices) * RDCMAX(1U, a->numInstances) : 0;
+        weight *= RDCMAX<uint64_t>(1, targetArea / 4096);
+        if(swap) weight *= 4;
+        if(weight > bestWeight)
+        {
+          bestWeight = weight;
+          memcpy(m_SceneReference, matrix, 64);
+          RDCLOG("Scene Viewer D3D12 candidate EID %u target area %llu%s weight %llu", eid,
+                 (unsigned long long)targetArea, swap ? " swap" : "", (unsigned long long)weight);
+        }
+        m_SceneDraws.push_back(draw);
+      }
+    }
+    if(!bestWeight) return false;
+    m_SceneAnchor = anchor;
+  }
+  Matrix4f changed = SceneCameraMatrix(m_SceneReference, translation, rotation);
+  rdcarray<ID3D12Resource *> temporaries;
+  rdcarray<D3D12_GPU_VIRTUAL_ADDRESS> addresses;
+  for(auto &draw : m_SceneDraws)
+  {
+    float matrix[16]; memcpy(matrix, draw.bytes.data() + draw.matrixOffset, 64);
+    ID3D12Resource *temporary = NULL;
+    if(SceneMatrixMatches(matrix, m_SceneReference))
+    {
+      bytebuf bytes = draw.bytes; memcpy(bytes.data() + draw.matrixOffset, &changed[0], 64);
+      D3D12_HEAP_PROPERTIES heap = {}; heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+      D3D12_RESOURCE_DESC desc = {}; desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      desc.Width = AlignUp(uint64_t(bytes.size()), 256ULL); desc.Height = 1; desc.DepthOrArraySize = 1;
+      desc.MipLevels = 1; desc.SampleDesc.Count = 1; desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      if(SUCCEEDED(m_pDevice->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+          D3D12_RESOURCE_STATE_GENERIC_READ, NULL, __uuidof(ID3D12Resource), (void **)&temporary)))
+      {
+        void *mapped = NULL;
+        if(SUCCEEDED(temporary->Map(0, NULL, &mapped))) { memcpy(mapped, bytes.data(), bytes.size()); temporary->Unmap(0, NULL); }
+        else SAFE_RELEASE(temporary);
+      }
+    }
+    temporaries.push_back(temporary);
+    addresses.push_back(temporary ? temporary->GetGPUVirtualAddress() : 0);
+  }
+  SceneD3D12Callback callback;
+  callback.draw = [&](uint32_t eid, ID3D12GraphicsCommandListX *cmd, bool restore) {
+    for(size_t i = 0; i < m_SceneDraws.size(); i++)
+    {
+      auto &draw = m_SceneDraws[i];
+      if(eid != draw.eventId || !addresses[i]) continue;
+      auto &state = commandData->m_RenderState;
+      if(restore) state.graphics.sigelems[draw.rootIndex].SetToGraphics(rm, cmd, draw.rootIndex, false);
+      else cmd->SetGraphicsRootConstantBufferView(draw.rootIndex, addresses[i]);
+    }
+  };
+  commandData->m_ActionCallback = &callback;
+  m_pDevice->ReplayLog(0, end, eReplay_Full);
+  commandData->m_ActionCallback = NULL;
+  m_pDevice->DeviceWaitForIdle();
+  for(auto *temporary : temporaries) SAFE_RELEASE(temporary);
+  return true;
+}
+
+void D3D12Replay::EndSceneReplay(uint32_t eventId)
+{
+  // Restore the normal capture replay state after the scene output is sampled.
+  ReplayLog(eventId, eReplay_Full);
 }
 
 void D3D12Replay::ReplayLog(uint32_t endEventID, ReplayLogType replayType)

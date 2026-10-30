@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include "vk_replay.h"
+#include "replay/scene_camera.h"
 #include <ctype.h>
 #include <float.h>
 #include <math.h>
@@ -200,6 +201,195 @@ APIProperties VulkanReplay::GetAPIProperties()
 RDResult VulkanReplay::ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBuffers)
 {
   return m_pDriver->ReadLogInitialisation(rdc, storeStructuredBuffers);
+}
+
+namespace
+{
+struct SceneVulkanCallback : VulkanActionCallback
+{
+  std::function<void(uint32_t, VkCommandBuffer, bool)> draw;
+  void PreDraw(uint32_t eid, ActionFlags, VkCommandBuffer cmd) override { draw(eid, cmd, false); }
+  bool PostDraw(uint32_t eid, ActionFlags, VkCommandBuffer cmd) override { draw(eid, cmd, true); return false; }
+  void PostRedraw(uint32_t, ActionFlags, VkCommandBuffer) override {}
+  void PreDispatch(uint32_t, ActionFlags, VkCommandBuffer) override {}
+  bool PostDispatch(uint32_t, ActionFlags, VkCommandBuffer) override { return false; }
+  void PostRedispatch(uint32_t, ActionFlags, VkCommandBuffer) override {}
+  void PreMisc(uint32_t, ActionFlags, VkCommandBuffer) override {}
+  bool PostMisc(uint32_t, ActionFlags, VkCommandBuffer) override { return false; }
+  void PostRemisc(uint32_t, ActionFlags, VkCommandBuffer) override {}
+  void PreEndCommandBuffer(VkCommandBuffer) override {}
+  void AliasEvent(uint32_t, uint32_t) override {}
+  bool SplitSecondary() override { return false; }
+  bool ForceLoadRPs() override { return false; }
+  void PreCmdExecute(uint32_t, uint32_t, uint32_t, VkCommandBuffer) override {}
+  void PostCmdExecute(uint32_t, uint32_t, uint32_t, VkCommandBuffer) override {}
+};
+}
+
+bool VulkanReplay::BeginSceneReplay(uint32_t anchor, uint32_t end,
+                                   const FloatVector &translation, const FloatVector &rotation)
+{
+  VkDevice dev = m_pDriver->GetDev();
+  auto *rm = m_pDriver->GetResourceManager();
+  auto &creation = m_pDriver->m_CreationInfo;
+  if(m_SceneAnchor != anchor)
+  {
+    m_SceneDraws.clear();
+    rdcarray<uint32_t> events;
+    std::function<void(const rdcarray<ActionDescription> &)> visit = [&](const rdcarray<ActionDescription> &actions) {
+      for(const auto &a : actions) {
+        if(a.eventId <= end && (a.flags & ActionFlags::Drawcall)) events.push_back(a.eventId);
+        visit(a.children);
+      }
+    };
+    visit(m_FrameRecord.actionList);
+    struct CameraGroup { float matrix[16]; uint64_t weight = 0; };
+    rdcarray<CameraGroup> groups;
+    uint64_t bestWeight = 0;
+    for(uint32_t eid : events)
+    {
+      m_pDriver->ReplayLog(0, eid, eReplay_WithoutDraw);
+      auto &graphics = m_pDriver->GetRenderState().graphics;
+      for(uint32_t s = 0; s < graphics.descSets.size(); s++)
+      {
+        const auto &bound = graphics.descSets[s];
+        if(bound.descSet == ResourceId() || bound.push || bound.IsDescBufferBound()) continue;
+        auto &set = m_pDriver->m_DescriptorSetState[bound.descSet];
+        const auto &layout = creation.m_DescSetLayout[set.layout];
+        uint32_t dyn = 0;
+        for(uint32_t b = 0; b < layout.bindings.size(); b++)
+        {
+          const auto &binding = layout.bindings[b];
+          bool dynamic = binding.layoutDescType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+                         binding.layoutDescType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+          uint32_t dynamicIndex = dyn;
+          if(dynamic) dyn += binding.descriptorCount;
+          if(!(binding.stageFlags & VK_SHADER_STAGE_VERTEX_BIT) || binding.descriptorCount != 1 ||
+             (binding.layoutDescType != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
+              binding.layoutDescType != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)) continue;
+          const auto &slot = set.data.binds[b][0];
+          SceneDraw draw; draw.eventId = eid; draw.setIndex = s; draw.binding = b;
+          draw.set = bound.descSet; draw.layout = bound.pipeLayout;
+          draw.dynamicOffsets = bound.offsets;
+          uint64_t offset = slot.offset;
+          if(dynamic) {
+            if(dynamicIndex >= bound.offsets.size()) continue;
+            offset += bound.offsets[dynamicIndex]; draw.dynamicIndex = dynamicIndex;
+          }
+          GetBufferData(slot.resource, offset, RDCMIN(uint64_t(slot.GetRange()), 4096ULL), draw.bytes);
+          if(draw.bytes.size() < 64) continue;
+          float matrix[16]; memcpy(matrix, draw.bytes.data(), 64);
+          // Stripped Unity SPIR-V stores the camera VP as the first vec4[4]
+          // in its per-camera UBO. Object matrices and UI matrices are affine.
+          if(!ScenePerspective(matrix)) continue;
+          const auto *a = m_pDriver->GetAction(eid);
+          // Vulkan action outputs are not populated for every renderpass. Use the
+          // current pipeline's colour attachments instead of action metadata.
+          bool colour = !creation.m_Pipeline[graphics.pipeline].attachments.empty();
+          uint64_t weight = colour && (anchor == ~0U || eid == anchor) ? uint64_t(a->numIndices) * RDCMAX(1U, a->numInstances) : 0;
+          size_t group = 0;
+          for(; group < groups.size(); group++)
+            if(SceneMatrixMatches(groups[group].matrix, matrix)) break;
+          if(group == groups.size()) { CameraGroup g; memcpy(g.matrix, matrix, 64); groups.push_back(g); }
+          groups[group].weight += weight;
+          if(groups[group].weight > bestWeight) { bestWeight = groups[group].weight; memcpy(m_SceneReference, matrix, 64); }
+          m_SceneDraws.push_back(draw);
+        }
+      }
+    }
+    if(!bestWeight) return false;
+    // Keep only bindings belonging to the dominant camera matrix. The other
+    // perspective UBOs are commonly shadow/reflection cameras; rebuilding and
+    // rebinding them on every mouse update was also a major Vulkan cost.
+    rdcarray<SceneDraw> dominant;
+    for(const SceneDraw &draw : m_SceneDraws)
+    {
+      if(draw.bytes.size() < 64) continue;
+      float matrix[16]; memcpy(matrix, draw.bytes.data(), 64);
+      if(SceneMatrixMatches(matrix, m_SceneReference)) dominant.push_back(draw);
+    }
+    m_SceneDraws = dominant;
+    RDCLOG("Scene Viewer Vulkan: %zu dominant camera bindings, weight %llu", m_SceneDraws.size(),
+           (unsigned long long)bestWeight);
+    m_SceneAnchor = anchor;
+  }
+  Matrix4f changed = SceneCameraMatrix(m_SceneReference, translation, rotation);
+  VkDescriptorPool pool = VK_NULL_HANDLE;
+  VkDescriptorPoolSize sizes[] = {
+    {VK_DESCRIPTOR_TYPE_SAMPLER, 4096}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096},
+    {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096},
+    {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 4096}, {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 4096},
+    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 4096}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 4096},
+    {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 4096}};
+  VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  poolInfo.maxSets = RDCMAX(1U, (uint32_t)m_SceneDraws.size());
+  poolInfo.poolSizeCount = ARRAY_COUNT(sizes); poolInfo.pPoolSizes = sizes;
+  if(ObjDisp(dev)->CreateDescriptorPool(Unwrap(dev), &poolInfo, NULL, &pool) != VK_SUCCESS) return false;
+  rdcarray<VkDescriptorSet> sets; sets.resize(m_SceneDraws.size());
+  rdcarray<GPUBuffer *> buffers;
+  for(size_t i = 0; i < m_SceneDraws.size(); i++)
+  {
+    auto &draw = m_SceneDraws[i]; float matrix[16]; memcpy(matrix, draw.bytes.data(), 64);
+    if(!SceneMatrixMatches(matrix, m_SceneReference)) continue;
+    auto &source = m_pDriver->m_DescriptorSetState[draw.set];
+    const auto &layout = creation.m_DescSetLayout[source.layout];
+    VkDescriptorSetLayout liveLayout = Unwrap(rm->GetHandle<VkDescriptorSetLayout>(source.layout));
+    VkDescriptorSetAllocateInfo alloc = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    alloc.descriptorPool = pool; alloc.descriptorSetCount = 1; alloc.pSetLayouts = &liveLayout;
+    if(ObjDisp(dev)->AllocateDescriptorSets(Unwrap(dev), &alloc, &sets[i]) != VK_SUCCESS) continue;
+    rdcarray<VkCopyDescriptorSet> copies;
+    for(uint32_t b = 0; b < layout.bindings.size(); b++)
+    {
+      if(!layout.bindings[b].descriptorCount) continue;
+      VkCopyDescriptorSet copy = {VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET};
+      copy.srcSet = Unwrap(rm->GetHandle<VkDescriptorSet>(draw.set)); copy.dstSet = sets[i];
+      copy.srcBinding = copy.dstBinding = b; copy.descriptorCount = layout.bindings[b].descriptorCount;
+      copies.push_back(copy);
+    }
+    ObjDisp(dev)->UpdateDescriptorSets(Unwrap(dev), 0, NULL, (uint32_t)copies.size(), copies.data());
+    GPUBuffer *buffer = new GPUBuffer(); buffer->Create(m_pDriver, dev, draw.bytes.size(), 1, 0);
+    void *mapped = buffer->Map();
+    if(!mapped) { buffer->Destroy(); delete buffer; sets[i] = VK_NULL_HANDLE; continue; }
+    memcpy(mapped, draw.bytes.data(), draw.bytes.size()); memcpy(mapped, &changed[0], 64); buffer->Unmap();
+    VkDescriptorBufferInfo info; buffer->FillDescriptor(info); info.range = draw.bytes.size();
+    VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = sets[i]; write.dstBinding = draw.binding; write.descriptorCount = 1;
+    write.descriptorType = layout.bindings[draw.binding].layoutDescType; write.pBufferInfo = &info;
+    ObjDisp(dev)->UpdateDescriptorSets(Unwrap(dev), 1, &write, 0, NULL);
+    buffers.push_back(buffer);
+  }
+  SceneVulkanCallback callback;
+  callback.draw = [&](uint32_t eid, VkCommandBuffer cmd, bool restore) {
+    for(size_t i = 0; i < m_SceneDraws.size(); i++)
+    {
+      auto &draw = m_SceneDraws[i]; if(draw.eventId != eid || !sets[i]) continue;
+
+      rdcarray<uint32_t> offsets = draw.dynamicOffsets;
+      if(!restore && draw.dynamicIndex != ~0U) offsets[draw.dynamicIndex] = 0;
+      VkDescriptorSet set = restore ? Unwrap(rm->GetHandle<VkDescriptorSet>(draw.set)) : sets[i];
+      VkPipelineLayout layout = Unwrap(rm->GetHandle<VkPipelineLayout>(draw.layout));
+      ObjDisp(cmd)->CmdBindDescriptorSets(Unwrap(cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, layout,
+          draw.setIndex, 1, &set, (uint32_t)offsets.size(), offsets.data());
+    }
+  };
+  m_pDriver->SetActionCB(&callback);
+  m_pDriver->ReplayLog(0, end, eReplay_Full);
+  m_pDriver->SetActionCB(NULL);
+  m_pDriver->SubmitCmds(); m_pDriver->FlushQ();
+  for(auto *buffer : buffers) { buffer->Destroy(); delete buffer; }
+  ObjDisp(dev)->DestroyDescriptorPool(Unwrap(dev), pool, NULL);
+  return true;
+}
+
+void VulkanReplay::EndSceneReplay(uint32_t eventId)
+{
+  // BeginSceneReplay already replays the capture through the requested end event
+  // and waits for the submitted work before returning. Replaying the capture a
+  // second time here used to make every Scene Viewer camera update needlessly
+  // expensive, especially on Vulkan. The next replay starts from the capture
+  // beginning and restores all captured state, so no second replay is needed.
+  (void)eventId;
 }
 
 void VulkanReplay::ReplayLog(uint32_t endEventID, ReplayLogType replayType)

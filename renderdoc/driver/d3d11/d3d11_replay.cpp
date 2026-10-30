@@ -34,6 +34,7 @@
 #include "maths/camera.h"
 #include "maths/formatpacking.h"
 #include "maths/matrix.h"
+#include "replay/scene_camera.h"
 #include "replay/dummy_driver.h"
 #include "serialise/rdcfile.h"
 #include "strings/string_utils.h"
@@ -1705,6 +1706,124 @@ rdcarray<DescriptorLogicalLocation> D3D11Replay::GetDescriptorLocations(
 RDResult D3D11Replay::ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBuffers)
 {
   return m_pDevice->ReadLogInitialisation(rdc, storeStructuredBuffers);
+}
+
+bool D3D11Replay::BeginSceneReplay(uint32_t anchor, uint32_t end,
+                                 const FloatVector &translation, const FloatVector &rotation)
+{
+  // For stripped DXBC, recognise the four consecutive column loads rather than
+  // assuming a Unity version-specific constant-buffer offset.
+  auto matrixOffset = [this]() -> int {
+    auto *state = m_pImmediateContext->GetCurrentPipelineState();
+    auto *shader = GetShader(ResourceId(), GetIDForDeviceChild(state->VS.Object), ShaderEntryPoint());
+    if(!shader) return -1;
+    rdcstr disasm = DisassembleShader(ResourceId(), shader, "");
+    for(uint32_t offset = 0; offset < 4096; offset += 16)
+    {
+      uint32_t c = offset / 16;
+      rdcstr y = StringFormat::Fmt("yyyy, cb0[%u].xyzw", c + 1);
+      rdcstr x = StringFormat::Fmt("cb0[%u].xyzw", c);
+      rdcstr z = StringFormat::Fmt("cb0[%u].xyzw, r0.zzzz", c + 2);
+      rdcstr w = StringFormat::Fmt("cb0[%u].xyzw", c + 3);
+      if(disasm.contains(y) && disasm.contains(x) && disasm.contains(z) && disasm.contains(w))
+        return int(offset);
+    }
+    return -1;
+  };
+  auto read = [this](int offset, bytebuf &bytes) -> bool {
+    auto *state = m_pImmediateContext->GetCurrentPipelineState();
+    if(!state->VS.ConstantBuffers[0]) return false;
+    GetBufferData(GetIDForDeviceChild(state->VS.ConstantBuffers[0]),
+                  uint64_t(state->VS.CBOffsets[0]) * 16, 0, bytes);
+    return offset >= 0 && bytes.size() >= size_t(offset + 64);
+  };
+  if(m_SceneAnchor != anchor)
+  {
+    uint64_t presentationArea = 0;
+    for(const TextureDescription &texture : GetTextures())
+      if(texture.creationFlags & TextureCategory::SwapBuffer)
+        presentationArea = RDCMAX(presentationArea, uint64_t(texture.width) * texture.height);
+    uint64_t bestWeight = 0;
+    m_pImmediateContext->m_SceneDrawCallback = [&](uint32_t eid, bool restore) {
+      if(restore || (anchor != ~0U && eid != anchor)) return;
+      const auto *a = m_pDevice->GetAction(eid);
+      bool colour = false;
+      for(ResourceId output : a->outputs) colour |= output != ResourceId();
+      if(!colour) return;
+      int offset = matrixOffset(); bytebuf bytes;
+      if(!read(offset, bytes)) return;
+      float matrix[16]; memcpy(matrix, bytes.data() + offset, 64);
+      if(!ScenePerspective(matrix)) return;
+      // Prefer the main presentation-sized colour target over shadow-map
+      // colour targets. Shadow passes in D3D captures can write a colour
+      // atlas/side target even though they are not scene-camera draws.
+      uint64_t targetArea = 1;
+      bool swap = false;
+      for(ResourceId output : a->outputs)
+      {
+        if(output == ResourceId()) continue;
+        TextureDescription target = GetTexture(output);
+        targetArea = RDCMAX(targetArea, uint64_t(target.width) * target.height);
+        swap |= bool(target.creationFlags & TextureCategory::SwapBuffer);
+      }
+      // A selected shadow-map draw must not become a scene camera. Require a
+      // colour target close to the presentation size; the capture's 512/1024
+      // shadow targets are intentionally rejected here.
+      if(presentationArea && targetArea < presentationArea / 4)
+        return;
+      uint64_t weight = uint64_t(a->numIndices) * RDCMAX(1U, a->numInstances);
+      weight *= RDCMAX<uint64_t>(1, targetArea / 4096);
+      if(swap) weight *= 4;
+      if(weight > bestWeight)
+      {
+        bestWeight = weight;
+        memcpy(m_SceneReference, matrix, 64);
+        RDCLOG("Scene Viewer D3D11 candidate EID %u target %llu x %llu%s weight %llu", eid,
+               (unsigned long long)targetArea, (unsigned long long)targetArea,
+               swap ? " swap" : "", (unsigned long long)weight);
+      }
+    };
+    m_pDevice->ReplayLog(0, end, eReplay_Full);
+    m_pImmediateContext->m_SceneDrawCallback = {};
+    if(!bestWeight) return false;
+    m_SceneAnchor = anchor;
+  }
+  Matrix4f changed = SceneCameraMatrix(m_SceneReference, translation, rotation);
+  ID3D11Buffer *temporary = NULL;
+  ID3D11Buffer *saved = NULL;
+  m_pImmediateContext->m_SceneDrawCallback = [&](uint32_t, bool restore) {
+    ID3D11DeviceContext *real = m_pImmediateContext->GetReal();
+    if(restore)
+    {
+      if(temporary) real->VSSetConstantBuffers(0, 1, &saved);
+      SAFE_RELEASE(temporary); SAFE_RELEASE(saved);
+      return;
+    }
+    int offset = matrixOffset(); bytebuf bytes;
+    if(!read(offset, bytes)) return;
+    float matrix[16]; memcpy(matrix, bytes.data() + offset, 64);
+    if(!SceneMatrixMatches(matrix, m_SceneReference)) return;
+    memcpy(bytes.data() + offset, &changed[0], 64);
+    D3D11_BUFFER_DESC desc = {};
+    desc.ByteWidth = (UINT)RDCMIN(bytes.size(), size_t(65536));
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    D3D11_SUBRESOURCE_DATA data = {}; data.pSysMem = bytes.data();
+    if(FAILED(m_pDevice->GetReal()->CreateBuffer(&desc, &data, &temporary))) return;
+    real->VSGetConstantBuffers(0, 1, &saved);
+    real->VSSetConstantBuffers(0, 1, &temporary);
+  };
+  m_pDevice->ReplayLog(0, end, eReplay_Full);
+  m_pImmediateContext->m_SceneDrawCallback = {};
+  return true;
+}
+
+void D3D11Replay::EndSceneReplay(uint32_t eventId)
+{
+  m_pImmediateContext->m_SceneDrawCallback = {};
+  // Restore the capture's normal replay state after the scene output has been
+  // sampled. This is required for the next Display() and for Texture Viewer.
+  ReplayLog(eventId, eReplay_Full);
 }
 
 void D3D11Replay::ReplayLog(uint32_t endEventID, ReplayLogType replayType)

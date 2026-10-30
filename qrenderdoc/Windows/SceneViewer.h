@@ -37,7 +37,7 @@ public:
     bar->addWidget(m_Gamma); bar->addStretch();
     box->addLayout(bar);
     m_Status = new QLabel(tr("Automatically detecting the main perspective camera. "
-                            "Supported: local Unity OpenGL MatrixVP uniforms."), this);
+                            "Supported: local OpenGL, D3D11, D3D12 and Vulkan replay."), this);
     m_Status->setWordWrap(true); box->addWidget(m_Status);
     m_Render = new CustomPaintWidget(this);
     m_Render->SetContext(ctx); box->addWidget(m_Render, 1);
@@ -182,9 +182,9 @@ private:
       GUIInvoke::call(this, [this, supported, anchor, generation] {
         if(generation != m_Generation) return;
         m_Busy = false;
-        m_Status->setText(!supported ? tr("No supported camera binding. Requires local OpenGL and a Unity MatrixVP draw.") :
-          anchor == ~0U ? tr("Automatic main perspective camera | Orthographic UI excluded | Unity MatrixVP") :
-          anchor ? tr("Camera anchor EID %1 | Original-material BackBuffer replay | Unity MatrixVP binding").arg(anchor) :
+        m_Status->setText(!supported ? tr("No compatible camera binding was found in this replay.") :
+          anchor == ~0U ? tr("Automatic main perspective camera | Shadow/UI passes excluded") :
+          anchor ? tr("Camera anchor EID %1 | Original-material BackBuffer replay").arg(anchor) :
           tr("Original BackBuffer. Select a main-scene draw and bind its camera."));
         if(m_Pending) Refresh();
       });
