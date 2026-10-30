@@ -268,6 +268,11 @@ bool VulkanReplay::BeginSceneReplay(uint32_t anchor, uint32_t end,
              (binding.layoutDescType != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
               binding.layoutDescType != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)) continue;
           const auto &slot = set.data.binds[b][0];
+          // The camera block in this capture is the small per-view block
+          // (matrix at offset 0, position at offset 80). Large per-object and
+          // light blocks can also begin with perspective-looking data, but
+          // replacing those does not affect the camera.
+          if(slot.GetRange() > 256) continue;
           SceneDraw draw; draw.eventId = eid; draw.setIndex = s; draw.binding = b;
           draw.set = bound.descSet; draw.layout = bound.pipeLayout;
           draw.dynamicOffsets = bound.offsets;
@@ -286,7 +291,9 @@ bool VulkanReplay::BeginSceneReplay(uint32_t anchor, uint32_t end,
           // Vulkan action outputs are not populated for every renderpass. Use the
           // current pipeline's colour attachments instead of action metadata.
           bool colour = !creation.m_Pipeline[graphics.pipeline].attachments.empty();
-          uint64_t weight = colour && (anchor == ~0U || eid == anchor) ? uint64_t(a->numIndices) * RDCMAX(1U, a->numInstances) : 0;
+          uint64_t weight = colour && (anchor == ~0U || eid == anchor) ?
+              uint64_t(a->numIndices) * RDCMAX(1U, a->numInstances) : 0;
+          weight *= slot.GetRange() <= 128 ? 8 : 1;
           size_t group = 0;
           for(; group < groups.size(); group++)
             if(SceneMatrixMatches(groups[group].matrix, matrix)) break;
