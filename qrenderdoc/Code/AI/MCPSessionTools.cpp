@@ -28,6 +28,8 @@
 #include "MCPQueryAdapter.h"
 #include "Code/Interface/QRDInterface.h"
 #include "Code/Interface/PersistentConfig.h"
+#include "Code/SystemTrace.h"
+#include "Code/TraceCapture.h"
 #include "Code/QRDUtils.h"
 #include <QCoreApplication>
 #include <QDir>
@@ -299,6 +301,108 @@ public:
     out[QStringLiteral("state")] = State();
     return ToolResult::Success(out);
   }
+  ToolResult SystemTraceCapture(const QJsonObject &args)
+  {
+    if(m_URL.isEmpty())
+      return Fail(ErrorCode::ReplayUnavailable, "Launch an Android application session before capturing a system trace");
+
+    IDeviceProtocolController *protocol = RENDERDOC_GetDeviceProtocolController(
+        Rdc(m_URL.left(m_URL.indexOf(QStringLiteral("://")))));
+    if(!protocol)
+      return Fail(ErrorCode::Unsupported, "The active Android protocol is unavailable");
+
+    const int durationMs = args.value(QStringLiteral("durationMs")).toInt(3000);
+    if(durationMs < 250 || durationMs > 30000)
+      return Fail(ErrorCode::InvalidParams, "durationMs must be 250..30000");
+
+    const QString detail = Arg(args, "gpuDetail").toLower();
+    GpuTraceDetail gpuDetail = GpuTraceDetail::Metrics;
+    if(detail == QStringLiteral("off")) gpuDetail = GpuTraceDetail::Off;
+    else if(detail == QStringLiteral("metrics") || detail.isEmpty()) gpuDetail = GpuTraceDetail::Metrics;
+    else if(detail == QStringLiteral("commands") || detail == QStringLiteral("metrics+commands")) gpuDetail = GpuTraceDetail::Commands;
+    else return Fail(ErrorCode::InvalidParams, "gpuDetail must be off, metrics or commands");
+
+    TraceCaptureOptions options;
+    options.durationMs = durationMs;
+    options.gpuDetail = gpuDetail;
+    options.bufferSizeKb = uint64_t(args.value(QStringLiteral("bufferSizeKb")).toInt(32768));
+    const TraceCaptureResult result = RunTraceCapture(protocol, Rdc(m_URL), options);
+
+    QJsonArray log, warnings;
+    for(const QString &line : result.log) log.append(line);
+    for(const QString &warning : result.warnings) warnings.append(warning);
+    const QString detailName = result.gpu.requestedDetail == GpuTraceDetail::Off
+                                   ? QStringLiteral("off")
+                                   : result.gpu.requestedDetail == GpuTraceDetail::Commands
+                                         ? QStringLiteral("metrics + command lanes")
+                                         : QStringLiteral("metrics");
+    QJsonObject gpu{{QStringLiteral("detail"), detailName},
+        {QStringLiteral("rootAvailable"), result.gpu.rootAvailable},
+        {QStringLiteral("sysfsReadable"), result.gpu.sysfsReadable},
+        {QStringLiteral("perfcounterNode"), result.gpu.perfcounterNode},
+        {QStringLiteral("enabledEvents"), QJsonArray::fromStringList(result.gpu.eventNames)},
+        {QStringLiteral("gpuClock"), result.gpu.gpuClock},
+        {QStringLiteral("gpuBusyPercent"), result.gpu.gpuBusyPercent},
+        {QStringLiteral("gpuMaxClock"), result.gpu.gpuMaxClock}};
+    QJsonObject out{{QStringLiteral("ok"), result.success}, {QStringLiteral("success"), result.success},
+        {QStringLiteral("localTracePath"), result.localTracePath},
+        {QStringLiteral("localTimelinePath"), result.localTimelinePath},
+        {QStringLiteral("localLogPath"), result.localLogPath},
+        {QStringLiteral("error"), result.error}, {QStringLiteral("warnings"), warnings},
+        {QStringLiteral("gpu"), gpu}, {QStringLiteral("log"), log},
+        {QStringLiteral("analysisHint"), QStringLiteral("Pass localTimelinePath to renderdoc_analyzeSystemTrace to inspect tracks, counters and thread time.")}};
+    return ToolResult::Success(out);
+  }
+
+  ToolResult AnalyzeSystemTrace(const QJsonObject &args)
+  {
+    const QString path = Arg(args, "filePath");
+    QFileInfo file(path);
+    if(!file.isAbsolute() || !file.isFile())
+      return Fail(ErrorCode::InvalidParams, "filePath must name an existing absolute system trace file");
+
+    const SystemTrace trace = ImportSystemTraceFile(file.absoluteFilePath());
+    QJsonArray series, tracks, warnings;
+    for(const TraceSeries &s : trace.series)
+    {
+      double min = s.MinValue(), max = s.MaxValue();
+      series.append(QJsonObject{{QStringLiteral("name"), s.name}, {QStringLiteral("unit"), s.unit},
+          {QStringLiteral("group"), s.group}, {QStringLiteral("pid"), s.pid},
+          {QStringLiteral("step"), s.step}, {QStringLiteral("sampleCount"), s.samples.size()},
+          {QStringLiteral("min"), min}, {QStringLiteral("max"), max}});
+    }
+    for(const TraceTrack &t : trace.tracks)
+    {
+      const int spanCount = t.spans.size();
+      tracks.append(QJsonObject{{QStringLiteral("name"), t.name}, {QStringLiteral("group"), t.group},
+          {QStringLiteral("kind"), int(t.kind)}, {QStringLiteral("pid"), t.pid},
+          {QStringLiteral("tid"), t.tid}, {QStringLiteral("cpu"), t.cpu},
+          {QStringLiteral("spanCount"), spanCount}, {QStringLiteral("counterSeries"), t.counterSeries},
+          {QStringLiteral("atrace"), t.atrace}, {QStringLiteral("idle"), t.idle}});
+    }
+    for(const QString &warning : trace.warnings) warnings.append(warning);
+    double begin = 0.0, end = 0.0;
+    trace.TimeExtent(begin, end);
+    const QVector<TraceThreadTime> times = trace.ThreadTimes();
+    QJsonArray threadTimes;
+    for(const TraceThreadTime &row : times)
+      threadTimes.append(QJsonObject{{QStringLiteral("name"), row.name}, {QStringLiteral("process"), row.process},
+          {QStringLiteral("tid"), row.tid}, {QStringLiteral("runningSec"), row.runningSec},
+          {QStringLiteral("runnableSec"), row.runnableSec}, {QStringLiteral("sleepingSec"), row.sleepingSec},
+          {QStringLiteral("switches"), row.switches}});
+    return ToolResult::Success(QJsonObject{
+        {QStringLiteral("ok"), trace.valid}, {QStringLiteral("valid"), trace.valid},
+        {QStringLiteral("source"), trace.source}, {QStringLiteral("format"), trace.formatName},
+        {QStringLiteral("timeUnit"), trace.timeUnit}, {QStringLiteral("sharedClock"), trace.sharedClock},
+        {QStringLiteral("startSec"), begin}, {QStringLiteral("endSec"), end},
+        {QStringLiteral("durationSec"), trace.SpanSec()}, {QStringLiteral("seriesCount"), trace.series.size()},
+        {QStringLiteral("trackCount"), trace.tracks.size()}, {QStringLiteral("spanCount"), trace.SpanCount()},
+        {QStringLiteral("frameBoundaryCount"), trace.frameBoundaries.size()},
+        {QStringLiteral("series"), series}, {QStringLiteral("tracks"), tracks},
+        {QStringLiteral("threadTimes"), threadTimes}, {QStringLiteral("warnings"), warnings},
+        {QStringLiteral("ftraceInventory"), QJsonArray::fromStringList(FtraceEventInventory())}});
+  }
+
   ToolResult Trigger(const QJsonObject &args, bool remoteOnly)
   {
     if(!m_Target || !m_Target->Connected()) return Fail(ErrorCode::ReplayUnavailable, "Launch an application capture session first");
@@ -486,6 +590,10 @@ ToolResult QueryAdapter::SessionTool(const QString &name, const QJsonObject &arg
       return owner->Launch(args, name == QStringLiteral("renderdoc_launchApplication") ? Arg(args, "platform") : name == QStringLiteral("renderdoc_launchWindowsApplication") ? QStringLiteral("windows") : QStringLiteral("android"));
     if(name == QStringLiteral("renderdoc_captureFrame") || name == QStringLiteral("renderdoc_triggerRemoteCapture"))
       return owner->Trigger(args, name == QStringLiteral("renderdoc_triggerRemoteCapture"));
+    if(name == QStringLiteral("renderdoc_captureSystemTrace"))
+      return owner->SystemTraceCapture(args);
+    if(name == QStringLiteral("renderdoc_analyzeSystemTrace"))
+      return owner->AnalyzeSystemTrace(args);
     return Fail(ErrorCode::InvalidParams, "Unknown native session tool");
   }, abandoned, call);
   ToolResult result = Await(job, call, abandoned);
@@ -567,6 +675,12 @@ void RegisterSessionTools(ToolRegistry &registry, QueryAdapter &adapter)
   add("renderdoc_closeSession", "Disconnect the application target and remote connection without terminating the application, deleting files or closing replay. Not MCP transport-session deletion.", QJsonObject(), QJsonArray(), false);
   add("renderdoc_captureFrame", "Trigger one immediate/frame/delayed capture, preserve the saved file and load it into native replay when safe. Timeout does not revoke a submitted frame request.", trigger, QJsonArray(), false);
   add("renderdoc_triggerRemoteCapture", "Capture one frame from the active Android session, copy it locally and load replay when safe.", trigger, QJsonArray(), false);
+  const QJsonObject traceCapture{{QStringLiteral("durationMs"), integer(250, 30000)},
+      {QStringLiteral("gpuDetail"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")},
+          {QStringLiteral("enum"), QJsonArray{QStringLiteral("off"), QStringLiteral("metrics"), QStringLiteral("commands")}}}},
+      {QStringLiteral("bufferSizeKb"), integer(4096, 262144)}};
+  add("renderdoc_captureSystemTrace", "Record an Android Perfetto system trace through the active session, pull it locally, convert it with traceconv and return the importable timeline path plus capability warnings.", traceCapture, QJsonArray(), false);
+  add("renderdoc_analyzeSystemTrace", "Import a local System Trace and return counters, tracks, span counts, scheduler thread time, warnings and the supported ftrace event inventory.", QJsonObject{{QStringLiteral("filePath"), string(true)}}, QJsonArray{QStringLiteral("filePath")}, true);
   const QJsonObject wait{{QStringLiteral("timeoutMs"), integer(100, 60000)}, {QStringLiteral("pollMs"), integer(50, 2000)}};
   add("renderdoc_waitForLiveTarget", "Wait for the current application session target; defaults timeoutMs=10000 and pollMs=250. Does not launch or attach.", wait, QJsonArray(), true);
   add("renderdoc_waitForCapture", "Wait for a completed saved capture in the current application session; defaults timeoutMs=10000 and pollMs=250.", wait, QJsonArray(), true);
