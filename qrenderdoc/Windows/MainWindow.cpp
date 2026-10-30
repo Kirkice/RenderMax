@@ -3034,6 +3034,14 @@ SystemTraceViewer *MainWindow::ensureSystemTraceViewer()
   return m_SystemTraceViewer;
 }
 
+void MainWindow::NotifyRemoteHostChanged()
+{
+  // Deliberately does not create the panel: a session can be established before the user has ever
+  // opened it, and the panel reads the host when it is constructed anyway.
+  if(!m_SystemTraceViewer.isNull())
+    m_SystemTraceViewer->OnRemoteHostChanged();
+}
+
 void MainWindow::dockSystemTraceViewer(bool raise)
 {
   // The instance is retained: a second call raises the existing tab instead of creating a duplicate,

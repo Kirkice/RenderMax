@@ -70,11 +70,15 @@ class QObject;
 // capability one: every tracepoint below is requested only when the probe found it present and
 // enable-able, so asking for more than a device can give simply yields fewer lanes.
 //
-// The cost is dominated by the command and fence-wait events, which fire once per submission and
-// once per fence. A 5 s capture of a running 3D application produces tens of thousands of them, and
-// `traceconv systrace` then writes a text file several times larger than the metrics-only one, all
-// of which the host importer has to parse. The default therefore stops at the metrics that answer
-// "how busy was the GPU", and the per-command lanes are opt-in.
+// Only the command and fence-wait events scale with what the application is doing: they fire once
+// per submission and once per fence, so a submission-heavy frame produces thousands of them, each a
+// long line of counters that has to be recorded on the device, converted and parsed here. The
+// metrics are sampled at whatever rate the device chooses and cost about the same either way. So the
+// default stops at the metrics that answer "how busy was the GPU", and the per-command lanes are
+// opt-in. The difference is not always large - a three second capture of a lightly loaded
+// application measured 93.9 MB of systrace text without the command events and 96.2 MB with them,
+// because on that device the scheduler and trace marker lines dominate - but the ceiling is set by
+// the application's submission rate, which this cannot know in advance.
 enum class GpuTraceDetail
 {
   // No GPU events at all: the smallest trace, schedule and CPU lanes only.
@@ -83,7 +87,7 @@ enum class GpuTraceDetail
   // sampled or event-driven at a rate the device chooses, so they add tens of events per second.
   Metrics = 1,
   // Metrics plus the per-cmdbatch and per-fence intervals, which become the GPU Commands and GPU
-  // Waits lanes. Opt-in, because they dominate the size of the recorded trace.
+  // Waits lanes. Opt-in, because they are the only part whose size follows the workload.
   Commands = 2,
 };
 

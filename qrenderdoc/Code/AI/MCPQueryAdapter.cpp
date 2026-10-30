@@ -42,6 +42,7 @@
 
 #include "Code/Interface/QRDInterface.h"
 #include "Code/QRDUtils.h"
+#include "Windows/MainWindow.h"
 
 #include <QDateTime>
 #include <QFile>
@@ -334,6 +335,17 @@ void QueryAdapter::SetActiveRemoteSession(const QString &url)
   ReadOnUIThread<int>([this, url]() -> int {
     m_Ctx->Replay().SetSessionRemoteHost(
         url.isEmpty() ? rdcstr() : rdcstr(url.toUtf8().constData()));
+
+    // Recording a system trace asks the replay manager which device it is looking at, and the panel
+    // that asks is only refreshed by the remote host check that follows a connection made from the
+    // capture dialog. A session launched from here sets that host directly, so the panel has to be
+    // told explicitly or its Capture button stays disabled for a device that is running and ready.
+    if(IMainWindow *main = m_Ctx->GetMainWindow())
+    {
+      if(MainWindow *window = qobject_cast<MainWindow *>(main->Widget()))
+        window->NotifyRemoteHostChanged();
+    }
+
     return 0;
   });
 }

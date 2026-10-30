@@ -2743,19 +2743,19 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   // The ceiling is 10 seconds because that is the limit Snapdragon Profiler documents for its own
   // trace captures; offering more would only produce a duration the device tooling caps anyway. The
   // default is the shortest duration that still contains a few frames of work: the recorded text is
-  // roughly twenty megabytes per second on a busy device, and every one of those lines is parsed on
+  // roughly thirty megabytes per second on a busy device, and every one of those lines is parsed on
   // this machine afterwards.
   m_CaptureSeconds = new QSpinBox(this);
   m_CaptureSeconds->setRange(1, 10);
   m_CaptureSeconds->setValue(3);
   m_CaptureSeconds->setSuffix(tr(" s"));
   m_CaptureSeconds->setToolTip(tr("How long to record on the device. Longer recordings produce a "
-                                  "larger trace: roughly 20 MB of text per second on a busy "
+                                  "larger trace: roughly 30 MB of text per second on a busy "
                                   "device, all of which has to be converted and imported here."));
 
   // Which GPU events to ask for. The device's own capabilities decide what is actually available; this
-  // only decides how much of what is available is worth recording, because the per-command events
-  // dominate the size of the result.
+  // only decides how much of what is available is worth recording, because the per-command events are
+  // the only ones whose volume follows what the application is doing.
   m_CaptureDetail = new QComboBox(this);
   m_CaptureDetail->addItem(tr("GPU: metrics"), int(GpuTraceDetail::Metrics));
   m_CaptureDetail->addItem(tr("GPU: metrics + command lanes"), int(GpuTraceDetail::Commands));
@@ -2764,8 +2764,9 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   m_CaptureDetail->setToolTip(
       tr("Which GPU tracepoints to record. `metrics` collects frequency, utilisation, temperature "
          "and throttling. `metrics + command lanes` adds the per-cmdbatch and per-fence intervals "
-         "that the GPU Commands and GPU Waits lanes are drawn from, which is the largest part of a "
-         "GPU trace. `off` records the smallest trace, with CPU and scheduling lanes only."));
+         "that the GPU Commands and GPU Waits lanes are drawn from, which grows with the "
+         "application's submission rate. `off` records the smallest trace, with CPU and scheduling "
+         "lanes only."));
 
   m_Capture = new QPushButton(tr("Capture Trace..."), this);
 
@@ -3183,6 +3184,11 @@ void SystemTraceViewer::finishImport(const SystemTrace &trace, const QString &pa
   m_ImportPath.clear();
   m_Trace = trace;
   m_Loaded = true;
+
+  // The record button was disabled when the import started and nothing else re-checks it on a plain
+  // successful load, so without this a device that is still connected could not be recorded from
+  // again until some other event -- a host change, a capture closing -- happened to refresh it.
+  updateImportControls();
 
   applyImportedTrace(path);
 }
