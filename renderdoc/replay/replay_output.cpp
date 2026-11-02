@@ -203,6 +203,30 @@ void ReplayOutput::SetTextureDisplay(const TextureDisplay &o)
   }
 }
 
+bool ReplayOutput::SetSceneCamera(uint32_t anchor, const FloatVector &translation,
+                                   const FloatVector &rotation, bool enabled, uint32_t endEvent)
+{
+  CHECK_REPLAY_THREAD();
+  m_SceneEnabled = enabled;
+  m_SceneAnchor = anchor;
+  m_SceneEnd = endEvent ? endEvent : m_EventID;
+  m_SceneTranslation = translation;
+  m_SceneRotation = rotation;
+  m_MainOutput.dirty = true;
+  // A scene replay renders directly into the captured output resource. Restore
+  // that resource before the next ordinary Texture Viewer sample when the
+  // feature is turned off; EndSceneReplay cannot do this after the sample.
+  if(!enabled)
+  {
+    m_pDevice->ReplayLog(m_SceneEnd, eReplay_Full);
+    m_pController->FatalErrorCheck();
+  }
+  GraphicsAPI api = m_pController->GetAPIProperties().pipelineType;
+  if(api != GraphicsAPI::OpenGL && api != GraphicsAPI::D3D11 && api != GraphicsAPI::D3D12 && api != GraphicsAPI::Vulkan)
+    return false;
+  return true;
+}
+
 void ReplayOutput::SetMeshDisplay(const MeshDisplay &o)
 {
   CHECK_REPLAY_THREAD();
@@ -961,9 +985,23 @@ void ReplayOutput::DisplayTex()
     texDisplay.overlay = DebugOverlay::NoOverlay;
   }
 
+  const bool sceneMotion = m_SceneTranslation.x != 0.0f || m_SceneTranslation.y != 0.0f ||
+                            m_SceneTranslation.z != 0.0f || m_SceneRotation.x != 0.0f ||
+                            m_SceneRotation.y != 0.0f || m_SceneRotation.z != 0.0f;
+  // A zero transform must be a true no-op: sample the normal replay texture
+  // instead of replaying the capture and replacing identical constant buffers.
+  // This also makes the first Scene Viewer frame instant.
+  bool scene = m_SceneEnabled && sceneMotion && m_pDevice->BeginSceneReplay(
+      m_SceneAnchor, m_SceneEnd, m_SceneTranslation, m_SceneRotation);
+  // Replay may leave a captured render target bound. Bind the independent output before
+  // sampling, and re-apply its viewport/state even when this backend reports the same window.
+  if(scene)
+  {
+    m_pDevice->BindOutputWindow(0, false);
+    m_pDevice->BindOutputWindow(m_MainOutput.outputID, false);
+  }
   m_pDevice->RenderTexture(texDisplay);
   m_pController->FatalErrorCheck();
-
   ResourceId id = m_RenderData.texDisplay.resourceId;
 
   if(m_RenderData.texDisplay.overlay != DebugOverlay::NoOverlay && action &&

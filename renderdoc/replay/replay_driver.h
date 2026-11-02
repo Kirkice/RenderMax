@@ -293,6 +293,9 @@ public:
   virtual void RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &secondaryDraws,
                           const MeshDisplay &cfg) = 0;
   virtual bool RenderTexture(TextureDisplay cfg) = 0;
+  virtual bool BeginSceneReplay(uint32_t anchor, uint32_t end, const FloatVector &translation,
+                                const FloatVector &rotation) { return false; }
+  virtual void EndSceneReplay(uint32_t eventId) {}
 
   virtual void SetCustomShaderIncludes(const rdcarray<rdcstr> &directories) = 0;
   virtual void BuildCustomShader(ShaderEncoding sourceEncoding, const bytebuf &source,

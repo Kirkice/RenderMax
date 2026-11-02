@@ -41,6 +41,11 @@ public:
   void Shutdown();
   void SetTextureDisplay(const TextureDisplay &o);
   void SetMeshDisplay(const MeshDisplay &o);
+  bool SetSceneCamera(uint32_t anchor, const FloatVector &translation,
+                      const FloatVector &rotation, bool enabled, uint32_t endEvent = 0) override;
+  bool m_SceneEnabled = false;
+  uint32_t m_SceneAnchor = 0, m_SceneEnd = 0;
+  FloatVector m_SceneTranslation, m_SceneRotation;
   void SetDimensions(int32_t width, int32_t height);
   bytebuf ReadbackOutputTexture();
   rdcpair<int32_t, int32_t> GetDimensions();

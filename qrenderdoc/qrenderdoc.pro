@@ -191,6 +191,7 @@ SOURCES += Code/qrenderdoc.cpp \
     Styles/StyleData.cpp \
     Styles/RDStyle/RDStyle.cpp \
     Styles/RDTweakedNativeStyle/RDTweakedNativeStyle.cpp \
+    Styles/UEStyle/UEStyle.cpp \
     Windows/Dialogs/AboutDialog.cpp \
     Windows/Dialogs/CrashDialog.cpp \
     Windows/Dialogs/UpdateDialog.cpp \
@@ -312,6 +313,7 @@ HEADERS += Code/CaptureContext.h \
     Styles/StyleData.h \
     Styles/RDStyle/RDStyle.h \
     Styles/RDTweakedNativeStyle/RDTweakedNativeStyle.h \
+    Styles/UEStyle/UEStyle.h \
     Windows/Dialogs/AboutDialog.h \
     Windows/Dialogs/CrashDialog.h \
     Windows/Dialogs/UpdateDialog.h \
@@ -353,6 +355,7 @@ HEADERS += Code/CaptureContext.h \
     Widgets/Extended/RDTreeWidget.h \
     Widgets/BufferFormatSpecifier.h \
     Windows/BufferViewer.h \
+    Windows/SceneViewer.h \
     Widgets/Extended/RDTableView.h \
     Windows/DebugMessageView.h \
     Windows/LogView.h \

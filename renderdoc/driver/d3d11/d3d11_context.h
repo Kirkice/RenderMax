@@ -375,6 +375,9 @@ public:
   rdcarray<EventUsage> GetUsage(ResourceId id) { return m_ResourceUses[id]; }
   void ClearMaps();
 
+  // Scene replay hooks surround real draw execution only. They must not mutate
+  // the tracked capture state, and are cleared before ordinary replay resumes.
+  std::function<void(uint32_t, bool)> m_SceneDrawCallback;
   uint32_t GetEventID() { return m_CurEventID; }
   const APIEvent &GetEvent(uint32_t eventId) const;
 

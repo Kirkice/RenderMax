@@ -241,6 +241,11 @@ outputs.
 )");
   virtual void SetMeshDisplay(const MeshDisplay &config) = 0;
 
+  // Local scene replay. Returns false on backends without camera overrides. Rotation is in
+  // radians; translation is relative to the captured camera, in world units.
+  virtual bool SetSceneCamera(uint32_t anchorEvent, const FloatVector &translation,
+                              const FloatVector &rotation, bool enabled, uint32_t endEvent = 0) { return false; }
+
   DOCUMENT(R"(Read the output texture back as byte data. Primarily useful for headless outputs where
 the output data is not displayed anywhere natively.
 

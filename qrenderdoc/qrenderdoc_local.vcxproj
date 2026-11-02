@@ -748,6 +748,7 @@
     <ClCompile Include="Styles\RDStyle\RDStyle.cpp" />
     <ClCompile Include="Styles\StyleData.cpp" />
     <ClCompile Include="Styles\RDTweakedNativeStyle\RDTweakedNativeStyle.cpp" />
+    <ClCompile Include="Styles\UEStyle\UEStyle.cpp" />
     <ClCompile Include="Widgets\CustomPaintWidget.cpp" />
     <ClCompile Include="Windows\APIInspector.cpp" />
     <ClCompile Include="Windows\ResourceInspector.cpp" />
@@ -1002,6 +1003,7 @@
     <ClInclude Include="$(IntDir)generated\ui_ComputeDebugSelector.h" />
     <ClInclude Include="$(IntDir)generated\ui_FindReplace.h" />
     <ClInclude Include="$(IntDir)generated\ui_BufferViewer.h" />
+    <ClInclude Include="Windows\SceneViewer.h" />
     <ClInclude Include="$(IntDir)generated\ui_CaptureDialog.h" />
     <ClInclude Include="$(IntDir)generated\ui_D3D11PipelineStateViewer.h" />
     <ClInclude Include="$(IntDir)generated\ui_D3D12PipelineStateViewer.h" />
@@ -1078,6 +1080,7 @@
       <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
     </CustomBuild>
     <ClInclude Include="Styles\StyleData.h" />
+    <ClInclude Include="Styles\UEStyle\UEStyle.h" />
     <ClInclude Include="Code\qprocessinfo.h" />
     <ClInclude Include="Code\MiniQtHelper.h" />
     <CustomBuild Include="Code\pyrenderdoc\PythonContext.h">

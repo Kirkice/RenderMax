@@ -243,8 +243,8 @@ DECLARE_REFLECTION_STRUCT(BugReport);
 #define CONFIG_SETTINGS()                                                                          \
                                                                                                    \
   DOCUMENT(                                                                                        \
-      "The style to load for the UI. Possible values include 'Native', 'RDLight', 'RDDark'. "      \
-      "If empty, the closest of RDLight and RDDark will be chosen, based on the overall "          \
+      "The style to load for the UI. Possible values include 'Native', 'RDLight', 'RDDark', 'UEStyle'. " \
+      "If empty, UEStyle will be chosen as the default dark editor theme. "                          \
       "light-on-dark or dark-on-light theme of the application native style."                      \
       ""                                                                                           \
       ":type: str");                                                                               \

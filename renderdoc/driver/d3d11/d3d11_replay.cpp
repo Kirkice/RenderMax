@@ -34,6 +34,7 @@
 #include "maths/camera.h"
 #include "maths/formatpacking.h"
 #include "maths/matrix.h"
+#include "replay/scene_camera.h"
 #include "replay/dummy_driver.h"
 #include "serialise/rdcfile.h"
 #include "strings/string_utils.h"
@@ -1705,6 +1706,132 @@ rdcarray<DescriptorLogicalLocation> D3D11Replay::GetDescriptorLocations(
 RDResult D3D11Replay::ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBuffers)
 {
   return m_pDevice->ReadLogInitialisation(rdc, storeStructuredBuffers);
+}
+
+bool D3D11Replay::BeginSceneReplay(uint32_t anchor, uint32_t end,
+                                 const FloatVector &translation, const FloatVector &rotation)
+{
+  // For stripped DXBC, recognise the four consecutive column loads rather than
+  // assuming a Unity version-specific constant-buffer offset.
+  auto matrixOffset = [this]() -> int {
+    auto *state = m_pImmediateContext->GetCurrentPipelineState();
+    auto *shader = GetShader(ResourceId(), GetIDForDeviceChild(state->VS.Object), ShaderEntryPoint());
+    if(!shader) return -1;
+    rdcstr disasm = DisassembleShader(ResourceId(), shader, "");
+    for(uint32_t offset = 0; offset < 4096; offset += 16)
+    {
+      uint32_t c = offset / 16;
+      rdcstr y = StringFormat::Fmt("yyyy, cb0[%u].xyzw", c + 1);
+      rdcstr x = StringFormat::Fmt("cb0[%u].xyzw", c);
+      rdcstr z = StringFormat::Fmt("cb0[%u].xyzw, r0.zzzz", c + 2);
+      rdcstr w = StringFormat::Fmt("cb0[%u].xyzw", c + 3);
+      if(disasm.contains(y) && disasm.contains(x) && disasm.contains(z) && disasm.contains(w))
+        return int(offset);
+    }
+    return -1;
+  };
+  auto read = [this](int logicalOffset, int &rangeOffset, bytebuf &bytes) -> bool {
+    auto *state = m_pImmediateContext->GetCurrentPipelineState();
+    if(!state->VS.ConstantBuffers[0] || state->VS.CBCounts[0] == 0) return false;
+    // VSSetConstantBuffers1 exposes the selected range as cb0[0] to the shader. Read exactly
+    // that visible range; the physical FirstConstant is not part of the shader address space.
+    uint64_t rangeBytes = uint64_t(state->VS.CBCounts[0]) * 16;
+    GetBufferData(GetIDForDeviceChild(state->VS.ConstantBuffers[0]),
+                  uint64_t(state->VS.CBOffsets[0]) * 16, rangeBytes, bytes);
+    rangeOffset = logicalOffset;
+    return logicalOffset >= 0 && bytes.size() >= size_t(logicalOffset + 64);
+  };
+  if(anchor == 0 || anchor == ~0U)
+    return false;
+
+  // Establish the exact state immediately before the explicitly selected draw. Reading the CB
+  // here is safe; doing it from a draw callback mutates the immediate context mid-replay.
+  ReplayLog(anchor, eReplay_WithoutDraw);
+  int logicalOffset = matrixOffset(), physicalOffset = -1;
+  bytebuf bytes;
+  if(!read(logicalOffset, physicalOffset, bytes))
+    return false;
+  float matrix[16];
+  memcpy(matrix, bytes.data() + physicalOffset, 64);
+  if(!ScenePerspective(matrix))
+    return false;
+  if(m_SceneAnchor != anchor)
+  {
+    memcpy(m_SceneReference, matrix, 64);
+    m_SceneAnchor = anchor;
+  }
+
+  auto *anchorState = m_pImmediateContext->GetCurrentPipelineState();
+  ResourceId anchorBuffer = GetIDForDeviceChild(anchorState->VS.ConstantBuffers[0]);
+  UINT anchorOffset = anchorState->VS.CBOffsets[0];
+  UINT anchorCount = anchorState->VS.CBCounts[0];
+
+  bytebuf replacement = bytes;
+  Matrix4f changed = SceneCameraMatrix(m_SceneReference, translation, rotation);
+  memcpy(replacement.data() + physicalOffset, &changed[0], 64);
+  D3D11_BUFFER_DESC desc = {};
+  desc.ByteWidth = AlignUp((UINT)RDCMIN(replacement.size(), size_t(65536)), 16U);
+  desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  desc.Usage = D3D11_USAGE_IMMUTABLE;
+  D3D11_SUBRESOURCE_DATA data = {};
+  data.pSysMem = replacement.data();
+
+  ID3D11Buffer *temporary = NULL;
+  if(FAILED(m_pDevice->GetReal()->CreateBuffer(&desc, &data, &temporary)))
+    return false;
+
+  ID3D11Buffer *saved = NULL;
+  UINT savedOffset = 0, savedCount = 0;
+  bool replaced = false;
+  m_pImmediateContext->m_SceneDrawCallback = [&](uint32_t eid, bool restore) {
+    if(eid != anchor) return;
+    ID3D11DeviceContext *real = m_pImmediateContext->GetReal();
+    ID3D11DeviceContext1 *real1 = m_pImmediateContext->GetReal1();
+    if(restore)
+    {
+      if(replaced)
+      {
+        if(real1 && savedCount)
+          real1->VSSetConstantBuffers1(0, 1, &saved, &savedOffset, &savedCount);
+        else
+          real->VSSetConstantBuffers(0, 1, &saved);
+      }
+      SAFE_RELEASE(saved);
+      savedOffset = savedCount = 0;
+      replaced = false;
+      return;
+    }
+
+    auto *state = m_pImmediateContext->GetCurrentPipelineState();
+    if(!state->VS.ConstantBuffers[0] ||
+       GetIDForDeviceChild(state->VS.ConstantBuffers[0]) != anchorBuffer ||
+       state->VS.CBOffsets[0] != anchorOffset || state->VS.CBCounts[0] != anchorCount)
+      return;
+    savedOffset = state->VS.CBOffsets[0];
+    savedCount = state->VS.CBCounts[0];
+    real->VSGetConstantBuffers(0, 1, &saved);
+    // The replacement starts at the visible range's cb0[0], so rebase the temporary
+    // resource to zero while preserving the visible constant count.
+    UINT temporaryOffset = 0;
+    if(real1 && savedCount)
+      real1->VSSetConstantBuffers1(0, 1, &temporary, &temporaryOffset, &savedCount);
+    else
+      real->VSSetConstantBuffers(0, 1, &temporary);
+    replaced = true;
+  };
+  ReplayLog(end, eReplay_Full);
+  m_pImmediateContext->m_SceneDrawCallback = {};
+  SAFE_RELEASE(saved);
+  SAFE_RELEASE(temporary);
+  return true;
+}
+
+void D3D11Replay::EndSceneReplay(uint32_t eventId)
+{
+  m_pImmediateContext->m_SceneDrawCallback = {};
+  // Restore the capture's normal replay state after the scene output has been
+  // sampled. This is required for the next Display() and for Texture Viewer.
+  ReplayLog(eventId, eReplay_Full);
 }
 
 void D3D11Replay::ReplayLog(uint32_t endEventID, ReplayLogType replayType)

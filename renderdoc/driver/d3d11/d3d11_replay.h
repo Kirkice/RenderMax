@@ -199,6 +199,11 @@ public:
 
   RDResult ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBuffers);
   void ReplayLog(uint32_t endEventID, ReplayLogType replayType);
+  bool BeginSceneReplay(uint32_t anchor, uint32_t end, const FloatVector &translation,
+                        const FloatVector &rotation) override;
+  void EndSceneReplay(uint32_t eventId) override;
+  uint32_t m_SceneAnchor = 0;
+  float m_SceneReference[16] = {};
   SDFile *GetStructuredFile();
 
   rdcarray<uint32_t> GetPassEvents(uint32_t eventId);
