@@ -3574,6 +3574,9 @@ void SystemTraceViewer::updateThreadTime()
   m_ThreadTimeRows = rows;
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 0b7fd76105daba2410ac5515b669d910f73134d8
   // A frame window that falls outside the trace, which is what a trace recorded in a different
   // session than the capture gives, leaves nothing to show. Saying so is better than an empty table,
   // and the export button is disabled rather than silently doing nothing when clicked.
@@ -3583,8 +3586,11 @@ void SystemTraceViewer::updateThreadTime()
   if(m_ThreadTimeExport != NULL)
     m_ThreadTimeExport->setEnabled(!rows.isEmpty());
 
+<<<<<<< HEAD
 =======
 >>>>>>> 2b9424ba75e4e408127523fb3e97552cc863392a
+=======
+>>>>>>> 0b7fd76105daba2410ac5515b669d910f73134d8
   // Percentages are shares of the window the numbers were measured over, so a frame-clipped table
   // reads "how much of this frame did the thread run" instead of "how much of the capture".
   const double window = m_ThreadTimeWindowSec;

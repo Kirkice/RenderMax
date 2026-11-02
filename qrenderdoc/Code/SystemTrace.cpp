@@ -2318,10 +2318,13 @@ enum class FtraceOutput
   // Runqueue accounting input, drawn as a per-CPU level.
   RunQueueDepth,
 <<<<<<< HEAD
+<<<<<<< HEAD
   // An interval on the GPU lane group: GPU work, or a context waiting for the GPU.
   GpuSlice,
 =======
 >>>>>>> 2b9424ba75e4e408127523fb3e97552cc863392a
+=======
+>>>>>>> 0b7fd76105daba2410ac5515b669d910f73134d8
   // Understood but carries no interval: counted as recognised, never reported as missing.
   Point,
 };
@@ -2341,9 +2344,12 @@ const char *FtraceOutputName(FtraceOutput output)
     case FtraceOutput::WorkqueueSlice: return "workqueue slice";
     case FtraceOutput::RunQueueDepth: return "runqueue depth";
 <<<<<<< HEAD
+<<<<<<< HEAD
     case FtraceOutput::GpuSlice: return "gpu interval";
 =======
 >>>>>>> 2b9424ba75e4e408127523fb3e97552cc863392a
+=======
+>>>>>>> 0b7fd76105daba2410ac5515b669d910f73134d8
     case FtraceOutput::Point: return "point";
   }
 
@@ -2409,6 +2415,7 @@ const FtraceEventSpec kFtraceEvents[] = {
      "closes the work item interval"},
     {"cpu_frequency", NULL, FtraceOutput::CpuLevel, &ConsumeCpuFrequency, "CPU frequency level"},
 <<<<<<< HEAD
+<<<<<<< HEAD
     {"kgsl_pwrlevel", NULL, FtraceOutput::Level, &ConsumeGpuPwrLevel, "GPU frequency level"},
     {"kgsl_gpubusy", NULL, FtraceOutput::Level, &ConsumeGpuBusy, "GPU utilisation"},
     {"adreno_cmdbatch_submitted", NULL, FtraceOutput::GpuSlice, &ConsumeGpuCmdbatchSubmitted,
@@ -2426,6 +2433,8 @@ const FtraceEventSpec kFtraceEvents[] = {
     {"cdev_update", NULL, FtraceOutput::Level, &ConsumeCdevUpdate, "cooling device state"},
 =======
 >>>>>>> 2b9424ba75e4e408127523fb3e97552cc863392a
+=======
+>>>>>>> 0b7fd76105daba2410ac5515b669d910f73134d8
 
     // Understood, but nothing to draw: they are point events with no interval of their own, and
     // reporting them as unmodelled would bury the events that really are missing.
