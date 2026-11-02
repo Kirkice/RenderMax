@@ -191,10 +191,13 @@ private:
   QVector<TraceThreadTime> m_ThreadTimeRows;
   // Seconds the percentages are shares of: the frame window when clipping, else the whole trace.
   double m_ThreadTimeWindowSec = 0.0;
+<<<<<<< HEAD
   // The counter value under the cursor, as text. The timeline draws the same number next to the
   // curve, but a painter-drawn label is invisible to screen readers and to UI automation, so the
   // readable copy lives here.
   QLabel *m_HoverReadout = NULL;
+=======
+>>>>>>> 2b9424ba75e4e408127523fb3e97552cc863392a
   QLabel *m_Alignment = NULL;
   QLabel *m_Selection = NULL;
   QLabel *m_Status = NULL;
