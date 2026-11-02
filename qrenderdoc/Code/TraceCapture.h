@@ -66,31 +66,6 @@ class QObject;
 //     visible as evidence instead of being smoothed over.
 // ---------------------------------------------------------------------------------------------
 
-// How much of the GPU's own ftrace surface to record. This is a size/coverage trade-off, not a
-// capability one: every tracepoint below is requested only when the probe found it present and
-// enable-able, so asking for more than a device can give simply yields fewer lanes.
-//
-// Only the command and fence-wait events scale with what the application is doing: they fire once
-// per submission and once per fence, so a submission-heavy frame produces thousands of them, each a
-// long line of counters that has to be recorded on the device, converted and parsed here. The
-// metrics are sampled at whatever rate the device chooses and cost about the same either way. So the
-// default stops at the metrics that answer "how busy was the GPU", and the per-command lanes are
-// opt-in. The difference is not always large - a three second capture of a lightly loaded
-// application measured 93.9 MB of systrace text without the command events and 96.2 MB with them,
-// because on that device the scheduler and trace marker lines dominate - but the ceiling is set by
-// the application's submission rate, which this cannot know in advance.
-enum class GpuTraceDetail
-{
-  // No GPU events at all: the smallest trace, schedule and CPU lanes only.
-  Off = 0,
-  // Frequency, utilisation, temperature, thermal frequency cap and throttling state. These are
-  // sampled or event-driven at a rate the device chooses, so they add tens of events per second.
-  Metrics = 1,
-  // Metrics plus the per-cmdbatch and per-fence intervals, which become the GPU Commands and GPU
-  // Waits lanes. Opt-in, because they are the only part whose size follows the workload.
-  Commands = 2,
-};
-
 struct TraceCaptureOptions
 {
   // Perfetto textproto config. When empty, DefaultPerfettoConfig() is used.
@@ -98,9 +73,6 @@ struct TraceCaptureOptions
   // Recording length and ring buffer size baked into the default config. Ignored when
   // `configText` is supplied, because then the config owns those values.
   int durationMs = 5000;
-  // Which GPU tracepoints to ask for. The probe decides what is actually available; this decides
-  // what is worth the space among what is available.
-  GpuTraceDetail gpuDetail = GpuTraceDetail::Metrics;
   // A ring buffer rather than a filling one, so a long recording keeps its tail instead of stopping
   // at the ceiling. The default leaves room for the scheduler, interrupt, clock and atrace streams
   // the config enables on a busier device.
@@ -111,41 +83,6 @@ struct TraceCaptureOptions
   // Directory of the Snapdragon Profiler installation, used only to look for its bundled
   // `traceconv`. Empty disables that discovery step.
   QString snapdragonProfilerPath;
-};
-
-// What this device can actually report about the GPU, as measured by probes rather than assumed.
-// Every field is the result of a command the capture ran, so an unavailable lane can be explained
-// with the reason it is unavailable instead of being silently absent.
-//
-// The three tiers that matter, in order of how much a device has to allow:
-//   * sysfs: `/sys/class/kgsl/kgsl-3d0/{gpuclk,gpu_busy_percentage,devfreq}` is readable by the
-//     `shell` user on some builds and refused on others.
-//   * tracepoints: `traced_probes` enables the KGSL and thermal events, and its `enable` files are
-//     root-owned mode 0644 on a stock build, so it cannot write them without help.
-//   * root: `su` grants both the reads and the chmod. It does NOT grant per-stage GPU counters: those
-//     need `/sys/class/kgsl/kgsl-3d0/perfcounter`, which only exists in kernels built with
-//     CONFIG_QCOM_KGSL_PERFCOUNTER, and it is absent on most production devices.
-struct GpuTraceCapabilities
-{
-  // `su -c id` reported uid=0. When false, every probe below is expected to be refused.
-  bool rootAvailable = false;
-  // `/sys/class/kgsl/kgsl-3d0/gpuclk` and `gpu_busy_percentage` were readable.
-  bool sysfsReadable = false;
-  // `/sys/class/kgsl/kgsl-3d0/perfcounter` exists. This is the node SDP reads its per-stage GPU
-  // counters from (`% Shader ALU Capacity Utilized`, `% Texture Fetch Stall`, ...), so its absence is
-  // exactly why those metrics cannot be produced here.
-  bool perfcounterNode = false;
-  // ftrace events that are both present in the kernel and enabled for `traced_probes`. Only these go
-  // into the recording config: an event that is requested and cannot be enabled records nothing and
-  // reports no error, which looks identical to a device that has no GPU.
-  QStringList eventNames;
-  // The detail level this probe was run for. Kept in the result so a trace without command lanes can
-  // be read back as either "they were not asked for" or "the device refused them".
-  GpuTraceDetail requestedDetail = GpuTraceDetail::Metrics;
-  // Raw probe values, kept verbatim for the capture log.
-  QString gpuClock;
-  QString gpuBusyPercent;
-  QString gpuMaxClock;
 };
 
 struct TraceCaptureResult
@@ -165,13 +102,6 @@ struct TraceCaptureResult
   QString traceconvPath;
   // Non-empty only on failure, and always names the step that failed plus the tool's own output.
   QString error;
-  // What the device reported about its GPU. Retained so the lanes that are present, and the ones
-  // that are not, can be traced back to a specific probe result.
-  GpuTraceCapabilities gpu;
-  // Things the capture did not fail on but that make the resulting timeline incomplete, e.g. a
-  // device that will not report its GPU clock. Shown next to the trace so the absence of a lane is
-  // explained rather than left for the user to guess at.
-  QStringList warnings;
   // Every command issued and every tool result, in order. The UI shows this so a capture failure
   // is diagnosable from what actually ran rather than from a generic message.
   QStringList log;
@@ -181,13 +111,7 @@ struct TraceCaptureResult
 // switches, per-CPU frequency and idle residency, the atrace `gfx`/`sched` categories, and Android
 // system memory/CPU statistics. Every event name here is part of the standard Android ftrace
 // surface, so the config does not assume an Adreno- or vendor-specific probe exists.
-//
-// `extraFtraceEvents` adds vendor-shaped events, in `group/event` form. RunTraceCapture passes the
-// KGSL and thermal events that its probe found present and enabled, so the GPU lanes exist exactly
-// when the device can supply them. An empty list is a valid, complete config for a device without
-// those tracepoints.
-QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb,
-                              const QStringList &extraFtraceEvents = QStringList());
+QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb);
 
 // Runs the capture pipeline. Owns no state and must be called off the UI thread, because every
 // device command blocks until it completes. Never throws: every failure is returned in `error`

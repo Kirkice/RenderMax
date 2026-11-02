@@ -666,9 +666,6 @@
     <ClCompile Include="Styles\RDTweakedNativeStyle\RDTweakedNativeStyle.cpp">
       <Filter>Styles\RDTweakedNativeStyle</Filter>
     </ClCompile>
-    <ClCompile Include="Styles\UEStyle\UEStyle.cpp">
-      <Filter>Styles</Filter>
-    </ClCompile>
     <ClCompile Include="Styles\StyleData.cpp">
       <Filter>Styles</Filter>
     </ClCompile>
@@ -1024,9 +1021,6 @@
     </ClInclude>
     <ClInclude Include="$(IntDir)generated\ui_BufferFormatSpecifier.h">
       <Filter>Generated Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Windows\SceneViewer.h">
-      <Filter>Windows</Filter>
     </ClInclude>
     <ClInclude Include="$(IntDir)generated\ui_BufferViewer.h">
       <Filter>Generated Files</Filter>

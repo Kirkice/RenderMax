@@ -96,14 +96,6 @@ public:
   void BringToFront() override;
   bool PromptCloseCapture() override;
 
-  // Tells the System Trace panel to re-read which device is on the other end of the replay manager.
-  // The panel asks for that host when it decides whether it can record, and it is normally refreshed
-  // by the remote host check that runs after the user connects a device from the capture dialog. A
-  // session launched from somewhere else - a script, or the MCP server - sets the host without going
-  // through that dialog, so without this the Capture button stays disabled for a device that is up
-  // and ready to record. Does nothing when the panel has never been created this session.
-  void NotifyRemoteHostChanged();
-
   // ICaptureViewer
   void OnCaptureLoaded() override;
   void OnCaptureClosed() override;
@@ -315,8 +307,6 @@ private:
   // loading a layout that omits it runs the orphan cleanup in LoadLayout, which force-closes and
   // *deletes* the widget. A raw pointer here would then be dangling.
   QPointer<SystemTraceViewer> m_SystemTraceViewer;
-  QPointer<QWidget> m_SceneViewer;
-  QWidget *ensureSceneViewer();
 
   // Creates the panel on first use and returns the existing one afterwards. Also used as the tool
   // window manager's create callback so a saved layout can re-create the tab; keeping it here (and
