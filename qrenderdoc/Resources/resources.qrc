@@ -172,5 +172,24 @@
         <file>zoom@2x.png</file>
         <file>bookmark_blue.png</file>
         <file>bookmark_blue@2x.png</file>
+        <file>UE/save.svg</file>
+        <file>UE/settings.svg</file>
+        <file>UE/find.svg</file>
+        <file>UE/filter.svg</file>
+        <file>UE/add.svg</file>
+        <file>UE/folder.svg</file>
+        <file>UE/debug.svg</file>
+        <file>UE/backward.png</file>
+        <file>UE/forward.png</file>
+        <file>UE/backward_step.png</file>
+        <file>UE/forward_step.png</file>
+        <file>UE/close.svg</file>
+        <file>UE/check.svg</file>
+        <file>UE/indeterminate.svg</file>
+        <file>UE/radio-off.svg</file>
+        <file>UE/radio-on.svg</file>
+        <file>UE/chevron-down.svg</file>
+        <file>UE/chevron-right.svg</file>
+        <file>UE/starship.qss</file>
     </qresource>
 </RCC>

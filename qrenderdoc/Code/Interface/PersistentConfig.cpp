@@ -448,6 +448,9 @@ bool PersistentConfig::SetStyle()
     if(UIStyle == rdcstr(StyleData::availStyles[i].styleID))
     {
       QStyle *style = StyleData::availStyles[i].creator();
+      // A style sheet set at QApplication level survives QStyle replacement. Clear it
+      // before installing the next style so UE/Starship rules cannot bleed into other themes.
+      qApp->setStyleSheet(QString());
       Formatter::setPalette(style->standardPalette());
       QApplication::setStyle(style);
       return true;

@@ -753,7 +753,7 @@ struct EventItemModel : public QAbstractItemModel
       else if(m_BookmarkIndices.contains(index))
         return Icons::asterisk_orange();
       else if(m_FindResults.contains(index))
-        return Icons::find();
+        return Icons::ue_find();
       return QVariant();
     }
 
@@ -4371,7 +4371,7 @@ void EventBrowser::CreateFilterDialog()
 
     QPushButton saveButton;
     saveButton.setText(tr("Save"));
-    saveButton.setIcon(Icons::save());
+    saveButton.setIcon(Icons::ue_save());
     QPushButton deleteButton;
     deleteButton.setText(tr("Delete"));
 
@@ -4495,7 +4495,7 @@ void EventBrowser::CreateFilterDialog()
   });
 
   saveFilter->setAutoRaise(true);
-  saveFilter->setIcon(Icons::save());
+  saveFilter->setIcon(Icons::ue_save());
   saveFilter->setText(tr("Save"));
   saveFilter->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
   saveFilter->setToolTip(tr("Save current filter"));

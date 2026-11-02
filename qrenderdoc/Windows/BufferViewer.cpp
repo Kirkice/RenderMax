@@ -2492,21 +2492,21 @@ BufferViewer::BufferViewer(ICaptureContext &ctx, bool meshview, QWidget *parent)
 
   m_ExportMenu = new QMenu(this);
   m_ExportCSV = new QAction(this);
-  m_ExportCSV->setIcon(Icons::save());
+  m_ExportCSV->setIcon(Icons::ue_save());
   m_ExportBytes = new QAction(this);
-  m_ExportBytes->setIcon(Icons::save());
+  m_ExportBytes->setIcon(Icons::ue_save());
 
   m_ExportMenu->addAction(m_ExportCSV);
   m_ExportMenu->addAction(m_ExportBytes);
 
   m_DebugVert = new QAction(tr("&Debug this Vertex"), this);
-  m_DebugVert->setIcon(Icons::wrench());
+  m_DebugVert->setIcon(Icons::ue_debug());
 
   m_DebugMeshThread = new QAction(tr("&Debug Mesh Thread"), this);
-  m_DebugMeshThread->setIcon(Icons::wrench());
+  m_DebugMeshThread->setIcon(Icons::ue_debug());
 
   m_FilterMesh = new QAction(tr("&Filter to this Meshlet"), this);
-  m_FilterMesh->setIcon(Icons::filter());
+  m_FilterMesh->setIcon(Icons::ue_filter());
 
   m_RemoveFilter = new QAction(tr("&Remove Filter"), this);
   m_RemoveFilter->setIcon(Icons::arrow_undo());

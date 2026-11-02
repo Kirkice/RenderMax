@@ -109,7 +109,18 @@
   RESOURCE_DEF(topo_tristrip_adj, "topologies/topo_tristrip_adj.svg")          \
   RESOURCE_DEF(action, "action.png")                                           \
   RESOURCE_DEF(action_hover, "action_hover.png")                               \
-  RESOURCE_DEF(bookmark_blue, "bookmark_blue.png")
+  RESOURCE_DEF(bookmark_blue, "bookmark_blue.png")                               \
+  RESOURCE_DEF(ue_save, "UE/save.svg")                                          \
+  RESOURCE_DEF(ue_settings, "UE/settings.svg")                                  \
+  RESOURCE_DEF(ue_find, "UE/find.svg")                                          \
+  RESOURCE_DEF(ue_filter, "UE/filter.svg")                                      \
+  RESOURCE_DEF(ue_add, "UE/add.svg")                                            \
+  RESOURCE_DEF(ue_folder, "UE/folder.svg")                                      \
+  RESOURCE_DEF(ue_debug, "UE/debug.svg")                                        \
+  RESOURCE_DEF(ue_backward, "UE/backward.png")                                  \
+  RESOURCE_DEF(ue_forward, "UE/forward.png")                                    \
+  RESOURCE_DEF(ue_backward_step, "UE/backward_step.png")                         \
+  RESOURCE_DEF(ue_forward_step, "UE/forward_step.png")
 
 struct Resource
 {

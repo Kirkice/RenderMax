@@ -6,9 +6,8 @@
 
 #include "Styles/RDStyle/RDStyle.h"
 
-// A Qt palette/style preset inspired by Unreal Editor's dark Slate/Starship palette.
-// It deliberately reuses RenderDoc's existing geometry and painting code: this changes
-// colours and conservative widget metrics only, not panel layouts or behaviour.
+// Starship surfaces and Slate colours over the existing editor layout/interaction.
+// Standard Qt controls use Resources/UE/starship.qss; custom controls use the palette.
 class UEStyle : public RDStyle
 {
 public:
@@ -19,6 +18,12 @@ public:
   QPalette standardPalette() const override;
   int pixelMetric(PixelMetric metric, const QStyleOption *option = NULL,
                   const QWidget *widget = NULL) const override;
+
+protected:
+  const QBrush &outlineBrush(const QPalette &pal,
+                             QPalette::ColorRole role = QPalette::Foreground) const override;
+  void drawRoundedRectBorder(const QStyleOption *opt, QPainter *p, const QWidget *widget,
+                             QPalette::ColorRole fillRole, bool shadow) const override;
 
 private:
   static void applyPalette(QPalette &palette);

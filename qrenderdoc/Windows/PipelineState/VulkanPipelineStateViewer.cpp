@@ -541,9 +541,9 @@ VulkanPipelineStateViewer::VulkanPipelineStateViewer(ICaptureContext &ctx,
   m_ExportMenu = new QMenu(this);
 
   m_ExportHTML = new QAction(tr("Export current state to &HTML"), this);
-  m_ExportHTML->setIcon(Icons::save());
+  m_ExportHTML->setIcon(Icons::ue_save());
   m_ExportFOZ = new QAction(tr("Export to &Fossilize database"), this);
-  m_ExportFOZ->setIcon(Icons::save());
+  m_ExportFOZ->setIcon(Icons::ue_save());
 
   m_ExportMenu->addAction(m_ExportHTML);
   m_ExportMenu->addAction(m_ExportFOZ);

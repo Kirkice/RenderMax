@@ -892,7 +892,7 @@ void PixelHistoryView::on_events_customContextMenuRequested(const QPoint &pos)
 
   QAction jumpAction(tr("&Go to primitive %1 at Event %2").arg(tag.primitive).arg(tag.eventId), this);
 
-  jumpAction.setIcon(Icons::find());
+  jumpAction.setIcon(Icons::ue_find());
 
   QString debugText;
 
@@ -914,7 +914,7 @@ void PixelHistoryView::on_events_customContextMenuRequested(const QPoint &pos)
 
   QAction debugAction(debugText, this);
 
-  debugAction.setIcon(Icons::wrench());
+  debugAction.setIcon(Icons::ue_debug());
 
   contextMenu.addAction(&debugAction);
 

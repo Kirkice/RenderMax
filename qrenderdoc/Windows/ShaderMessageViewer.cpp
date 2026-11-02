@@ -61,12 +61,12 @@ ShaderMessageViewer::ShaderMessageViewer(ICaptureContext &ctx, ShaderStageMask s
   QMenu *menu = new QMenu(this);
 
   QAction *action = new QAction(tr("Export to &Text"));
-  action->setIcon(Icons::save());
+  action->setIcon(Icons::ue_save());
   QObject::connect(action, &QAction::triggered, this, &ShaderMessageViewer::exportText);
   menu->addAction(action);
 
   action = new QAction(tr("Export to &CSV"));
-  action->setIcon(Icons::save());
+  action->setIcon(Icons::ue_save());
   QObject::connect(action, &QAction::triggered, this, &ShaderMessageViewer::exportCSV);
   menu->addAction(action);
 
@@ -153,7 +153,7 @@ ShaderMessageViewer::ShaderMessageViewer(ICaptureContext &ctx, ShaderStageMask s
       m_LayoutStage = ShaderStage::Vertex;
     }
 
-    m_gotoDelegate = new ButtonDelegate(Icons::find(), QString(), this);
+    m_gotoDelegate = new ButtonDelegate(Icons::ue_find(), QString(), this);
     m_gotoDelegate->setEnableTrigger(gotoableRole, true);
 
     ui->messages->setItemDelegateForColumn(0, m_debugDelegate);
