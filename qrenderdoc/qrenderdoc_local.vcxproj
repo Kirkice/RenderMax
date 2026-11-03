@@ -785,6 +785,11 @@
     <ClCompile Include="Code\AI\MCPCompatibilityTools.cpp" />
     <ClCompile Include="Code\AI\MCPCompatibilityTests.cpp" />
     <ClCompile Include="Code\AI\MCPResourceTools.cpp" />
+    <ClCompile Include="Code\AI\MCPAssetExport.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <ClCompile Include="Code\AI\MCPResourceTests.cpp" />
     <ClCompile Include="Code\AI\MCPSourceMapping.cpp" />
     <ClCompile Include="Windows\Dialogs\InvestigationReportDialog.cpp" />
@@ -1057,6 +1062,7 @@
     <ClInclude Include="Code\AI\MCPComparisonTools.h" />
     <ClInclude Include="Code\AI\MCPCompatibilityTools.h" />
     <ClInclude Include="Code\AI\MCPResourceTools.h" />
+    <ClInclude Include="Code\AI\MCPAssetExport.h" />
     <ClInclude Include="Code\AI\MCPResourceContractFixture.inl" />
     <ClInclude Include="Code\AI\MCPSourceMapping.h" />
     <ClInclude Include="Windows\Dialogs\MaliAnalysisDialog.h" />

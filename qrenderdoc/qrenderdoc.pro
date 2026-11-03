@@ -283,6 +283,7 @@ SOURCES += Code/qrenderdoc.cpp \
     Code/AI/MCPCompatibilityTools.cpp \
     Code/AI/MCPCompatibilityTests.cpp \
     Code/AI/MCPResourceTools.cpp \
+    Code/AI/MCPAssetExport.cpp \
     Code/AI/MCPResourceTests.cpp \
     Code/AI/MCPSourceMapping.cpp \
     Windows/Dialogs/InvestigationReportDialog.cpp \
@@ -400,6 +401,7 @@ HEADERS += Code/CaptureContext.h \
     Code/AI/MCPComparisonTools.h \
     Code/AI/MCPCompatibilityTools.h \
     Code/AI/MCPResourceTools.h \
+    Code/AI/MCPAssetExport.h \
     Code/AI/MCPResourceContractFixture.inl \
     Code/AI/MCPSourceMapping.h \
     Code/AI/MCPHttpServer.h \

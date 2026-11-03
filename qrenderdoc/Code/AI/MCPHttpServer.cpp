@@ -622,7 +622,12 @@ void HttpServer::ProcessNextRequest(QTcpSocket *sock)
     CallContext call;
     call.ctx = context;
     call.cancellationState = cancelled;
-    call.deadlineMs = QDateTime::currentMSecsSinceEpoch() + kToolDeadlineMs;
+    // Asset export is a bounded local disk operation, not a lightweight query.
+    // Keep normal tools at 60 seconds; large captures need a longer dedicated budget.
+    const bool assetExport = toolName == QStringLiteral("renderdoc_exportFrameAssets") ||
+                             toolName == QStringLiteral("renderdoc_exportDrawAssets");
+    call.deadlineMs = QDateTime::currentMSecsSinceEpoch() +
+                      (assetExport ? qint64(30 * 60 * 1000) : kToolDeadlineMs);
     const ToolResult result = registry->Call(toolName, arguments, call);
 
     QJsonObject item;

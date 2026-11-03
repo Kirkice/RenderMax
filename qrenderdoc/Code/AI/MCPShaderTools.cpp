@@ -12,6 +12,7 @@
 #include "Code/Interface/PersistentConfig.h"
 #include "Code/Interface/QRDInterface.h"
 #include "MCPTools.h"
+#include "Windows/ShaderViewer.h"
 
 namespace MCP
 {
@@ -481,7 +482,10 @@ ToolResult QueryAdapter::ShaderTool(const QString &name, const QJsonObject &args
   const bool diagnostics = name == QStringLiteral("renderdoc_getShaderCompileDiagnostics");
   const bool variants = name == QStringLiteral("renderdoc_findShaderVariants");
   const bool project = name == QStringLiteral("renderdoc_findProjectImplementation");
-  if(!apply && !validate && !sourceTool && !info && !compare && !diagnostics && !variants && !project)
+  const bool conversion = name == QStringLiteral("renderdoc_prepareUnityShaderConversion");
+  const bool showUnity = name == QStringLiteral("renderdoc_showUnityShader");
+  if(!apply && !validate && !sourceTool && !info && !compare && !diagnostics && !variants && !project &&
+     !conversion && !showUnity)
     return Fail(ErrorCode::MethodNotFound, "Unknown shader tool");
   ShaderEditRequest edit;
   QByteArray bytes;
@@ -504,11 +508,11 @@ ToolResult QueryAdapter::ShaderTool(const QString &name, const QJsonObject &args
                 "Ray tracing event bindings are not exposed by the common PipeState stage "
                 "interface; use resourceId reflection");
   const bool includeSource =
-      sourceTool || compare ||
+      sourceTool || compare || conversion ||
       args.value(QStringLiteral("includeSource")).toBool(info && !stageArg.isEmpty());
   if(info && !args.contains(QStringLiteral("eventId")) && !args.contains(QStringLiteral("resourceId")))
     return Fail(ErrorCode::InvalidParams, "eventId or resourceId is required");
-  const bool includeCB = info && args.value(QStringLiteral("includeConstantBuffers"))
+  const bool includeCB = (info || conversion) && args.value(QStringLiteral("includeConstantBuffers"))
                                      .toBool(args.contains(QStringLiteral("eventId")));
   if(info && includeCB && !args.contains(QStringLiteral("eventId")))
     return Fail(ErrorCode::InvalidParams,
@@ -614,7 +618,24 @@ ToolResult QueryAdapter::ShaderTool(const QString &name, const QJsonObject &args
                         "runtime use; symlinks are not followed.")}});
   };
   ToolResult result = WithCaptureUI(call, [&](ICaptureContext &ctx) -> ToolResult {
-    if((apply || validate || includeSource || includeCB || project || diagnostics) &&
+    if(showUnity)
+    {
+      const QString shader = args.value(QStringLiteral("shader")).toString();
+      if(shader.isEmpty())
+        return Fail(ErrorCode::InvalidParams, "shader must be a nonempty Unity ShaderLab/HLSL string");
+      const QString title = args.value(QStringLiteral("title")).toString();
+      QList<ShaderViewer *> viewers = ctx.GetMainWindow()->Widget()->findChildren<ShaderViewer *>();
+      if(viewers.isEmpty())
+        return Fail(ErrorCode::Unsupported, "No Shader Viewer is currently open");
+      ShaderViewer *viewer = viewers.back();
+      viewer->ShowUnityShader(shader, title);
+      return ToolResult::Success(QJsonObject{
+          {QStringLiteral("available"), true},
+          {QStringLiteral("displayed"), true},
+          {QStringLiteral("title"), title.isEmpty() ? QStringLiteral("Unity Shader") : title},
+          {QStringLiteral("note"), QStringLiteral("Displayed as a read-only panel; the captured shader was not modified.")}});
+    }
+    if((apply || validate || includeSource || includeCB || project || diagnostics || conversion) &&
        !ctx.Config().MCP_AllowSensitiveData)
       return ToolResult::Failure(Error(
           ErrorCode::Unsupported, QStringLiteral("Sensitive shader/source/constant data is disabled"),
@@ -921,6 +942,12 @@ ToolResult QueryAdapter::ShaderTool(const QString &name, const QJsonObject &args
           return Fail(ErrorCode::InvalidParams, "resourceId/stage contradicts the event binding");
         out = QJsonObject{{QStringLiteral("available"), !stages.isEmpty()},
                           {QStringLiteral("eventId"), double(event)},
+                          {QStringLiteral("conversionPackage"), conversion},
+                          {QStringLiteral("target"), conversion ? QStringLiteral("Unity ShaderLab / HLSL") : QString()},
+                          {QStringLiteral("llmPrompt"), conversion ? QStringLiteral(
+                               "Reconstruct a readable Unity ShaderLab shader from this captured draw-call package. "
+                               "Preserve stage semantics and resource bindings where confirmed. Mark inferred names, "
+                               "do not claim the original Unity source was recovered, and return only compilable ShaderLab/HLSL plus a short report.") : QString()},
                           {QStringLiteral("requestedStage"), stageArg},
                           {QStringLiteral("availableStages"), available},
                           {QStringLiteral("shaders"), stages},
@@ -1041,6 +1068,20 @@ void RegisterShaderTools(ToolRegistry &registry, QueryAdapter &adapter)
       edit, required, true);
   QJsonObject strings = Type("array");
   strings[QStringLiteral("items")] = Type("string");
+  QJsonObject conversion = event;
+  conversion[QStringLiteral("includeConstantBuffers")] = Type("boolean");
+  conversion[QStringLiteral("includeSource")] = Type("boolean");
+  add("renderdoc_prepareUnityShaderConversion",
+      "Collect the selected draw call's bound shader stages, source/disassembly, reflection, signatures, "
+      "resource bindings and optionally constant buffer values into an LLM-ready Unity conversion package. "
+      "This tool does not call an LLM or modify the capture.",
+      conversion, QJsonArray{QStringLiteral("eventId")});
+  add("renderdoc_showUnityShader",
+      "Display an LLM-reconstructed Unity ShaderLab/HLSL result in the currently open Shader Viewer. "
+      "The panel is read-only and the captured shader is never modified.",
+      QJsonObject{{QStringLiteral("shader"), Type("string")},
+                  {QStringLiteral("title"), Type("string")}},
+      QJsonArray{QStringLiteral("shader")});
   add("renderdoc_findProjectImplementation",
       "Search explicit native project roots for shader and C#/C++ text/name candidates, optionally "
       "using event reflection source references. Sensitive gate applies; no extension "

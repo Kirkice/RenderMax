@@ -171,6 +171,10 @@ public:
 
   virtual void ShowErrors(const rdcstr &errors) override;
 
+  // Displays an externally reconstructed Unity ShaderLab/HLSL result in a
+  // dedicated read-only panel. This never changes the captured shader.
+  Q_INVOKABLE void ShowUnityShader(const QString &shader, const QString &title = QString());
+
   virtual void AddWatch(const rdcstr &variable) override;
 
   virtual rdcstrpairs GetCurrentFileContents() override;
@@ -338,6 +342,8 @@ private:
   QMap<ScintillaEdit *, QList<sptr_t>> m_Bookmarks;
 
   QTextEdit *debugInfoLog = NULL;
+  QTextEdit *m_UnityShader = NULL;
+  QWidget *m_UnityShaderFrame = NULL;
 
   static const int CURRENT_MARKER = 0;
   static const int BREAKPOINT_MARKER = 2;

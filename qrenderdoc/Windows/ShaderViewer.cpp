@@ -36,6 +36,9 @@
 #include <QSet>
 #include <QShortcut>
 #include <QToolTip>
+#include <QVBoxLayout>
+#include <QPushButton>
+#include <QTextEdit>
 #include "Code/Resources.h"
 #include "Code/AI/MCPExternalTools.h"
 #include "Code/ScintillaSyntax.h"
@@ -6004,6 +6007,40 @@ void ShaderViewer::RunForward()
   }
 
   runTo(~0U, true);
+}
+
+void ShaderViewer::ShowUnityShader(const QString &shader, const QString &title)
+{
+  if(!m_UnityShaderFrame)
+  {
+    m_UnityShaderFrame = new QWidget(this);
+    m_UnityShaderFrame->setWindowTitle(title.isEmpty() ? tr("Unity Shader") : title);
+    QVBoxLayout *layout = new QVBoxLayout(m_UnityShaderFrame);
+    layout->setContentsMargins(3, 3, 3, 3);
+    QHBoxLayout *buttons = new QHBoxLayout();
+    QPushButton *copy = new QPushButton(tr("Copy"), m_UnityShaderFrame);
+    QPushButton *select = new QPushButton(tr("Select All"), m_UnityShaderFrame);
+    buttons->addWidget(copy);
+    buttons->addWidget(select);
+    buttons->addStretch(1);
+    layout->addLayout(buttons);
+    m_UnityShader = new QTextEdit(m_UnityShaderFrame);
+    m_UnityShader->setReadOnly(true);
+    m_UnityShader->setLineWrapMode(QTextEdit::NoWrap);
+    m_UnityShader->setFont(Formatter::FixedFont());
+    layout->addWidget(m_UnityShader);
+    QObject::connect(copy, &QPushButton::clicked, m_UnityShader, &QTextEdit::copy);
+    QObject::connect(select, &QPushButton::clicked, m_UnityShader, &QTextEdit::selectAll);
+    ui->docking->addToolWindow(m_UnityShaderFrame,
+                               ToolWindowManager::AreaReference(ToolWindowManager::BottomOf,
+                                                                ui->docking->areaOf(m_Scintillas.front()),
+                                                                0.45f));
+    ui->docking->setToolWindowProperties(m_UnityShaderFrame,
+                                         ToolWindowManager::DisallowFloatWindow);
+  }
+  m_UnityShaderFrame->setWindowTitle(title.isEmpty() ? tr("Unity Shader") : title);
+  m_UnityShader->setPlainText(shader);
+  ToolWindowManager::raiseToolWindow(m_UnityShaderFrame);
 }
 
 void ShaderViewer::ShowErrors(const rdcstr &errors)

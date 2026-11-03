@@ -59,6 +59,8 @@ QHeaderView::section { color: #C0C0C0; background: #2F2F2F; border: 0; border-ri
 QTreeView, QTableView, QListView { color: #C0C0C0; background: #1A1A1A; alternate-background-color: #242424; border: 0; gridline-color: #2F2F2F; outline: 0; }
 QTreeView::item, QTableView::item, QListView::item { border: 0; padding: 2px 4px; }
 QTreeView::branch { background: #1A1A1A; }
+QTreeView::branch:has-children:closed { image: url(:/UE/chevron-right.svg); }
+QTreeView::branch:has-children:open { image: url(:/UE/chevron-down.svg); }
 QTreeView::item:hover, QTableView::item:hover, QListView::item:hover { background: #383838; }
 QTreeView::item:selected, QTableView::item:selected, QListView::item:selected { background: #0070E0; color: white; }
 QTreeView::item:selected:!active, QTableView::item:selected:!active, QListView::item:selected:!active { background: #3F3F3F; }

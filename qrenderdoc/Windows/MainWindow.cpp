@@ -47,6 +47,7 @@
 #include "Code/AI/MCPComparisonTools.h"
 #include "Code/AI/MCPCompatibilityTools.h"
 #include "Code/AI/MCPResourceTools.h"
+#include "Code/AI/MCPAssetExport.h"
 #include "Code/AI/MCPHttpServer.h"
 #include "Code/AI/MCPQueryAdapter.h"
 #include "Code/AI/MCPToolRegistry.h"
@@ -196,6 +197,7 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
   MCP::RegisterComparisonTools(*m_MCPRegistry, *m_MCPAdapter);
   MCP::RegisterCompatibilityTools(*m_MCPRegistry, *m_MCPAdapter);
   MCP::RegisterResourceTools(*m_MCPRegistry, *m_MCPAdapter);
+  MCP::RegisterAssetExportTools(*m_MCPRegistry, *m_MCPAdapter);
 
   m_MCPServer = new MCP::HttpServer(this);
   m_MCPServer->SetRegistry(m_MCPRegistry);
