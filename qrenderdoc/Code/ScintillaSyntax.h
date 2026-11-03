@@ -24,6 +24,9 @@
 
 #pragma once
 
+#include <QString>
+#include <QStringList>
+
 #define SCLEX_GLSL 1000
 #define SCLEX_HLSL 1001
 #define SCLEX_BUFFER 1002
@@ -33,3 +36,13 @@
 class ScintillaEdit;
 
 void ConfigureSyntax(ScintillaEdit *scintilla, int language);
+
+// Language data shared by syntax highlighting and ShaderViewer's lightweight
+// IntelliSense. These functions return self-contained data and never depend on
+// an external editor or VS Code installation.
+QStringList ShaderCompletionWords(int language);
+QStringList ShaderPreprocessorWords(int language);
+QStringList ShaderSemanticWords(int language);
+QStringList ShaderTypeMembers(int language, const QString &typeName);
+QString ShaderFunctionSignature(int language, const QString &function);
+QString ShaderFunctionDocumentation(int language, const QString &function);

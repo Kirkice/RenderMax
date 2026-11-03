@@ -96,5 +96,11 @@ void UEStyle::drawRoundedRectBorder(const QStyleOption *opt, QPainter *p,
 int UEStyle::pixelMetric(PixelMetric metric, const QStyleOption *option,
                          const QWidget *widget) const
 {
+  // Match the compact Starship tab close button. ToolWindowManager's single-tab
+  // title bar obtains its close-button rectangle from these metrics instead of QSS.
+  if(metric == QStyle::PM_TabCloseIndicatorWidth ||
+     metric == QStyle::PM_TabCloseIndicatorHeight)
+    return 12;
+
   return RDStyle::pixelMetric(metric, option, widget);
 }

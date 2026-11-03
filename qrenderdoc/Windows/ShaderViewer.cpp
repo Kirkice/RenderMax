@@ -1681,7 +1681,16 @@ ScintillaEdit *ShaderViewer::MakeEditor(const QString &name, const QString &text
   ret->setMarginWidthN(2, 16.0);
   ret->setObjectName(name);
 
-  ret->styleSetFont(STYLE_DEFAULT, Formatter::FixedFont().family().toUtf8().data());
+  QString editorFont = Formatter::FixedFont().family();
+  if(lang == SCLEX_HLSL || lang == SCLEX_GLSL)
+  {
+    // Match VS Code's default Windows editor font for shader source. Keep the
+    // configured system monospace font as a portable fallback.
+    QFontDatabase fontDatabase;
+    if(fontDatabase.families().contains(lit("Consolas"), Qt::CaseInsensitive))
+      editorFont = lit("Consolas");
+  }
+  ret->styleSetFont(STYLE_DEFAULT, editorFont.toUtf8().data());
   ret->styleSetSize(STYLE_DEFAULT, Formatter::FixedFont().pointSize());
 
   // C# DarkGreen
@@ -1697,6 +1706,16 @@ ScintillaEdit *ShaderViewer::MakeEditor(const QString &name, const QString &text
 
   ConfigureSyntax(ret, lang);
 
+  if(lang == SCLEX_HLSL || lang == SCLEX_GLSL)
+  {
+    configureShaderIntelligence(ret, lang);
+    ret->indicSetStyle(INDICATOR_COMPILE_ERROR, INDIC_SQUIGGLE);
+    ret->indicSetFore(INDICATOR_COMPILE_ERROR, SCINTILLA_COLOUR(255, 85, 85));
+    ret->styleSetBack(COMPILE_ERROR_STYLE, SCINTILLA_COLOUR(68, 71, 90));
+    ret->styleSetFore(COMPILE_ERROR_STYLE, SCINTILLA_COLOUR(255, 85, 85));
+    ret->annotationSetVisible(ANNOTATION_BOXED);
+  }
+
   ret->setTabWidth(4);
 
   ret->setScrollWidth(1);
@@ -1709,6 +1728,299 @@ ScintillaEdit *ShaderViewer::MakeEditor(const QString &name, const QString &text
   ret->emptyUndoBuffer();
 
   return ret;
+}
+
+void ShaderViewer::configureShaderIntelligence(ScintillaEdit *editor, int language)
+{
+  editor->setProperty("rendermax.shader.language", QByteArray::number(language).constData());
+  editor->autoCSetMaxHeight(12);
+  editor->autoCSetMaxWidth(60);
+  editor->autoCSetCancelAtStart(false);
+  editor->autoCSetChooseSingle(false);
+  editor->autoCSetIgnoreCase(false);
+  editor->autoCSetDropRestOfWord(true);
+  editor->autoCSetOrder(SC_ORDER_PERFORMSORT);
+
+  // Subtle current-line and brace feedback on the Slate editing surface.
+  editor->setCaretLineVisible(true);
+  // Dracula's line highlight is an outlined #44475A. Scintilla exposes a
+  // fill here, so use the same colour at low opacity to keep selection clear.
+  editor->setCaretLineBack(SCINTILLA_COLOUR(68, 71, 90));
+  editor->setCaretLineBackAlpha(72);
+  editor->setMouseDwellTime(500);
+
+  QObject::connect(editor, &ScintillaEdit::charAdded, [this, editor](int ch) {
+    if(editor->readOnly())
+      return;
+
+    if(ch == '(' || ch == ',')
+      showShaderCallTip(editor);
+
+    // Insert the closing half after Scintilla has committed the typed character.
+    // Do not pair when a selection is active or when the same closing character
+    // is already immediately ahead of the caret.
+    const QMap<int, char> pairs = {{'(', ')'}, {'[', ']'}, {'{', '}'}, {'\"', '\"'}, {'\'', '\''}};
+    if(pairs.contains(ch) && editor->selectionEmpty())
+    {
+      const sptr_t pos = editor->currentPos();
+      const QByteArray next = editor->textRange(int(pos), int(pos + 1));
+      if(next.isEmpty() || next[0] != pairs[ch])
+      {
+        const char closing[2] = {pairs[ch], 0};
+        editor->insertText(pos, closing);
+        editor->setSelection(pos, pos);
+      }
+    }
+
+    if(ch == '.' || ch == ':' || ch == '#' || ch == '_' ||
+       (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'))
+      showShaderCompletions(editor);
+  });
+
+  QObject::connect(editor, &ScintillaEdit::updateUi,
+                   [this, editor]() { updateShaderBraceHighlight(editor); });
+  QObject::connect(editor, &ScintillaEdit::dwellStart,
+                   [this, editor](int x, int y) { showShaderHover(editor, x, y); });
+  QObject::connect(editor, &ScintillaEdit::dwellEnd, [](int, int) { QToolTip::hideText(); });
+
+  QObject::connect(editor, &ScintillaEdit::keyPressed, [this, editor](QKeyEvent *ev) {
+    if(!editor->readOnly() && ev->key() == Qt::Key_Space &&
+       (ev->modifiers() & Qt::ControlModifier))
+    {
+      showShaderCompletions(editor, true);
+      ev->accept();
+      return;
+    }
+
+    if(ev->key() == Qt::Key_Escape && editor->callTipActive())
+      editor->callTipCancel();
+  });
+}
+
+void ShaderViewer::showShaderCompletions(ScintillaEdit *editor, bool explicitRequest)
+{
+  if(editor->readOnly())
+    return;
+
+  const int language = editor->propertyInt("rendermax.shader.language", SCLEX_HLSL);
+  const sptr_t pos = editor->currentPos();
+  const sptr_t start = editor->wordStartPosition(pos, true);
+  const int prefixLength = int(pos - start);
+  const QString prefix = QString::fromUtf8(editor->textRange(int(start), int(pos)));
+  const QString preceding =
+      pos > 0 ? QString::fromUtf8(editor->textRange(int(pos - 1), int(pos))) : QString();
+  const bool contextualTrigger = preceding == lit(".") || preceding == lit(":") ||
+                                 preceding == lit("#");
+
+  if(!explicitRequest && !contextualTrigger && prefixLength < 2)
+    return;
+
+  QSet<QString> words;
+  QStringList languageWords = ShaderCompletionWords(language);
+
+  // Provide focused completion after preprocessor and semantic punctuation.
+  const QString linePrefix = QString::fromUtf8(
+      editor->textRange(int(editor->positionFromLine(editor->lineFromPosition(pos))), int(pos)));
+  if(linePrefix.trimmed().startsWith(QLatin1Char('#')))
+    languageWords = ShaderPreprocessorWords(language);
+  else if(linePrefix.lastIndexOf(QLatin1Char(':')) > linePrefix.lastIndexOf(QLatin1Char(';')))
+    languageWords = ShaderSemanticWords(language);
+
+  // Resolve the simple and very common "Type variable; variable." case. This
+  // gives useful Texture/Buffer method lists without requiring a full compiler AST.
+  if(preceding == lit("."))
+  {
+    int objectEnd = int(pos) - 1;
+    int objectStart = objectEnd;
+    const QString document = QString::fromUtf8(editor->textRange(0, int(editor->textLength())));
+    while(objectStart > 0 &&
+          (document[objectStart - 1].isLetterOrNumber() || document[objectStart - 1] == QLatin1Char('_')))
+      objectStart--;
+    const QString object = document.mid(objectStart, objectEnd - objectStart);
+    const QRegularExpression declaration(
+        lit("\\b([A-Za-z_][A-Za-z0-9_]*(?:\\s*<[^;>]+>)?)\\s+") +
+        QRegularExpression::escape(object) + lit("\\b"));
+    const QRegularExpressionMatch declarationMatch = declaration.match(document);
+    if(declarationMatch.hasMatch())
+    {
+      const QString typeName = declarationMatch.captured(1);
+      languageWords = ShaderTypeMembers(language, typeName);
+
+      // If this is a user-defined structure, collect its declared fields.
+      if(languageWords.isEmpty())
+      {
+        const QString plainType = typeName.section(QLatin1Char('<'), 0, 0).trimmed();
+        const QRegularExpression structure(
+            lit("\\bstruct\\s+") + QRegularExpression::escape(plainType) +
+                lit("\\s*\\{([^}]*)\\}"),
+            QRegularExpression::DotMatchesEverythingOption);
+        const QRegularExpressionMatch structureMatch = structure.match(document);
+        if(structureMatch.hasMatch())
+        {
+          const QString body = structureMatch.captured(1);
+          const QRegularExpression field(
+              lit("(?:^|;)\\s*[A-Za-z_][A-Za-z0-9_<>]*(?:\\s*[0-9x]*)?\\s+([A-Za-z_][A-Za-z0-9_]*)"));
+          QRegularExpressionMatchIterator fields = field.globalMatch(body);
+          while(fields.hasNext())
+            languageWords << fields.next().captured(1);
+          languageWords.removeDuplicates();
+          languageWords.sort(Qt::CaseSensitive);
+        }
+      }
+    }
+  }
+
+  for(const QString &word : languageWords)
+    if(prefix.isEmpty() || word.startsWith(prefix, Qt::CaseSensitive))
+      words.insert(word);
+
+  // Include functions, structures, macros and identifiers from every source tab.
+  // This intentionally uses a tolerant lexical scan so completion keeps working
+  // while the user is in the middle of writing invalid code.
+  static const QRegularExpression identifier(lit("\\b[A-Za-z_][A-Za-z0-9_]*\\b"));
+  // A focused member list should not be polluted with every identifier in the file.
+  if(preceding != lit(".") || languageWords.isEmpty())
+  {
+    for(ScintillaEdit *source : m_Scintillas)
+    {
+      const QString text = QString::fromUtf8(source->textRange(0, int(source->textLength())));
+      QRegularExpressionMatchIterator matches = identifier.globalMatch(text);
+      while(matches.hasNext())
+      {
+        const QString word = matches.next().captured();
+        if(word != prefix && (prefix.isEmpty() || word.startsWith(prefix, Qt::CaseSensitive)))
+          words.insert(word);
+      }
+    }
+  }
+
+  if(words.isEmpty())
+  {
+    if(editor->autoCActive())
+      editor->autoCCancel();
+    return;
+  }
+
+  QStringList sorted = words.values();
+  sorted.sort(Qt::CaseSensitive);
+  editor->autoCShow(prefixLength, sorted.join(QLatin1Char(' ')).toUtf8().constData());
+}
+
+void ShaderViewer::showShaderCallTip(ScintillaEdit *editor)
+{
+  const sptr_t pos = editor->currentPos();
+  const QString before = QString::fromUtf8(editor->textRange(0, int(pos)));
+  const int openParen = before.lastIndexOf(QLatin1Char('('));
+  if(openParen < 0)
+    return;
+
+  int end = openParen;
+  while(end > 0 && before[end - 1].isSpace())
+    end--;
+  int begin = end;
+  while(begin > 0 && (before[begin - 1].isLetterOrNumber() || before[begin - 1] == QLatin1Char('_')))
+    begin--;
+
+  const QString function = before.mid(begin, end - begin);
+  const int language = editor->propertyInt("rendermax.shader.language", SCLEX_HLSL);
+  QString signature = ShaderFunctionSignature(language, function);
+
+  // Also recognise signatures declared in any open shader source tab.
+  if(signature.isEmpty())
+  {
+    const QRegularExpression functionDeclaration(
+        lit("\\b[A-Za-z_][A-Za-z0-9_<>]*\\s+") + QRegularExpression::escape(function) +
+        lit("\\s*\\(([^;{}]*)\\)"));
+    for(ScintillaEdit *source : m_Scintillas)
+    {
+      const QString sourceText =
+          QString::fromUtf8(source->textRange(0, int(source->textLength())));
+      const QRegularExpressionMatch match = functionDeclaration.match(sourceText);
+      if(match.hasMatch())
+      {
+        signature = function + lit("(") + match.captured(1).simplified() + lit(")");
+        break;
+      }
+    }
+  }
+
+  if(signature.isEmpty())
+    return;
+
+  const QString documentation = ShaderFunctionDocumentation(language, function);
+  if(!documentation.isEmpty())
+    signature += lit("\n") + documentation;
+
+  editor->callTipShow(openParen, signature.toUtf8().constData());
+
+  // Highlight the active parameter in the compact signature.
+  const int argument = before.mid(openParen + 1).count(QLatin1Char(','));
+  const int sigOpen = signature.indexOf(QLatin1Char('('));
+  int paramStart = sigOpen + 1;
+  for(int i = 0; i < argument && paramStart > 0; i++)
+  {
+    paramStart = signature.indexOf(QLatin1Char(','), paramStart);
+    if(paramStart >= 0)
+      paramStart += 2;
+  }
+  if(paramStart > 0)
+  {
+    int paramEnd = signature.indexOf(QLatin1Char(','), paramStart);
+    if(paramEnd < 0)
+      paramEnd = signature.indexOf(QLatin1Char(')'), paramStart);
+    if(paramEnd > paramStart)
+      editor->callTipSetHlt(paramStart, paramEnd);
+  }
+}
+
+void ShaderViewer::updateShaderBraceHighlight(ScintillaEdit *editor)
+{
+  const sptr_t caret = editor->currentPos();
+  sptr_t brace = -1;
+  const QByteArray before = caret > 0 ? editor->textRange(int(caret - 1), int(caret)) : QByteArray();
+  const QByteArray after = editor->textRange(int(caret), int(caret + 1));
+  if(!before.isEmpty() && QByteArray("()[]{}").contains(before[0]))
+    brace = caret - 1;
+  else if(!after.isEmpty() && QByteArray("()[]{}").contains(after[0]))
+    brace = caret;
+
+  if(brace < 0)
+  {
+    editor->braceHighlight(-1, -1);
+    return;
+  }
+
+  const sptr_t match = editor->braceMatch(brace, 0);
+  if(match >= 0)
+    editor->braceHighlight(brace, match);
+  else
+    editor->braceBadLight(brace);
+}
+
+void ShaderViewer::showShaderHover(ScintillaEdit *editor, int x, int y)
+{
+  if(editor->autoCActive() || editor->callTipActive())
+    return;
+
+  const sptr_t pos = editor->positionFromPointClose(x, y);
+  if(pos < 0)
+    return;
+  const sptr_t start = editor->wordStartPosition(pos, true);
+  const sptr_t end = editor->wordEndPosition(pos, true);
+  if(end <= start)
+    return;
+
+  const QString word = QString::fromUtf8(editor->textRange(int(start), int(end)));
+  const int language = editor->propertyInt("rendermax.shader.language", SCLEX_HLSL);
+  const QString signature = ShaderFunctionSignature(language, word);
+  if(signature.isEmpty())
+    return;
+
+  QString tooltip = signature;
+  const QString documentation = ShaderFunctionDocumentation(language, word);
+  if(!documentation.isEmpty())
+    tooltip += lit("\n\n") + documentation;
+  QToolTip::showText(QCursor::pos() + QPoint(8, 12), tooltip, editor);
 }
 
 void ShaderViewer::SetTextAndUpdateMargin0(ScintillaEdit *sc, const QString &text)
@@ -5704,6 +6016,47 @@ void ShaderViewer::ShowErrors(const rdcstr &errors)
 
     if(!errors.isEmpty())
       ToolWindowManager::raiseToolWindow(m_Errors);
+  }
+
+  // Mirror compiler diagnostics into source editors. Compiler output differs
+  // between DXC/FXC/glslang, so accept the common file(line,col), file:line:col
+  // and "line N" forms. The full unmodified output remains in the Errors pane.
+  for(ScintillaEdit *source : m_Scintillas)
+  {
+    source->setIndicatorCurrent(INDICATOR_COMPILE_ERROR);
+    source->indicatorClearRange(0, source->textLength());
+    source->annotationClearAll();
+  }
+
+  const QString errorText = QString::fromUtf8(errors.c_str());
+  const QStringList errorLines = errorText.split(QLatin1Char('\n'), QString::SkipEmptyParts);
+  const QRegularExpression location(
+      lit("(?:(?:^|[(:\\s])(?:line\\s*)?)(\\d+)(?:[,):](\\d+))?"),
+      QRegularExpression::CaseInsensitiveOption);
+  for(const QString &diagnostic : errorLines)
+  {
+    if(!diagnostic.contains(lit("error"), Qt::CaseInsensitive))
+      continue;
+
+    const QRegularExpressionMatch match = location.match(diagnostic);
+    if(!match.hasMatch())
+      continue;
+
+    const int lineNumber = match.captured(1).toInt() - 1;
+    const int column = qMax(0, match.captured(2).toInt() - 1);
+    for(ScintillaEdit *source : m_Scintillas)
+    {
+      if(source->readOnly() || lineNumber < 0 || lineNumber >= source->lineCount())
+        continue;
+
+      const sptr_t lineStart = source->positionFromLine(lineNumber);
+      const sptr_t lineEnd = source->lineEndPosition(lineNumber);
+      const sptr_t errorStart = qMin(lineEnd, lineStart + column);
+      source->setIndicatorCurrent(INDICATOR_COMPILE_ERROR);
+      source->indicatorFillRange(errorStart, qMax<sptr_t>(1, lineEnd - errorStart));
+      source->annotationSetText(lineNumber, diagnostic.trimmed().toUtf8().constData());
+      source->annotationSetStyle(lineNumber, COMPILE_ERROR_STYLE);
+    }
   }
 
   updateEditState();

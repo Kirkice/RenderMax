@@ -348,6 +348,8 @@ private:
   static const int FINISHED_INDICATOR = 21;
 
   static const int INDICATOR_REGHIGHLIGHT = 1;
+  static const int INDICATOR_COMPILE_ERROR = 8;
+  static const int COMPILE_ERROR_STYLE = 40;
 
   QString targetName(const ShaderProcessingTool &disasm);
 
@@ -355,6 +357,11 @@ private:
 
   ScintillaEdit *MakeEditor(const QString &name, const QString &text, int lang);
   void SetTextAndUpdateMargin0(ScintillaEdit *ret, const QString &text);
+  void configureShaderIntelligence(ScintillaEdit *editor, int language);
+  void showShaderCompletions(ScintillaEdit *editor, bool explicitRequest = false);
+  void showShaderCallTip(ScintillaEdit *editor);
+  void updateShaderBraceHighlight(ScintillaEdit *editor);
+  void showShaderHover(ScintillaEdit *editor, int x, int y);
 
   ScintillaEdit *AddFileScintilla(const QString &name, const QString &text, ShaderEncoding encoding);
 

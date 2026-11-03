@@ -24,6 +24,8 @@
 
 #include "ScintillaSyntax.h"
 #include "Code/QRDUtils.h"
+#include <QRegularExpression>
+#include <QSet>
 #include "scintilla/include/SciLexer.h"
 #include "scintilla/include/qt/ScintillaEdit.h"
 
@@ -333,6 +335,137 @@ floateleven floateleven1 floateleven2 floateleven3 floateleven4
 row_major column_major unsigned signed rgb
 )EOKEYWORDS"};
 
+static QStringList wordsFromKeywordSets(const char *const keywords[2])
+{
+  QSet<QString> unique;
+  for(int set = 0; set < 2; set++)
+  {
+    const QString text = QString::fromUtf8(keywords[set]);
+    for(const QString &word : text.split(QRegularExpression(lit("\\s+")), QString::SkipEmptyParts))
+      unique.insert(word);
+  }
+
+  QStringList ret = unique.values();
+  ret.sort(Qt::CaseSensitive);
+  return ret;
+}
+
+QStringList ShaderCompletionWords(int language)
+{
+  if(language == SCLEX_HLSL)
+    return wordsFromKeywordSets(hlsl_keywords);
+  if(language == SCLEX_GLSL)
+    return wordsFromKeywordSets(glsl_keywords);
+  return QStringList();
+}
+
+QStringList ShaderPreprocessorWords(int language)
+{
+  Q_UNUSED(language);
+  return {lit("define"), lit("elif"), lit("else"), lit("endif"), lit("error"), lit("if"),
+          lit("ifdef"), lit("ifndef"), lit("include"), lit("line"), lit("pragma"), lit("undef"),
+          lit("warning")};
+}
+
+QStringList ShaderSemanticWords(int language)
+{
+  if(language != SCLEX_HLSL)
+    return QStringList();
+
+  return {lit("BINORMAL"), lit("BLENDINDICES"), lit("BLENDWEIGHT"), lit("COLOR"),
+          lit("NORMAL"), lit("POSITION"), lit("PSIZE"), lit("SV_ClipDistance"),
+          lit("SV_Coverage"), lit("SV_CullDistance"), lit("SV_Depth"),
+          lit("SV_DispatchThreadID"), lit("SV_DomainLocation"), lit("SV_GroupID"),
+          lit("SV_GroupIndex"), lit("SV_GroupThreadID"), lit("SV_GSInstanceID"),
+          lit("SV_InsideTessFactor"), lit("SV_InstanceID"), lit("SV_IsFrontFace"),
+          lit("SV_OutputControlPointID"), lit("SV_Position"), lit("SV_PrimitiveID"),
+          lit("SV_RenderTargetArrayIndex"), lit("SV_SampleIndex"), lit("SV_Target"),
+          lit("SV_TessFactor"), lit("SV_VertexID"), lit("SV_ViewportArrayIndex"),
+          lit("TANGENT"), lit("TEXCOORD")};
+}
+
+QStringList ShaderTypeMembers(int language, const QString &typeName)
+{
+  if(language == SCLEX_HLSL)
+  {
+    if(typeName.contains(lit("Texture"), Qt::CaseInsensitive))
+      return {lit("Gather"), lit("GatherAlpha"), lit("GatherBlue"), lit("GatherCmp"),
+              lit("GatherGreen"), lit("GatherRed"), lit("GetDimensions"), lit("Load"),
+              lit("Sample"), lit("SampleBias"), lit("SampleCmp"), lit("SampleCmpLevelZero"),
+              lit("SampleGrad"), lit("SampleLevel")};
+    if(typeName.contains(lit("Buffer"), Qt::CaseInsensitive))
+      return {lit("GetDimensions"), lit("Load"), lit("Store")};
+    if(typeName.contains(lit("Stream"), Qt::CaseInsensitive))
+      return {lit("Append"), lit("RestartStrip")};
+  }
+  else if(language == SCLEX_GLSL && typeName.contains(lit("sampler"), Qt::CaseInsensitive))
+  {
+    return {lit("texelFetch"), lit("texture"), lit("textureGather"), lit("textureGrad"),
+            lit("textureLod"), lit("textureOffset"), lit("textureProj"), lit("textureSize")};
+  }
+
+  return QStringList();
+}
+
+QString ShaderFunctionSignature(int language, const QString &function)
+{
+  // The most frequently used intrinsics. This deliberately remains a fallback
+  // rather than pretending to be a full compiler type system; overload details
+  // are still provided by the real shader compiler when the shader is built.
+  static const QMap<QString, QString> common = {
+      {lit("abs"), lit("abs(x)")},             {lit("acos"), lit("acos(x)")},
+      {lit("asin"), lit("asin(x)")},           {lit("atan"), lit("atan(x)")},
+      {lit("atan2"), lit("atan2(y, x)")},      {lit("ceil"), lit("ceil(x)")},
+      {lit("clamp"), lit("clamp(x, min, max)")},
+      {lit("cos"), lit("cos(x)")},             {lit("cross"), lit("cross(x, y)")},
+      {lit("ddx"), lit("ddx(value)")},         {lit("ddy"), lit("ddy(value)")},
+      {lit("degrees"), lit("degrees(radians)")},
+      {lit("distance"), lit("distance(x, y)")},
+      {lit("dot"), lit("dot(x, y)")},          {lit("exp"), lit("exp(x)")},
+      {lit("floor"), lit("floor(x)")},         {lit("fmod"), lit("fmod(x, y)")},
+      {lit("frac"), lit("frac(x)")},           {lit("fract"), lit("fract(x)")},
+      {lit("length"), lit("length(x)")},       {lit("lerp"), lit("lerp(x, y, s)")},
+      {lit("log"), lit("log(x)")},             {lit("max"), lit("max(x, y)")},
+      {lit("min"), lit("min(x, y)")},          {lit("mix"), lit("mix(x, y, a)")},
+      {lit("mul"), lit("mul(x, y)")},          {lit("normalize"), lit("normalize(x)")},
+      {lit("pow"), lit("pow(x, y)")},          {lit("radians"), lit("radians(degrees)")},
+      {lit("reflect"), lit("reflect(incident, normal)")},
+      {lit("refract"), lit("refract(incident, normal, eta)")},
+      {lit("round"), lit("round(x)")},         {lit("rsqrt"), lit("rsqrt(x)")},
+      {lit("saturate"), lit("saturate(x)")},   {lit("sign"), lit("sign(x)")},
+      {lit("sin"), lit("sin(x)")},             {lit("smoothstep"), lit("smoothstep(min, max, x)")},
+      {lit("sqrt"), lit("sqrt(x)")},           {lit("step"), lit("step(edge, x)")},
+      {lit("tan"), lit("tan(x)")},             {lit("transpose"), lit("transpose(matrix)")},
+  };
+
+  Q_UNUSED(language);
+  return common.value(function);
+}
+
+QString ShaderFunctionDocumentation(int language, const QString &function)
+{
+  Q_UNUSED(language);
+  static const QMap<QString, QString> docs = {
+      {lit("abs"), lit("Returns the absolute value of each component.")},
+      {lit("clamp"), lit("Constrains x to the inclusive range [min, max].")},
+      {lit("cross"), lit("Returns the three-dimensional cross product of two vectors.")},
+      {lit("distance"), lit("Returns the distance between two points.")},
+      {lit("dot"), lit("Returns the scalar dot product of two vectors.")},
+      {lit("lerp"), lit("Linearly interpolates from x to y using s.")},
+      {lit("mix"), lit("Linearly interpolates from x to y using a.")},
+      {lit("mul"), lit("Performs vector/matrix multiplication.")},
+      {lit("normalize"), lit("Returns a vector in the same direction with length 1.")},
+      {lit("reflect"), lit("Returns the reflection direction for an incident vector and normal.")},
+      {lit("refract"), lit("Returns the refraction direction using the supplied index ratio.")},
+      {lit("saturate"), lit("Clamps each component to the range [0, 1].")},
+      {lit("smoothstep"), lit("Performs smooth Hermite interpolation between two edges.")},
+      {lit("step"), lit("Returns 0 when x is below edge, otherwise 1.")},
+      {lit("texture"), lit("Samples a GLSL texture using normalized coordinates.")},
+      {lit("texelFetch"), lit("Fetches a single texel without filtering.")},
+  };
+  return docs.value(function);
+}
+
 void ConfigureSyntax(ScintillaEdit *scintilla, int language)
 {
   scintilla->setCodePage(SC_CP_UTF8);
@@ -391,13 +524,39 @@ void ConfigureSyntax(ScintillaEdit *scintilla, int language)
     scintilla->setProperty("lexer.cpp.track.preprocessor", "0");
     scintilla->setProperty("styling.within.preprocessor", "1");
 
-    scintilla->styleSetFore(SCE_C_COMMENT, green);
-    scintilla->styleSetFore(SCE_C_COMMENTDOC, green);
-    scintilla->styleSetFore(SCE_C_COMMENTLINE, green);
-    scintilla->styleSetFore(SCE_C_WORD, blue);
-    scintilla->styleSetFore(SCE_C_WORD2, blue);
-    scintilla->styleSetFore(SCE_C_PREPROCESSOR, blue);
-    scintilla->styleSetBold(SCE_C_PREPROCESSOR, true);
+    // Dracula Theme Official shader palette (MIT, Copyright (c) 2016 Dracula Theme).
+    // Keep this self-contained: RenderMax never reads the installed VS Code extension.
+    const sptr_t draculaForeground = SCINTILLA_COLOUR(248, 248, 242); // #F8F8F2
+    const sptr_t draculaComment = SCINTILLA_COLOUR(98, 114, 164);     // #6272A4
+    const sptr_t draculaCyan = SCINTILLA_COLOUR(139, 233, 253);       // #8BE9FD
+    const sptr_t draculaGreen = SCINTILLA_COLOUR(80, 250, 123);       // #50FA7B
+    const sptr_t draculaOrange = SCINTILLA_COLOUR(255, 184, 108);     // #FFB86C
+    const sptr_t draculaPink = SCINTILLA_COLOUR(255, 121, 198);       // #FF79C6
+    const sptr_t draculaPurple = SCINTILLA_COLOUR(189, 147, 249);     // #BD93F9
+    const sptr_t draculaRed = SCINTILLA_COLOUR(255, 85, 85);          // #FF5555
+    const sptr_t draculaYellow = SCINTILLA_COLOUR(241, 250, 140);     // #F1FA8C
+
+    scintilla->styleSetFore(SCE_C_DEFAULT, draculaForeground);
+    scintilla->styleSetFore(SCE_C_COMMENT, draculaComment);
+    scintilla->styleSetFore(SCE_C_COMMENTDOC, draculaComment);
+    scintilla->styleSetFore(SCE_C_COMMENTLINE, draculaComment);
+    scintilla->styleSetFore(SCE_C_COMMENTLINEDOC, draculaComment);
+    scintilla->styleSetFore(SCE_C_NUMBER, draculaPurple);
+    scintilla->styleSetFore(SCE_C_STRING, draculaYellow);
+    scintilla->styleSetFore(SCE_C_CHARACTER, draculaYellow);
+    scintilla->styleSetFore(SCE_C_STRINGEOL, draculaRed);
+    scintilla->styleSetFore(SCE_C_WORD, draculaPink);
+    scintilla->styleSetBold(SCE_C_WORD, false);
+    scintilla->styleSetFore(SCE_C_WORD2, draculaCyan);
+    scintilla->styleSetItalic(SCE_C_WORD2, true);
+    scintilla->styleSetFore(SCE_C_PREPROCESSOR, draculaPink);
+    scintilla->styleSetBold(SCE_C_PREPROCESSOR, false);
+    scintilla->styleSetFore(SCE_C_OPERATOR, draculaPink);
+    scintilla->styleSetFore(SCE_C_IDENTIFIER, draculaForeground);
+    scintilla->styleSetFore(SCE_C_GLOBALCLASS, draculaCyan);
+    scintilla->styleSetFore(SCE_C_REGEX, draculaOrange);
+
+    Q_UNUSED(draculaGreen);
 
     if(language == SCLEX_HLSL)
     {

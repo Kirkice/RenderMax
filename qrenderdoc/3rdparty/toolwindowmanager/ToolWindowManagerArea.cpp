@@ -38,7 +38,9 @@ static void showCloseButton(QTabBar *bar, int index, bool show)
 
   if(button)
   {
-    button->resize(show ? QSize(16, 16) : QSize(1, 1));
+    // QTabBar may relayout its close-button widget after resize(), restoring the
+    // platform default (16x16). Fix both dimensions so the Starship size persists.
+    button->setFixedSize(show ? QSize(12, 12) : QSize(1, 1));
     button->setVisible(show);
   }
 }
