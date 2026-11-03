@@ -945,7 +945,8 @@ void TimelineBar::paintMarkers(QPainter &p, const QVector<Marker> &markers,
     if(r.contains(m_lastPos))
       backColor.setAlpha(150);
 
-    p.setPen(QPen(palette().brush(QPalette::Text), 1.0));
+    // Slate surface with a restrained neutral outline.
+    p.setPen(QPen(QColor(87, 87, 87), 1.0));
     p.fillRect(r, QBrush(backColor));
     p.drawRect(r);
 
@@ -1063,7 +1064,8 @@ uint32_t TimelineBar::processActions(QVector<Marker> &markers, QVector<uint32_t>
       }
       else
       {
-        m.color = QColor(Qt::gray);
+        // Flat Slate-style fallback for capture markers without an explicit colour.
+        m.color = QColor(36, 36, 36);
       }
     }
     else

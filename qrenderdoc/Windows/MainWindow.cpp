@@ -37,6 +37,10 @@
 #include <QShortcut>
 #include <QToolButton>
 #include <QToolTip>
+
+#if defined(Q_OS_WIN32)
+#include <windows.h>
+#endif
 #include "Code/AI/MCPExternalTools.h"
 #include "Code/AI/MCPSessionTools.h"
 #include "Code/AI/MCPShaderTools.h"
@@ -75,9 +79,6 @@
 #define JSON_ID "rdocLayoutData"
 #define JSON_VER 1
 
-#if defined(Q_OS_WIN32)
-extern "C" void *__stdcall GetModuleHandleA(const char *);
-#endif
 
 NetworkWorker::NetworkWorker() : QObject(NULL)
 {
@@ -129,6 +130,28 @@ void MainWindow::MakeNetworkRequest(QUrl url, std::function<void(QByteArray)> su
 MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::MainWindow), m_Ctx(ctx)
 {
   ui->setupUi(this);
+
+#if defined(Q_OS_WIN32)
+  // Qt 5.9 doesn't opt native windows into Windows' dark non-client rendering.
+  // Ask DWM for a dark title bar without taking over window frame behaviour.
+  typedef HRESULT(WINAPI * DwmSetWindowAttributePtr)(HWND, DWORD, LPCVOID, DWORD);
+  HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+  if(dwm)
+  {
+    DwmSetWindowAttributePtr setWindowAttribute =
+        reinterpret_cast<DwmSetWindowAttributePtr>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
+    if(setWindowAttribute)
+    {
+      const BOOL dark = TRUE;
+      // 20 is the public DWMWA_USE_IMMERSIVE_DARK_MODE value. Older Windows 10
+      // builds used 19, so try that when the current value isn't supported.
+      if(FAILED(setWindowAttribute(reinterpret_cast<HWND>(winId()), 20, &dark, sizeof(dark))))
+        setWindowAttribute(reinterpret_cast<HWND>(winId()), 19, &dark, sizeof(dark));
+    }
+    FreeLibrary(dwm);
+  }
+#endif
+
   QAction *scene = ui->menu_Window->addAction(tr("Scene Viewer"));
   connect(scene, &QAction::triggered, this, [this] {
     QWidget *viewer = ensureSceneViewer();
