@@ -24,6 +24,8 @@
 
 #include "ShaderViewer.h"
 #include <QComboBox>
+#include <QDir>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QKeyEvent>
@@ -6067,33 +6069,102 @@ void ShaderViewer::ShowErrors(const rdcstr &errors)
 
   const QString errorText = QString::fromUtf8(errors.c_str());
   const QStringList errorLines = errorText.split(QLatin1Char('\n'), QString::SkipEmptyParts);
-  const QRegularExpression location(
+  const QRegularExpression locationAfterFilename(
+      lit("^\\s*(?:\\((\\d+)(?:\\s*,\\s*(\\d+))?\\)|:(\\d+)(?::(\\d+))?)"));
+  const QRegularExpression locationWithoutFilename(
       lit("(?:(?:^|[(:\\s])(?:line\\s*)?)(\\d+)(?:[,):](\\d+))?"),
       QRegularExpression::CaseInsensitiveOption);
+
+  QList<ScintillaEdit *> editableSources;
+  for(ScintillaEdit *source : m_Scintillas)
+    if(!source->readOnly())
+      editableSources.push_back(source);
+
   for(const QString &diagnostic : errorLines)
   {
     if(!diagnostic.contains(lit("error"), Qt::CaseInsensitive))
       continue;
 
-    const QRegularExpressionMatch match = location.match(diagnostic);
-    if(!match.hasMatch())
+    ScintillaEdit *diagnosticSource = NULL;
+    int filenameEnd = -1;
+    int bestFilenameMatchLength = -1;
+    bool ambiguousFilename = false;
+    for(ScintillaEdit *source : editableSources)
+    {
+      const QString filename = source->property("filename").toString();
+      QStringList names;
+      if(!filename.isEmpty())
+      {
+        names << filename << QDir::fromNativeSeparators(filename)
+              << QDir::toNativeSeparators(filename) << QFileInfo(filename).fileName();
+        names.removeDuplicates();
+      }
+
+      int sourceEnd = -1;
+      int sourceMatchLength = -1;
+      for(const QString &name : names)
+      {
+        const int index = diagnostic.indexOf(name, 0, Qt::CaseInsensitive);
+        if(index >= 0 && name.length() > sourceMatchLength)
+        {
+          sourceEnd = index + name.length();
+          sourceMatchLength = name.length();
+        }
+      }
+
+      if(sourceEnd >= 0)
+      {
+        if(sourceMatchLength > bestFilenameMatchLength)
+        {
+          diagnosticSource = source;
+          filenameEnd = sourceEnd;
+          bestFilenameMatchLength = sourceMatchLength;
+          ambiguousFilename = false;
+        }
+        else if(sourceMatchLength == bestFilenameMatchLength && diagnosticSource != source)
+        {
+          ambiguousFilename = true;
+        }
+      }
+    }
+
+    QRegularExpressionMatch match;
+    int lineNumber = -1;
+    int column = 0;
+    if(diagnosticSource && !ambiguousFilename)
+    {
+      match = locationAfterFilename.match(diagnostic.mid(filenameEnd));
+      if(match.hasMatch())
+      {
+        const QString line = match.captured(1).isEmpty() ? match.captured(3) : match.captured(1);
+        const QString col = match.captured(2).isEmpty() ? match.captured(4) : match.captured(2);
+        lineNumber = line.toInt() - 1;
+        column = qMax(0, col.toInt() - 1);
+      }
+    }
+    else if(editableSources.count() == 1 && !ambiguousFilename)
+    {
+      // Diagnostics such as "line 12" carry no filename and are only safe to
+      // map when there is exactly one editable source file.
+      match = locationWithoutFilename.match(diagnostic);
+      if(match.hasMatch())
+      {
+        diagnosticSource = editableSources.front();
+        lineNumber = match.captured(1).toInt() - 1;
+        column = qMax(0, match.captured(2).toInt() - 1);
+      }
+    }
+
+    if(!diagnosticSource || lineNumber < 0 || lineNumber >= diagnosticSource->lineCount())
       continue;
 
-    const int lineNumber = match.captured(1).toInt() - 1;
-    const int column = qMax(0, match.captured(2).toInt() - 1);
-    for(ScintillaEdit *source : m_Scintillas)
-    {
-      if(source->readOnly() || lineNumber < 0 || lineNumber >= source->lineCount())
-        continue;
-
-      const sptr_t lineStart = source->positionFromLine(lineNumber);
-      const sptr_t lineEnd = source->lineEndPosition(lineNumber);
-      const sptr_t errorStart = qMin(lineEnd, lineStart + column);
-      source->setIndicatorCurrent(INDICATOR_COMPILE_ERROR);
-      source->indicatorFillRange(errorStart, qMax<sptr_t>(1, lineEnd - errorStart));
-      source->annotationSetText(lineNumber, diagnostic.trimmed().toUtf8().constData());
-      source->annotationSetStyle(lineNumber, COMPILE_ERROR_STYLE);
-    }
+    const sptr_t lineStart = diagnosticSource->positionFromLine(lineNumber);
+    const sptr_t lineEnd = diagnosticSource->lineEndPosition(lineNumber);
+    const sptr_t errorStart = qMin(lineEnd, lineStart + column);
+    diagnosticSource->setIndicatorCurrent(INDICATOR_COMPILE_ERROR);
+    diagnosticSource->indicatorFillRange(errorStart, qMax<sptr_t>(1, lineEnd - errorStart));
+    diagnosticSource->annotationSetText(lineNumber, diagnostic.trimmed().toUtf8().constData());
+    diagnosticSource->annotationSetStyle(lineNumber, COMPILE_ERROR_STYLE);
   }
 
   updateEditState();

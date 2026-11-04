@@ -15,25 +15,59 @@ def validate(root):
     root = Path(root).resolve()
     errors, warnings, meshes, textures = [], [], [], []
 
-    def load(path):
-        return json.loads((root / path).read_text(encoding='utf-8'))
+    def package_path(relative):
+        if not isinstance(relative, str) or not relative:
+            raise ValueError('Invalid package path: ' + repr(relative))
+        candidate = Path(relative)
+        if candidate.is_absolute():
+            raise ValueError('Unsafe relative path: ' + relative)
+        path = (root / candidate).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            raise ValueError('Unsafe relative path: ' + relative)
+        return path
+
+    verified_paths = set()
+
+    def verified_path(relative):
+        path = package_path(relative)
+        if relative not in verified_paths:
+            raise ValueError('Unlisted or unverified reference: ' + relative)
+        return path
+
+    def load(path, manifest=False):
+        source = package_path(path) if manifest else verified_path(path)
+        return json.loads(source.read_text(encoding='utf-8'))
 
     def check(ok, message):
         if not ok:
             errors.append(message)
 
-    manifest = load('manifest.json')
+    manifest = load('manifest.json', manifest=True)
     check(manifest.get('format') == 'rendermax.asset-package', 'Wrong package format')
     check(manifest.get('status') in ('completed', 'completedWithWarnings'), 'Package is incomplete')
     paths = set()
     total = 0
     for f in manifest.get('files', []):
-        path = (root / f['path']).resolve()
-        check(root in path.parents, 'Unsafe relative path: ' + f['path'])
-        check(f['path'] not in paths, 'Duplicate manifest path: ' + f['path'])
-        paths.add(f['path'])
+        relative = f.get('path')
+        if not isinstance(relative, str) or not relative:
+            errors.append('Invalid manifest path: ' + repr(relative))
+            continue
+
+        # Resolve existing symlinks as well as '..' components before allowing any
+        # filesystem access. Merely recording an error here is insufficient: an
+        # untrusted package could otherwise make the validator hash files outside it.
+        try:
+            path = package_path(relative)
+        except ValueError as error:
+            errors.append(str(error))
+            continue
+
+        check(relative not in paths, 'Duplicate manifest path: ' + relative)
+        paths.add(relative)
         if not path.is_file():
-            errors.append('Missing file: ' + f['path'])
+            errors.append('Missing file: ' + relative)
             continue
         h = hashlib.sha256()
         with path.open('rb') as stream:
@@ -41,8 +75,12 @@ def validate(root):
                 h.update(block)
         size = path.stat().st_size
         total += size
-        check(size == f['bytes'], 'Size mismatch: ' + f['path'])
-        check(h.hexdigest() == f['sha256'], 'Hash mismatch: ' + f['path'])
+        size_matches = size == f['bytes']
+        hash_matches = h.hexdigest() == f['sha256']
+        check(size_matches, 'Size mismatch: ' + relative)
+        check(hash_matches, 'Hash mismatch: ' + relative)
+        if size_matches and hash_matches:
+            verified_paths.add(relative)
 
     def refs(obj):
         if isinstance(obj, dict):
@@ -68,7 +106,7 @@ def validate(root):
         if 'mesh' not in draw:
             continue
         m = load(draw['mesh'])
-        with (root / m['vertices']).open(newline='') as f:
+        with verified_path(m['vertices']).open(newline='') as f:
             rows = list(csv.reader(f))
         header, rows = rows[0], rows[1:]
         check(len(rows) == m['vertexCount'], 'Wrong vertex count: ' + d['path'])
@@ -76,7 +114,7 @@ def validate(root):
         nonfinite = sum(not math.isfinite(float(c)) for row in rows for c in row[2:])
         if nonfinite:
             warnings.append({'eventId': draw['eventId'], 'nonFiniteVertexComponents': nonfinite})
-        with (root / m['indices']).open(newline='') as f:
+        with verified_path(m['indices']).open(newline='') as f:
             idx = list(csv.DictReader(f))
         check(len(idx) == m['indexCount'], 'Wrong index count: ' + d['path'])
         check(all(0 <= int(i['index']) < len(rows) for i in idx), 'Out of range mesh index: ' + d['path'])
@@ -95,7 +133,7 @@ def validate(root):
             if attr['format'].endswith('_FLOAT') and '32' in attr['format'] and not attr['generic']:
                 stream = streams[attr['slot']]
                 if stream['path'] not in blobs:
-                    blobs[stream['path']] = (root / stream['path']).read_bytes()
+                    blobs[stream['path']] = verified_path(stream['path']).read_bytes()
                 b = blobs[stream['path']]
                 mins, maxs = [float('inf')] * n, [float('-inf')] * n
                 for row in rows:
@@ -123,7 +161,7 @@ def validate(root):
             continue
         t = load(path)
         for image in t['images']:
-            p = root / image['path']
+            p = verified_path(image['path'])
             b = p.read_bytes()
             mip = max(image['mip'], 0)
             width, height = max(t['width'] >> mip, 1), max(t['height'] >> mip, 1)
