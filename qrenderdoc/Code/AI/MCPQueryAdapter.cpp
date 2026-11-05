@@ -28,6 +28,7 @@
 #include "MCPCompatibilityTools.h"
 #include "MCPDiagnostics.h"
 #include "MCPExternalTools.h"
+#include "Windows/MainWindow.h"
 #include <QSaveFile>
 #include <QFileInfo>
 #include <QDir>
@@ -334,6 +335,13 @@ void QueryAdapter::SetActiveRemoteSession(const QString &url)
   ReadOnUIThread<int>([this, url]() -> int {
     m_Ctx->Replay().SetSessionRemoteHost(
         url.isEmpty() ? rdcstr() : rdcstr(url.toUtf8().constData()));
+
+    if(IMainWindow *main = m_Ctx->GetMainWindow())
+    {
+      if(MainWindow *window = qobject_cast<MainWindow *>(main->Widget()))
+        window->NotifyRemoteHostChanged();
+    }
+
     return 0;
   });
 }

@@ -6091,7 +6091,7 @@ void ShaderViewer::ShowErrors(const rdcstr &errors)
     bool ambiguousFilename = false;
     for(ScintillaEdit *source : editableSources)
     {
-      const QString filename = source->property("filename").toString();
+      const QString filename = static_cast<QObject *>(source)->property("filename").toString();
       QStringList names;
       if(!filename.isEmpty())
       {

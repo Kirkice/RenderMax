@@ -222,6 +222,7 @@ private slots:
 
 public slots:
   void PythonStatusBarUpdate();
+  void NotifyRemoteHostChanged();
 
 signals:
   void networkRequestGet(QUrl url);

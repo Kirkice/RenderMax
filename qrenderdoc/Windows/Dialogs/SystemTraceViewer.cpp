@@ -34,6 +34,7 @@
 #include <QBrush>
 #include <QCheckBox>
 #include <QColor>
+#include <QComboBox>
 #include <QFile>
 #include <QFileInfo>
 #include <QFontMetrics>
@@ -189,8 +190,10 @@ const int kRulerHeight = 26;
 const int kRowHeight = 30;
 const int kGroupHeight = 20;
 const int kScrollBarWidth = 14;
-const int kSpanHeight = 14;
-const int kSpanStep = 16;
+const int kTimeScrollBarHeight = 14;
+const int kTimeScrollScale = 1000000;
+const int kSpanHeight = 18;
+const int kSpanStep = 20;
 
 // A compact lane packs the same nesting into less vertical space. Snapdragon Profiler's trace view
 // keeps most tracks at a single fixed height and lets the user open a track for detail; a trace that
@@ -314,6 +317,20 @@ public:
       update();
     });
 
+    m_TimeScroll = new QScrollBar(Qt::Horizontal, this);
+    connect(m_TimeScroll, &QScrollBar::valueChanged, this, [this](int value) {
+      if(m_UpdatingTimeScroll || m_Data.trace == NULL)
+        return;
+
+      const double total = TotalSpan();
+      if(total <= 0.0)
+        return;
+
+      m_ViewStartSec = TraceStart() + total * double(value) / double(kTimeScrollScale);
+      ClampView();
+      update();
+    });
+
     SetNavMode(TraceNavMode::Pan);
   }
 
@@ -329,6 +346,14 @@ public:
       // Expanded lanes are remembered by index, which is only meaningful for the trace it came from.
       // Group collapse is remembered by name and survives, as does the filter text.
       m_ExpandedTracks.clear();
+
+      // Measure the trace once, here. Everything else in this class treats the extent as a constant.
+      double start = 0.0;
+      double end = 0.0;
+      if(m_Data.trace != NULL)
+        m_Data.trace->TimeExtent(start, end);
+      m_TraceStartSec = start;
+      m_TraceSpanSec = end > start ? (end - start) : 0.0;
     }
     // The trace object is reassigned in the viewer, but the timeline receives the same member
     // address each time. Rebuilding rows on every selection/hover repaint therefore rescans every
@@ -363,13 +388,19 @@ public:
   void Clear()
   {
     m_Data = SystemTraceTimelineData();
+    m_TraceStartSec = 0.0;
+    m_TraceSpanSec = 0.0;
     m_RowsDirty = true;
     m_Rows.clear();
     m_ContentHeight = 0;
     m_ScrollY = 0;
     m_Hover = SpanRef();
     m_Selected = SpanRef();
+    m_HoverRow = -1;
+    m_HoverSeries = -1;
+    m_HoverText.clear();
     UpdateScrollBar();
+    UpdateTimeScrollBar();
     update();
   }
 
@@ -501,6 +532,10 @@ public:
   // Called when the mode changed from inside the timeline (the 1/2/3 shortcuts), so the toolbar
   // buttons can follow.
   std::function<void(TraceNavMode)> OnNavModeChanged;
+  // Called while the cursor is over a counter lane, with a readable "series = value unit" line, and
+  // with an empty string when it leaves. A counter lane is sampled measurement drawn as a curve: it
+  // has no elements to click and no axis, so this text is the only way to read a number off it.
+  std::function<void(const QString &)> OnHoverReadout;
 
 protected:
   void paintEvent(QPaintEvent *) override
@@ -546,8 +581,11 @@ protected:
     const QRectF rows = RowsRect();
     m_Scroll->setGeometry(int(rows.right()) + 4, int(rows.top()), kScrollBarWidth,
                           qMax(10, int(rows.height())));
+    m_TimeScroll->setGeometry(int(rows.left()), int(rows.bottom()) + 4, qMax(10, int(rows.width())),
+                              kTimeScrollBarHeight);
 
     UpdateScrollBar();
+    UpdateTimeScrollBar();
   }
 
   void mousePressEvent(QMouseEvent *event) override
@@ -653,7 +691,16 @@ protected:
       update();
     }
 
+    UpdateCounterHover(event->pos());
+
     QWidget::mouseMoveEvent(event);
+  }
+
+  void leaveEvent(QEvent *event) override
+  {
+    ClearCounterHover();
+
+    QWidget::leaveEvent(event);
   }
 
   void mouseReleaseEvent(QMouseEvent *event) override
@@ -873,19 +920,24 @@ private:
     DragZoom,
   };
 
-  double TotalSpan() const { return m_Data.trace == NULL ? 0.0 : m_Data.trace->SpanSec(); }
+  // The trace's extent, computed once per SetData() rather than on demand. TimeExtent() walks every
+  // span of every track and every sample of every series, and these accessors sit on the hottest path
+  // in the widget: XForTime() is called twice per span drawn, and RowsRect() needs TotalSpan() to
+  // decide the time scroll bar. Computing it on demand made a single repaint of a one-second phone
+  // trace take minutes - the scan was repeated for every span on screen.
+  double m_TraceStartSec = 0.0;
+  double m_TraceSpanSec = 0.0;
+
+  double TotalSpan() const { return m_TraceSpanSec; }
 
   // The trace's own time base. Only the extent is drawn: the absolute offset (device uptime) must
   // not be assumed to be zero, or the lanes fall outside the view window.
-  double TraceStart() const
-  {
-    if(m_Data.trace == NULL)
-      return 0.0;
+  double TraceStart() const { return m_TraceStartSec; }
 
-    double start = 0.0;
-    double end = 0.0;
-    m_Data.trace->TimeExtent(start, end);
-    return start;
+  bool TimeScrollVisible() const
+  {
+    const double total = TotalSpan();
+    return total > 0.0 && m_ViewSpanSec < total - qMax(1.0e-12, total * 1.0e-9);
   }
 
   QRectF RowsRect() const
@@ -893,7 +945,8 @@ private:
     const double left = kHeaderWidth;
     const double top = kRulerHeight;
     const double w = qMax(40.0, double(width() - kHeaderWidth - kScrollBarWidth - 6));
-    const double h = qMax(40.0, double(height() - kRulerHeight - 2));
+    const int timeScrollSpace = TimeScrollVisible() ? kTimeScrollBarHeight + 4 : 0;
+    const double h = qMax(40.0, double(height() - kRulerHeight - 2 - timeScrollSpace));
 
     return QRectF(left, top, w, h);
   }
@@ -936,6 +989,8 @@ private:
     // scan, because the per-lane prefix index is built once per trace.
     if(m_ActiveOnly && m_Data.trace != NULL)
       RebuildRows();
+
+    UpdateTimeScrollBar();
   }
 
   void PanBy(double fraction)
@@ -1333,6 +1388,164 @@ private:
       m_Scroll->setValue(m_ScrollY);
   }
 
+  void UpdateTimeScrollBar()
+  {
+    const double total = TotalSpan();
+    const bool visible = TimeScrollVisible();
+
+    m_UpdatingTimeScroll = true;
+    m_TimeScroll->setVisible(visible);
+
+    if(visible)
+    {
+      const int page = qMax(1, int(double(kTimeScrollScale) * m_ViewSpanSec / total));
+      const int maximum = qMax(0, kTimeScrollScale - page);
+      const int value = qBound(
+          0, int(double(kTimeScrollScale) * (m_ViewStartSec - TraceStart()) / total + 0.5), maximum);
+
+      m_TimeScroll->setRange(0, maximum);
+      m_TimeScroll->setPageStep(page);
+      m_TimeScroll->setSingleStep(qMax(1, page / 20));
+      m_TimeScroll->setValue(value);
+
+      const QRectF rows = RowsRect();
+      m_TimeScroll->setGeometry(int(rows.left()), int(rows.bottom()) + 4,
+                                qMax(10, int(rows.width())), kTimeScrollBarHeight);
+    }
+
+    // Showing or hiding the time scrollbar changes the lane viewport height. Keep the vertical
+    // scrollbar flush with that viewport immediately rather than waiting for a window resize.
+    const QRectF rows = RowsRect();
+    m_Scroll->setGeometry(int(rows.right()) + 4, int(rows.top()), kScrollBarWidth,
+                          qMax(10, int(rows.height())));
+
+    m_UpdatingTimeScroll = false;
+    UpdateScrollBar();
+  }
+
+  // The value a series holds at `t`: its most recent sample at or before that instant, plus the
+  // timestamp of that sample. A level series must never be interpolated - that would report a
+  // frequency the device never ran at - and for a sampled series the enclosing sample is the
+  // measurement that actually exists.
+  bool SampleHeldValue(const TraceSeries &series, double t, double &value,
+                       double &sampleTimeSec) const
+  {
+    if(series.samples.isEmpty())
+      return false;
+
+    if(t <= series.samples.first().timeSec)
+    {
+      value = series.samples.first().value;
+      sampleTimeSec = series.samples.first().timeSec;
+      return true;
+    }
+
+    int lo = 0;
+    int hi = series.samples.size() - 1;
+    int best = 0;
+
+    while(lo <= hi)
+    {
+      const int mid = (lo + hi) / 2;
+
+      if(series.samples[mid].timeSec <= t)
+      {
+        best = mid;
+        lo = mid + 1;
+      }
+      else
+      {
+        hi = mid - 1;
+      }
+    }
+
+    value = series.samples[best].value;
+    sampleTimeSec = series.samples[best].timeSec;
+    return true;
+  }
+
+  void ClearCounterHover()
+  {
+    if(m_HoverRow < 0 && m_HoverSeries < 0 && m_HoverText.isEmpty())
+      return;
+
+    m_HoverRow = -1;
+    m_HoverSeries = -1;
+    m_HoverText.clear();
+
+    if(OnHoverReadout)
+      OnHoverReadout(QString());
+
+    update();
+  }
+
+  // Resolves the counter lane under the cursor into a number. Repainting happens only when the
+  // held sample changes, not on every mouse move: the readout describes a sample, so a new pixel
+  // inside the same held interval cannot change it and would only cost a full timeline repaint.
+  void UpdateCounterHover(const QPoint &pos)
+  {
+    const QRectF rows = RowsRect();
+
+    if(m_Data.trace == NULL || !rows.contains(pos))
+    {
+      ClearCounterHover();
+      return;
+    }
+
+    const SystemTrace &trace = *m_Data.trace;
+    const int rowIndex = RowAt(double(pos.y() - rows.top()));
+
+    if(rowIndex < 0 || rowIndex >= m_Rows.size())
+    {
+      ClearCounterHover();
+      return;
+    }
+
+    const Row &row = m_Rows[rowIndex];
+    int seriesIndex = -1;
+
+    if(row.series >= 0)
+      seriesIndex = row.series;
+    else if(row.track >= 0 && row.track < trace.tracks.size() &&
+            trace.tracks[row.track].kind == TraceTrackKind::Counter)
+      seriesIndex = trace.tracks[row.track].counterSeries;
+
+    double value = 0.0;
+    double sampleTimeSec = 0.0;
+
+    if(seriesIndex < 0 || seriesIndex >= trace.series.size() ||
+       !SampleHeldValue(trace.series[seriesIndex], TimeAtX(pos.x()), value, sampleTimeSec))
+    {
+      ClearCounterHover();
+      return;
+    }
+
+    const TraceSeries &series = trace.series[seriesIndex];
+
+    const QString text =
+        series.unit.isEmpty()
+            ? QObject::tr("%1 = %2   (sample at %3)")
+                  .arg(series.name, FormatValue(value), FormatSeconds(sampleTimeSec))
+            : QObject::tr("%1 = %2 %3   (sample at %4)")
+                  .arg(series.name, FormatValue(value), series.unit,
+                       FormatSeconds(sampleTimeSec));
+
+    const bool rowChanged = rowIndex != m_HoverRow || seriesIndex != m_HoverSeries;
+    const bool textChanged = text != m_HoverText;
+
+    m_HoverRow = rowIndex;
+    m_HoverSeries = seriesIndex;
+    m_HoverTimeSec = sampleTimeSec;
+    m_HoverValue = value;
+    m_HoverText = text;
+
+    if(textChanged && OnHoverReadout)
+      OnHoverReadout(text);
+
+    if(rowChanged || textChanged)
+      update();
+  }
+
   SpanRef SpanAt(const QPoint &pos) const
   {
     SpanRef ref;
@@ -1631,6 +1844,7 @@ private:
     const double rightEdge = rows.right();
     const double t0 = m_ViewStartSec;
     const double t1 = t0 + m_ViewSpanSec;
+    m_LabelBudget = 1400;
 
     // Lane backgrounds and group headers. The clip is set before the scroll translation, so it
     // stays in widget space and the lanes never paint over the ruler.
@@ -1707,8 +1921,10 @@ private:
     p.setClipRect(QRectF(rows.left(), rows.top(), rows.width(), rows.height()));
     p.translate(0, -m_ScrollY);
 
-    for(const Row &row : m_Rows)
+    for(int rowIndex = 0; rowIndex < m_Rows.size(); rowIndex++)
     {
+      const Row &row = m_Rows[rowIndex];
+
       if(row.top + row.height < m_ScrollY || row.top > m_ScrollY + rows.height())
         continue;
       if(row.header)
@@ -1727,7 +1943,8 @@ private:
         if(track.kind == TraceTrackKind::Counter && track.counterSeries >= 0 &&
            track.counterSeries < trace.series.size())
         {
-          PaintCounterLane(p, trace.series[track.counterSeries], row, track.counterSeries, t0, t1);
+          PaintCounterLane(p, trace.series[track.counterSeries], row, track.counterSeries, t0, t1,
+                           rowIndex);
         }
         else
         {
@@ -1738,14 +1955,14 @@ private:
       }
 
       if(row.series >= 0 && row.series < trace.series.size())
-        PaintCounterLane(p, trace.series[row.series], row, row.series, t0, t1);
+        PaintCounterLane(p, trace.series[row.series], row, row.series, t0, t1, rowIndex);
     }
 
     p.restore();
   }
 
   void PaintCounterLane(QPainter &p, const TraceSeries &series, const Row &row, int colourIndex,
-                        double t0, double t1)
+                        double t0, double t1, int rowIndex)
   {
     double vmin = row.counterRange ? row.counterMin : series.MinValue();
     double vmax = row.counterRange ? row.counterMax : series.MaxValue();
@@ -1756,34 +1973,196 @@ private:
     const double top = double(row.top) + 4.0;
     const double bottom = double(row.top + row.height) - 5.0;
 
+    const QRectF rows = RowsRect();
+    const QString unit = series.unit.isEmpty() ? QString() : QStringLiteral(" ") + series.unit;
+
+    // Without these two numbers the curve only says "higher than before". Per-lane rather than per-
+    // shared-axis on purpose: each counter has its own range, so a shared axis would flatten the
+    // small ones to a line.
+    p.setPen(DimText());
+    p.drawText(QRectF(rows.left() + 4.0, double(row.top) + 1.0, 140.0, 11.0),
+               Qt::AlignLeft | Qt::AlignTop, FormatValue(vmax) + unit);
+    p.drawText(QRectF(rows.left() + 4.0, double(row.top + row.height) - 12.0, 140.0, 11.0),
+               Qt::AlignLeft | Qt::AlignTop, FormatValue(vmin) + unit);
+
+    const auto yFor = [&](double value) {
+      return bottom - ((value - vmin) / (vmax - vmin)) * (bottom - top);
+    };
+
+    const int count = series.samples.size();
     QPolygonF poly;
+
+    // A counter lane is sampled far more often than it has pixel columns to draw on: a sysfs poller
+    // running at kilohertz rates produces tens of thousands of samples across a few hundred pixels,
+    // and the lane only ever shows one height per column. Emitting one vertex per sample therefore
+    // spent seconds in the painter to draw the same picture, which made panning and zooming a large
+    // trace unusable.
+    //
+    // Vertices are reduced to one column at a time, keeping the first, lowest, highest and last value
+    // that falls in it. A spike narrower than a pixel survives, and so does the vertical riser of a
+    // level series, while a flat stretch collapses to two points. Keeping every Nth sample instead
+    // would drop exactly the excursions a counter lane exists to show.
+    int columnX = 0;
+    bool columnOpen = false;
+    double columnFirstY = 0.0;
+    double columnLastY = 0.0;
+    double columnMinY = 0.0;
+    double columnMaxY = 0.0;
+
+    const auto flushColumn = [&]() {
+      if(!columnOpen)
+        return;
+
+      const double x = double(columnX);
+      poly << QPointF(x, columnFirstY);
+
+      if(columnMinY < columnFirstY)
+        poly << QPointF(x, columnMinY);
+      if(columnMaxY > columnFirstY)
+        poly << QPointF(x, columnMaxY);
+      // The column's closing value is what draws a level series' riser. Emitting it even when one of
+      // the extremes already ended there costs a repeated vertex, which a polyline draws as a
+      // zero-length segment and which is cheaper than tracking whether it is needed.
+      if(columnLastY != columnFirstY)
+        poly << QPointF(x, columnLastY);
+
+      columnOpen = false;
+    };
+
+    const auto push = [&](double x, double y) {
+      const int column = int(x);
+
+      if(!columnOpen || column != columnX)
+      {
+        flushColumn();
+
+        columnOpen = true;
+        columnX = column;
+        columnFirstY = columnLastY = columnMinY = columnMaxY = y;
+        return;
+      }
+
+      columnLastY = y;
+      columnMinY = qMin(columnMinY, y);
+      columnMaxY = qMax(columnMaxY, y);
+    };
+
+    // The lane has to be covered even where no sample of its own falls: a counter is sampled every
+    // 20ms on a Pixel, while the timeline zooms down to a 200th of the trace, so a window narrower
+    // than the sampling interval is the normal case, not the corner case. Stopping the drawing at
+    // the last sample inside the window is what made the right-hand part of a lane go blank as soon
+    // as the user zoomed in. Both edges therefore get the neighbour that they need.
     int first = 0;
-    if(!series.samples.isEmpty())
+    int afterT1 = count;
+    if(count > 0)
     {
-      const auto it = std::lower_bound(
+      const auto beginIt = std::lower_bound(
           series.samples.constBegin(), series.samples.constEnd(), t0,
           [](const TraceSample &sample, double time) { return sample.timeSec < time; });
-      first = int(it - series.samples.constBegin());
+      const auto endIt = std::upper_bound(
+          series.samples.constBegin(), series.samples.constEnd(), t1,
+          [](double time, const TraceSample &sample) { return time < sample.timeSec; });
+
+      first = int(beginIt - series.samples.constBegin());
+      afterT1 = int(endIt - series.samples.constBegin());
+
       // Keep one sample before the viewport so a step/curve remains connected at the left edge.
       if(first > 0)
         first--;
     }
 
-    for(int i = first; i < series.samples.size(); i++)
+    if(count > 0 && series.step)
     {
-      const TraceSample &sample = series.samples[i];
-      if(sample.timeSec > t1)
-        break;
-
-      const double y = bottom - ((sample.value - vmin) / (vmax - vmin)) * (bottom - top);
-
       // A level series (frequency, clock rate, idle state) holds each value until the next sample,
-      // so it is drawn as a step. Interpolating it would draw values that were never measured.
-      if(series.step && !poly.isEmpty())
-        poly << QPointF(XForTime(sample.timeSec), poly.last().y());
+      // so the value in force at the left edge is the last sample at or before it. Interpolating
+      // between two samples would draw a value that was never measured.
+      int held = first;
+      if(held < count && series.samples[held].timeSec > t0)
+        held--;
+      if(held < 0)
+        held = 0;
 
-      poly << QPointF(XForTime(sample.timeSec), y);
+      // The value in force at the right edge is the last sample at or before it, so the sample that
+      // crosses the edge is not needed here: the hold is extended to the edge explicitly below.
+      const int to = qMin(count - 1, afterT1 - 1);
+
+      if(held <= to)
+      {
+        double heldY = yFor(series.samples[held].value);
+
+        push(XForTime(qMax(t0, series.samples[held].timeSec)), heldY);
+
+        for(int i = held + 1; i <= to; i++)
+        {
+          const double x = XForTime(series.samples[i].timeSec);
+          push(x, heldY);
+          heldY = yFor(series.samples[i].value);
+          push(x, heldY);
+        }
+
+        // Still holding at the right edge, which is the whole point of drawing a level series as a
+        // hold rather than as a sparse set of dots.
+        push(XForTime(t1), heldY);
+      }
     }
+    else if(count > 0)
+    {
+      // A curve connects neighbouring samples, so the two segments that cross the window edges are
+      // clipped in time and their values interpolated there. That keeps the drawing inside the
+      // widget as well: an unclipped neighbour can be megabytes of pixels away when the sampling
+      // interval is much wider than the window.
+      const auto edge = [&](int i0, int i1, double at) {
+        const TraceSample &a = series.samples[i0];
+        const TraceSample &b = series.samples[i1];
+        const double dt = b.timeSec - a.timeSec;
+        const double f = dt > 0.0 ? (at - a.timeSec) / dt : 0.0;
+
+        push(XForTime(at), yFor(a.value + f * (b.value - a.value)));
+      };
+
+      const int from = first;
+      const int to = qMin(count - 1, afterT1);
+
+      if(from == to)
+      {
+        // One known value cannot be connected to anything, but reporting it across the window is
+        // still truer than an empty lane. Only done when the sample is actually inside the window:
+        // a value that predates it must not be presented as current.
+        const double t = series.samples[from].timeSec;
+
+        if(t >= t0 && t <= t1)
+        {
+          const double y = yFor(series.samples[from].value);
+          push(XForTime(t0), y);
+          push(XForTime(t1), y);
+        }
+      }
+      else
+      {
+        if(series.samples[from].timeSec < t0)
+        {
+          edge(from, from + 1, t0);
+        }
+        else
+        {
+          push(XForTime(series.samples[from].timeSec), yFor(series.samples[from].value));
+        }
+
+        for(int i = from + 1; i < to; i++)
+          push(XForTime(series.samples[i].timeSec), yFor(series.samples[i].value));
+
+        if(series.samples[to].timeSec > t1)
+        {
+          edge(to - 1, to, t1);
+        }
+        else
+        {
+          push(XForTime(series.samples[to].timeSec), yFor(series.samples[to].value));
+        }
+      }
+    }
+
+    flushColumn();
 
     if(poly.size() < 2)
       return;
@@ -1805,6 +2184,38 @@ private:
     p.setPen(QPen(SeriesColour(colourIndex), 1.4));
     p.setBrush(Qt::NoBrush);
     p.drawPolyline(poly);
+
+    if(rowIndex < 0 || rowIndex != m_HoverRow || m_HoverSeries < 0)
+      return;
+
+    // The value under the cursor, drawn where the eye already is. A tooltip would cover the curve
+    // it describes and the caption column is a whole panel away from the point being read.
+    const double x = XForTime(m_HoverTimeSec);
+    const double y = bottom - ((m_HoverValue - vmin) / (vmax - vmin)) * (bottom - top);
+
+    p.setPen(QPen(Highlight(), 1, Qt::DashLine));
+    p.drawLine(QPointF(x, double(row.top) + 1.0), QPointF(x, double(row.top + row.height) - 1.0));
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(SeriesColour(colourIndex));
+    p.drawRect(QRectF(x - 2.5, y - 2.5, 5.0, 5.0));
+    p.setBrush(Qt::NoBrush);
+
+    const QString label = FormatValue(m_HoverValue) + unit;
+    const double labelWidth = double(p.fontMetrics().width(label) + 8);
+    double labelX = x + 6.0;
+
+    if(labelX + labelWidth > rows.right() - 2.0)
+      labelX = x - 6.0 - labelWidth;
+
+    const QRectF box(labelX, qBound(rows.top() + 1.0, y - 7.0, rows.bottom() - 15.0), labelWidth,
+                     14.0);
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(SurfaceAlt());
+    p.drawRect(box);
+    p.setPen(Text());
+    p.drawText(box, Qt::AlignCenter, label);
   }
 
   void PaintSpanLane(QPainter &p, const TraceTrack &track, const Row &row, double t0, double t1)
@@ -1848,7 +2259,7 @@ private:
       if(hovered)
         base = base.lighter(118);
 
-      p.setPen(QPen(base.darker(150), 1));
+      p.setPen(QPen(base.darker(190), 1));
       p.setBrush(selected ? base.lighter(150) : base);
       p.drawRect(box);
 
@@ -1859,15 +2270,31 @@ private:
         p.drawRect(box.adjusted(-1.0, -1.0, 1.0, 1.0));
       }
 
-      // A compact lane is 9 px tall, which cannot hold 11 px text without clipping it. The label is
-      // only drawn where it fits; expanding the lane brings it back.
-      if(w > 34.0 && row.spanHeight >= 12)
+      // Labels remain readable on dense lanes and are clipped to the part of the span visible in
+      // the viewport. The dark halo keeps the text legible on every category colour.
+      if(w > 10.0 && row.spanHeight >= 10 && !span.name.isEmpty() && m_LabelBudget > 0)
       {
-        const QString label =
-            p.fontMetrics().elidedText(span.name, Qt::ElideRight, int(w) - 6);
+        QRectF area = box.adjusted(3.0, 0.0, -3.0, 0.0);
+        area.setLeft(qMax(area.left(), RowsRect().left() + 3.0));
+        area.setRight(qMin(area.right(), RowsRect().right() - 3.0));
 
-        p.setPen(QColor(0x12, 0x12, 0x12));
-        p.drawText(box.adjusted(3.0, 0.0, -3.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter, label);
+        QFont font = p.font();
+        font.setPixelSize(qBound(11, row.spanHeight - 3, 14));
+        font.setBold(true);
+        QFontMetrics metrics(font);
+        if(area.width() >= metrics.width(QLatin1Char('W')))
+        {
+          const QString label = metrics.elidedText(span.name, Qt::ElideRight, int(area.width()));
+          p.save();
+          p.setClipRect(area);
+          p.setFont(font);
+          p.setPen(QPen(QColor(0x10, 0x12, 0x14, 230), 3.0));
+          p.drawText(area, Qt::AlignHCenter | Qt::AlignVCenter, label);
+          p.setPen(QColor(0xff, 0xff, 0xff));
+          p.drawText(area, Qt::AlignHCenter | Qt::AlignVCenter, label);
+          p.restore();
+          m_LabelBudget--;
+        }
       }
     }
   }
@@ -2219,6 +2646,8 @@ private:
   QVector<Row> m_Rows;
   QVector<Annotation> m_Annotations;
   QScrollBar *m_Scroll = NULL;
+  QScrollBar *m_TimeScroll = NULL;
+  bool m_UpdatingTimeScroll = false;
 
   // Which trace the current view window belongs to. When the viewer hands over a different trace
   // the window is reset to its full extent; an event-driven redraw leaves the zoom and pan alone.
@@ -2241,6 +2670,16 @@ private:
 
   SpanRef m_Hover;
   SpanRef m_Selected;
+
+  // Counter readout state: the row under the cursor, the series it draws, the value that series
+  // holds at the cursor, and the sample that value came from. Kept so a repaint draws the same
+  // number the caption was told about, instead of resolving it twice and risking a mismatch.
+  int m_HoverRow = -1;
+  int m_HoverSeries = -1;
+  double m_HoverTimeSec = 0.0;
+  double m_HoverValue = 0.0;
+  QString m_HoverText;
+  int m_LabelBudget = 1400;
 
   bool m_RowsDirty = true;
 
@@ -2285,11 +2724,31 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   // recording must be bounded up front rather than stopped on demand.
   //
   // The ceiling is 10 seconds because that is the limit Snapdragon Profiler documents for its own
-  // trace captures; offering more would only produce a duration the device tooling caps anyway.
+  // trace captures; offering more would only produce a duration the device tooling caps anyway. The
+  // default is the shortest duration that still contains a few frames of work: the recorded text is
+  // roughly twenty megabytes per second on a busy device, and every one of those lines is parsed on
+  // this machine afterwards.
   m_CaptureSeconds = new QSpinBox(this);
   m_CaptureSeconds->setRange(1, 10);
-  m_CaptureSeconds->setValue(5);
+  m_CaptureSeconds->setValue(3);
   m_CaptureSeconds->setSuffix(tr(" s"));
+  m_CaptureSeconds->setToolTip(tr("How long to record on the device. Longer recordings produce a "
+                                  "larger trace: roughly 20 MB of text per second on a busy "
+                                  "device, all of which has to be converted and imported here."));
+
+  // Which GPU events to ask for. The device's own capabilities decide what is actually available; this
+  // only decides how much of what is available is worth recording, because the per-command events
+  // dominate the size of the result.
+  m_CaptureDetail = new QComboBox(this);
+  m_CaptureDetail->addItem(tr("GPU: metrics"), int(GpuTraceDetail::Metrics));
+  m_CaptureDetail->addItem(tr("GPU: metrics + command lanes"), int(GpuTraceDetail::Commands));
+  m_CaptureDetail->addItem(tr("GPU: off"), int(GpuTraceDetail::Off));
+  m_CaptureDetail->setCurrentIndex(0);
+  m_CaptureDetail->setToolTip(
+      tr("Which GPU tracepoints to record. `metrics` collects frequency, utilisation, temperature "
+         "and throttling. `metrics + command lanes` adds the per-cmdbatch and per-fence intervals "
+         "that the GPU Commands and GPU Waits lanes are drawn from, which is the largest part of a "
+         "GPU trace. `off` records the smallest trace, with CPU and scheduling lanes only."));
 
   m_Capture = new QPushButton(tr("Capture Trace..."), this);
 
@@ -2304,6 +2763,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   fileRow->addWidget(reload);
   fileRow->addWidget(new QLabel(tr("Record:"), this));
   fileRow->addWidget(m_CaptureSeconds);
+  fileRow->addWidget(m_CaptureDetail);
   fileRow->addWidget(m_Capture);
 
   // Navigation modes, matching SDP's Trace window: Select, Pan and Zoom, also reachable with the
@@ -2388,6 +2848,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
     showElementFields(span, trackName);
   };
   m_Chart->OnNavModeChanged = [this](TraceNavMode mode) { setNavMode(mode); };
+  m_Chart->OnHoverReadout = [this](const QString &text) { m_HoverReadout->setText(text); };
 
   // '/' focuses the lane filter while the timeline has focus, the way SDP's filter entries are one
   // keystroke away. The shortcut is scoped to the timeline widget so that typing '/' inside the
@@ -2523,6 +2984,12 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   sideTabs->setMinimumWidth(180);
   sideTabs->setMaximumWidth(900);
 
+  // The counter value under the cursor. Placed directly above the alignment text because it is
+  // the same kind of readout, and because a painter-drawn number inside the timeline is invisible
+  // to assistive tooling.
+  m_HoverReadout = new QLabel(this);
+  m_HoverReadout->setWordWrap(true);
+
   m_Alignment = new QLabel(this);
   m_Alignment->setWordWrap(true);
 
@@ -2539,6 +3006,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   layout->addLayout(modeRow);
   layout->addLayout(filterRow);
   layout->addWidget(middle, 1);
+  layout->addWidget(m_HoverReadout);
   layout->addWidget(m_Alignment);
   layout->addWidget(m_Selection);
   layout->addWidget(m_Status);
@@ -2622,7 +3090,10 @@ void SystemTraceViewer::reloadTrace()
   loadTraceFrom(m_TracePath->text());
 }
 
-void SystemTraceViewer::loadTraceFrom(const QString &path)
+// Runs the importer for `path` and returns the trace. This is the half of the load that has no Qt
+// widget involvement at all, so it is also the half that moves to a worker thread -- a phone trace
+// is a hundred-megabyte text file and the unoptimised development build needs minutes to parse it.
+SystemTrace ImportTraceFile(const QString &path)
 {
   // Three inputs are accepted - a Chrome Trace Event Format document, the documented JSON-lines
   // interchange, and a raw systrace/kernel trace text file - and the file's own content decides
@@ -2630,11 +3101,94 @@ void SystemTraceViewer::loadTraceFrom(const QString &path)
   // named `.txt`, and `traceconv systrace` produces a file that starts with a kernel trace header.
   switch(ClassifyTraceFile(path))
   {
-    case TraceFileKind::ChromeJson: m_Trace = ImportChromeTraceEventFormat(path); break;
-    case TraceFileKind::JsonLines: m_Trace = ImportSystemTraceJsonLines(path); break;
-    case TraceFileKind::SystraceText: m_Trace = ImportSystraceText(path); break;
+    case TraceFileKind::ChromeJson: return ImportChromeTraceEventFormat(path);
+    case TraceFileKind::JsonLines: return ImportSystemTraceJsonLines(path);
+    case TraceFileKind::SystraceText: return ImportSystraceText(path);
   }
 
+  return SystemTrace();
+}
+
+void SystemTraceViewer::loadTraceFrom(const QString &path, const QStringList &captureWarnings)
+{
+  const uint64_t serial = ++m_ImportSerial;
+  m_Importing = true;
+  m_ImportPath = path;
+
+  if(m_TracePath)
+    m_TracePath->setText(path);
+
+  updateImportControls();
+  updateStatusText();
+
+  // Do not start several hundred-megabyte parses concurrently. Keep only the newest request and
+  // start it when the current worker reports back; the warnings are part of that request as well.
+  if(m_ImportWorkerRunning)
+  {
+    m_PendingImportPath = path;
+    m_PendingImportWarnings = captureWarnings;
+    return;
+  }
+
+  startImport(path, serial, captureWarnings);
+}
+
+void SystemTraceViewer::startImport(const QString &path, uint64_t serial,
+                                    const QStringList &captureWarnings)
+{
+  m_ImportWorkerRunning = true;
+  QPointer<QObject> guard(this);
+
+  LambdaThread *thread = new LambdaThread([path, serial, captureWarnings, guard]() {
+    SystemTrace trace = ImportTraceFile(path);
+    if(!guard)
+      return;
+
+    GUIInvoke::call(guard, [trace, path, serial, captureWarnings, guard]() {
+      if(guard.isNull())
+        return;
+      static_cast<SystemTraceViewer *>(guard.data())
+          ->finishImport(trace, path, serial, captureWarnings);
+    });
+  });
+
+  thread->setName(lit("ImportSystemTrace"));
+  thread->selfDelete(true);
+  thread->start();
+}
+
+void SystemTraceViewer::finishImport(const SystemTrace &trace, const QString &path,
+                                     uint64_t serial, const QStringList &captureWarnings)
+{
+  m_ImportWorkerRunning = false;
+
+  // The result is stale, but a newer request is waiting. Start exactly that newest request; do not
+  // apply the old trace and do not let its capture warnings leak into the newer document.
+  if(serial != m_ImportSerial)
+  {
+    if(!m_PendingImportPath.isEmpty())
+    {
+      const QString nextPath = m_PendingImportPath;
+      const QStringList nextWarnings = m_PendingImportWarnings;
+      m_PendingImportPath.clear();
+      m_PendingImportWarnings.clear();
+      startImport(nextPath, m_ImportSerial, nextWarnings);
+    }
+    return;
+  }
+
+  m_Importing = false;
+  m_ImportPath.clear();
+  m_Trace = trace;
+  m_Loaded = true;
+
+  updateImportControls();
+  applyImportedTrace(path, captureWarnings);
+}
+
+void SystemTraceViewer::applyImportedTrace(const QString &path,
+                                           const QStringList &captureWarnings)
+{
   m_TracePath->setText(path);
   m_Loaded = true;
 
@@ -2702,6 +3256,11 @@ void SystemTraceViewer::loadTraceFrom(const QString &path)
   for(const QString &warning : m_Trace.warnings)
     m_Warnings->addItem(warning);
 
+  // Warnings travel with the import request, so they cannot be attached to a newer manually opened
+  // trace if the capture result was superseded while parsing.
+  for(const QString &warning : captureWarnings)
+    m_Warnings->addItem(tr("Capture: %1").arg(warning));
+
   // A newly imported trace starts from its full extent, and any previous annotations and
   // calipers belong to the trace that is gone.
   if(m_Chart)
@@ -2713,8 +3272,18 @@ void SystemTraceViewer::loadTraceFrom(const QString &path)
   if(m_ElementCaption)
     m_ElementCaption->setText(tr("No element selected"));
 
+  if(m_HoverReadout)
+    m_HoverReadout->clear();
+
   rebuild();
   updateStatusText();
+}
+
+void SystemTraceViewer::updateImportControls()
+{
+  // Only the record controls need to know: opening a different file during an import is allowed and
+  // supersedes the parse in flight, so Open Trace... and Reload stay usable.
+  updateCaptureControls();
 }
 
 void SystemTraceViewer::captureTrace()
@@ -2738,6 +3307,7 @@ void SystemTraceViewer::captureTrace()
 
   TraceCaptureOptions opts;
   opts.durationMs = m_CaptureSeconds->value() * 1000;
+  opts.gpuDetail = GpuTraceDetail(m_CaptureDetail->itemData(m_CaptureDetail->currentIndex()).toInt());
 
   // The only place a `traceconv` binary may be found is the Snapdragon Profiler installation the
   // user already pointed at in Settings; the driver falls back to PATH discovery when this is
@@ -2763,9 +3333,10 @@ void SystemTraceViewer::captureTrace()
   if(m_CaptureLog)
   {
     m_CaptureLog->clear();
-    m_CaptureLog->appendPlainText(tr("Starting capture on %1 (duration %2 ms)")
+    m_CaptureLog->appendPlainText(tr("Starting capture on %1 (duration %2 ms, %3)")
                                       .arg(url)
-                                      .arg(opts.durationMs));
+                                      .arg(opts.durationMs)
+                                      .arg(m_CaptureDetail->currentText()));
   }
 
   // The driver blocks on every device command, so it runs on a worker thread; TraceCaptureJob
@@ -2805,9 +3376,23 @@ void SystemTraceViewer::captureTrace()
       return;
     }
 
+    // The capture log is filled before the import starts, because the import now runs on a worker
+    // thread and would otherwise clear the log from underneath it.
+    if(m_CaptureLog && !result.warnings.isEmpty())
+    {
+      m_CaptureLog->appendPlainText(QStringLiteral("\nWarnings:"));
+      for(const QString &warning : result.warnings)
+        m_CaptureLog->appendPlainText(tr("  %1").arg(warning));
+    }
+
+    // Anything the capture could not collect is listed beside the trace's own warnings, so a lane
+    // that is missing because the device refused to report it reads as a device limitation rather
+    // than as an importer that failed to parse something. The import is asynchronous, so these are
+    // parked and added by applyImportedTrace() once the trace is actually in place.
     // The captured timeline is a document the importer accepts as-is, so it is loaded through the
-    // normal path: one code path for both captured and manually opened traces.
-    loadTraceFrom(result.localTimelinePath);
+    // normal path: one code path for both captured and manually opened traces. Warnings are attached
+    // to this request rather than stored globally while another import may supersede it.
+    loadTraceFrom(result.localTimelinePath, result.warnings);
   });
 }
 
@@ -2818,7 +3403,9 @@ void SystemTraceViewer::updateCaptureControls()
 
   const bool haveProtocol = m_Ctx.Replay().CurrentRemote().Protocol() != NULL;
 
-  m_Capture->setEnabled(haveProtocol && !m_Capturing);
+  // A capture cannot start while a trace is being parsed: its result would arrive at the panel out
+  // of order, and the panel would show the recording's trace only after the file being opened.
+  m_Capture->setEnabled(haveProtocol && !m_Capturing && !m_Importing);
   m_CaptureSeconds->setEnabled(!m_Capturing);
 
   if(m_Capturing)
@@ -3253,6 +3840,18 @@ void SystemTraceViewer::updateStatusText()
 {
   if(m_Status == NULL)
     return;
+
+  // Parsing happens on a worker thread and a phone trace can take a while, so the state has to be
+  // visible: without it the panel looks idle and the only sign of activity is a file name in the
+  // path box. This takes precedence over everything else, including a previously loaded trace.
+  if(m_Importing)
+  {
+    m_Status->setText(
+        tr("Importing %1 ... The file is parsed on a worker thread, so the panel stays usable; "
+           "opening another trace supersedes this one.")
+            .arg(QFileInfo(m_ImportPath).fileName()));
+    return;
+  }
 
   if(!m_Loaded)
   {

@@ -2396,6 +2396,12 @@ void MainWindow::setRemoteHost(int hostIdx)
   }
 }
 
+void MainWindow::NotifyRemoteHostChanged()
+{
+  if(!m_SystemTraceViewer.isNull())
+    m_SystemTraceViewer->OnRemoteHostChanged();
+}
+
 void MainWindow::switchContext()
 {
   QAction *item = qobject_cast<QAction *>(QObject::sender());

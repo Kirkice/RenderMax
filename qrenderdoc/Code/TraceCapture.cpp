@@ -69,6 +69,200 @@ QString Summarise(const QString &text, int maxChars = 4000)
   return trimmed;
 }
 
+// Runs a device command with root when this session has it. Every command in this file goes through
+// here, so the privileged and unprivileged paths cannot drift apart.
+//
+// `su -c` takes the command as a single argument, so it is quoted as a whole. Single quotes are the
+// only quoting `su` handles identically on every Android version, so an embedded one is closed,
+// escaped and reopened — the standard '\'' sequence — rather than being passed through.
+QString RootedCommand(bool root, const QString &command)
+{
+  if(!root)
+    return command;
+
+  QString escaped = command;
+  escaped.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+
+  return QStringLiteral("su -c '%1'").arg(escaped);
+}
+
+// The KGSL and thermal tracepoints that make up the GPU lane group, with the reason each one is
+// wanted and the cheapest detail level that asks for it. They are requested only when the probe
+// found the event present and enable-able: an event that is requested but cannot be enabled records
+// nothing and reports no error, which is indistinguishable from a device whose GPU never did
+// anything.
+//
+// The `needs` column is what keeps a default capture small. The command and fence events are the
+// expensive ones -- one pair per submission, tens of thousands per second on a busy application --
+// so they are only requested when the caller asked for the command lanes explicitly.
+const struct
+{
+  const char *event;
+  const char *purpose;
+  GpuTraceDetail needs;
+} kGpuFtraceEvents[] = {
+    {"kgsl/kgsl_pwrlevel", "GPU clock", GpuTraceDetail::Metrics},
+    {"kgsl/kgsl_gpubusy", "GPU utilisation", GpuTraceDetail::Metrics},
+    {"kgsl/adreno_cmdbatch_submitted", "GPU command submission", GpuTraceDetail::Commands},
+    {"kgsl/adreno_cmdbatch_retired", "GPU command retirement", GpuTraceDetail::Commands},
+    {"kgsl/adreno_drawctxt_wait_start", "GPU fence waits", GpuTraceDetail::Commands},
+    {"kgsl/adreno_drawctxt_wait_done", "GPU fence waits", GpuTraceDetail::Commands},
+    {"kgsl/adreno_drawctxt_switch", "GPU context switches", GpuTraceDetail::Commands},
+    {"thermal/thermal_query_temp", "GPU temperature", GpuTraceDetail::Metrics},
+    {"thermal/thermal_power_devfreq_limit", "GPU thermal frequency cap", GpuTraceDetail::Metrics},
+    {"thermal/cdev_update", "GPU throttling state", GpuTraceDetail::Metrics},
+};
+
+// True when `detail` asks for an event that costs `needs` to record.
+bool DetailCovers(GpuTraceDetail detail, GpuTraceDetail needs)
+{
+  return int(detail) >= int(needs);
+}
+
+// Names the requested level for the capture log, so a trace with no command lanes can be read back
+// as "the level asked for them" or "the level did not" without consulting the UI.
+const char *GpuDetailName(GpuTraceDetail detail)
+{
+  switch(detail)
+  {
+    case GpuTraceDetail::Off: return "off";
+    case GpuTraceDetail::Metrics: return "metrics";
+    case GpuTraceDetail::Commands: return "metrics + command lanes";
+  }
+  return "unknown";
+}
+
+// Reads one device file and returns its trimmed contents, or an empty string when it could not be
+// read. The reason is logged rather than returned, because every caller treats "unreadable" the same
+// way but wants the refusal itself to stay visible in the capture log.
+QString ReadDeviceFile(IDeviceProtocolController *protocol, const rdcstr &url, bool root,
+                       const QString &path, TraceCaptureResult &result)
+{
+  rdcstr out;
+  const ResultDetails read = protocol->ExecCommand(
+      url, RootedCommand(root, QStringLiteral("cat %1").arg(path)).toUtf8().data(), &out);
+
+  const QString text = QString::fromUtf8(out.c_str(), (int)out.size()).trimmed();
+
+  // A refused `cat` exits non-zero, and the protocol reports the reason on the failed result rather
+  // than on stdout, so both are consulted: a refusal arrives as an error message, a device without
+  // the node arrives as `No such file` from cat's stderr.
+  if(read.OK() && !text.isEmpty() && !text.contains(QStringLiteral("Permission denied")) &&
+     !text.contains(QStringLiteral("No such file")))
+    return text;
+
+  const QString reason = text.isEmpty() ? QString::fromUtf8(read.Message().c_str(),
+                                                            (int)read.Message().size())
+                                        : text;
+  Log(result, QStringLiteral("probe %1: %2").arg(path, Summarise(reason, 160)));
+  return QString();
+}
+
+// Reads `/sys/class/...` for the GPU's published state and asks the kernel which tracepoints this
+// device can actually collect. Both halves need the same privilege, so they are probed together once
+// and the result decides the config.
+GpuTraceCapabilities ProbeGpuCapabilities(IDeviceProtocolController *protocol, const rdcstr &url,
+                                          bool root, GpuTraceDetail detail,
+                                          TraceCaptureResult &result)
+{
+  GpuTraceCapabilities gpu;
+  gpu.rootAvailable = root;
+  gpu.requestedDetail = detail;
+
+  Log(result, QStringLiteral("GPU detail level: %1").arg(QLatin1String(GpuDetailName(detail))));
+
+  // The probe only asks about the events the requested level wants. An unnecessary `chmod` of a
+  // tracepoint that will not be requested is a device change this feature has no reason to make.
+  QStringList candidates;
+  for(const auto &entry : kGpuFtraceEvents)
+  {
+    if(DetailCovers(detail, entry.needs))
+      candidates << QLatin1String(entry.event);
+  }
+
+  const QString kgsl = QStringLiteral("/sys/class/kgsl/kgsl-3d0/");
+
+  gpu.gpuClock = ReadDeviceFile(protocol, url, root, kgsl + QStringLiteral("gpuclk"), result);
+  gpu.gpuBusyPercent =
+      ReadDeviceFile(protocol, url, root, kgsl + QStringLiteral("gpu_busy_percentage"), result);
+  gpu.gpuMaxClock =
+      ReadDeviceFile(protocol, url, root, kgsl + QStringLiteral("devfreq/max_freq"), result);
+  gpu.sysfsReadable = !gpu.gpuClock.isEmpty() || !gpu.gpuBusyPercent.isEmpty();
+
+  // The node SDP's own GPU counters are read from. Its absence is a kernel configuration fact, not a
+  // permission problem: `perfcounter` only exists when CONFIG_QCOM_KGSL_PERFCOUNTER is set, and
+  // production kernels usually leave it out. Probing it is what lets the capture say "this device
+  // cannot produce these metrics at all" instead of hinting at a missing privilege.
+  gpu.perfcounterNode =
+      !ReadDeviceFile(protocol, url, root, kgsl + QStringLiteral("perfcounter"), result).isEmpty();
+
+  // Tracepoints are enabled by `traced_probes`, which runs as its own user: the `enable` files are
+  // root-owned mode 0644, so the probe can see the events exist and still be unable to turn any of
+  // them on. `chmod` is the whole fix and it needs root, so it is attempted only when root is
+  // available and the resulting writability is then measured rather than assumed.
+  QStringList parts;
+  if(root && !candidates.isEmpty())
+  {
+    parts << QStringLiteral(
+        "chmod 666 /sys/kernel/tracing/events/kgsl/*/enable "
+        "/sys/kernel/tracing/events/thermal/*/enable 2>/dev/null");
+  }
+  // Writability is measured from the file's mode rather than with `[ -w ]`. `[ -w ]` asks whether
+  // *this* shell may write, and root may write anything, so running it under `su` would report every
+  // existing event as usable even when `traced_probes` still cannot touch it. What decides the
+  // outcome is the others-write bit, because traced_probes is neither the owner nor in root's group.
+  parts << QStringLiteral("for e in %1; do f=/sys/kernel/tracing/events/$e/enable; "
+                          "if [ -e $f ]; then m=$(stat -c %a $f 2>/dev/null); "
+                          "case ${m#${m%?}} in *[2367]) echo $e;; esac; fi; done")
+               .arg(candidates.join(QLatin1Char(' ')));
+
+  const QString probeCommand = parts.join(QStringLiteral("; "));
+
+  rdcstr out;
+  const ResultDetails probe =
+      protocol->ExecCommand(url, RootedCommand(root, probeCommand).toUtf8().data(), &out);
+
+  const QString enableText = QString::fromUtf8(out.c_str(), (int)out.size()).trimmed();
+
+  if(!probe.OK() && enableText.isEmpty())
+  {
+    Log(result, QStringLiteral("tracepoint probe failed: %1")
+                    .arg(QString::fromUtf8(probe.Message().c_str(),
+                                          (int)probe.Message().size())));
+  }
+
+  for(const QString &line : enableText.split(QLatin1Char('\n')))
+  {
+    const QString name = line.trimmed();
+    if(!name.isEmpty())
+      gpu.eventNames << name;
+  }
+
+  for(const auto &entry : kGpuFtraceEvents)
+  {
+    const QString name = QLatin1String(entry.event);
+
+    // An event this level did not ask for is not "unavailable": saying so would make a metrics-only
+    // capture look like it had lost the command lanes.
+    const QString state = !DetailCovers(detail, entry.needs)
+                              ? QStringLiteral("not requested at this detail level")
+                              : (gpu.eventNames.contains(name) ? QStringLiteral("enabled")
+                                                               : QStringLiteral("unavailable"));
+
+    Log(result, QStringLiteral("tracepoint %1 (%2): %3").arg(name, QLatin1String(entry.purpose), state));
+  }
+
+  Log(result, QStringLiteral("GPU probe: root=%1 sysfs=%2 perfcounter=%3 clock=%4 busy=%5 max=%6")
+                  .arg(gpu.rootAvailable ? QStringLiteral("yes") : QStringLiteral("no"))
+                  .arg(gpu.sysfsReadable ? QStringLiteral("yes") : QStringLiteral("no"))
+                  .arg(gpu.perfcounterNode ? QStringLiteral("yes") : QStringLiteral("no"))
+                  .arg(gpu.gpuClock.isEmpty() ? QStringLiteral("-") : gpu.gpuClock)
+                  .arg(gpu.gpuBusyPercent.isEmpty() ? QStringLiteral("-") : gpu.gpuBusyPercent)
+                  .arg(gpu.gpuMaxClock.isEmpty() ? QStringLiteral("-") : gpu.gpuMaxClock));
+
+  return gpu;
+}
+
 // Turns an rdcstr into a QString for display. rdcstr is UTF-8 on every platform.
 QString ToQStringDisplay(const rdcstr &s)
 {
@@ -281,8 +475,15 @@ void PersistCaptureLog(TraceCaptureResult &result)
 
 }    // anonymous namespace
 
-QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
+QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb,
+                              const QStringList &extraFtraceEvents)
 {
+  // Vendor-shaped events, in `group/event` form. They are appended after the standard ones so a
+  // config diff stays readable, and they arrive already filtered by the probe: this function does
+  // not decide what the device can do.
+  QString vendorEvents;
+  for(const QString &event : extraFtraceEvents)
+    vendorEvents += QStringLiteral("            ftrace_events: \"%1\"\n").arg(event);
   // Every data source and event named here is part of the standard Android Perfetto surface, so
   // the config does not assume a vendor-specific probe or a rooted device. The events chosen are the
   // ones that explain GPU-bound frames: what ran, on which CPU and at what frequency, what took the
@@ -317,6 +518,7 @@ QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
              "            ftrace_events: \"sched/task_newtask\"\n"
              "            ftrace_events: \"sched/task_rename\"\n"
              "            ftrace_events: \"power/cpu_frequency\"\n"
+             "%3"
              "            ftrace_events: \"power/cpu_idle\"\n"
              "            ftrace_events: \"power/suspend_resume\"\n"
              "            ftrace_events: \"clk/clk_set_rate\"\n"
@@ -368,7 +570,8 @@ QString DefaultPerfettoConfig(int durationMs, uint64_t bufferSizeKb)
              "    }\n"
              "}\n")
       .arg(durationMs)
-      .arg(bufferSizeKb);
+      .arg(bufferSizeKb)
+      .arg(vendorEvents);
 }
 
 TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QString &url,
@@ -389,6 +592,108 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
 
   Log(result, QStringLiteral("device: %1 / protocol %2")
                   .arg(url, ToQStringDisplay(protocol->GetProtocolName())));
+
+  // -----------------------------------------------------------------------------------------------
+  // Step 0: probe for root. Nothing about the capture changes shape with it - the same commands run
+  // either way - but two things become possible: the KGSL and thermal tracepoints can be enabled,
+  // because their `enable` files are root-owned, and the sysfs nodes that publish the GPU clock and
+  // utilisation can be read. Both are what make GPU lanes exist at all, so whether root is present
+  // decides the config that is written below.
+  //
+  // `su` is only trusted when it reports uid=0. A `su` that exists but refuses is indistinguishable
+  // from no `su` for our purposes, and assuming it worked would turn into a capture that is missing
+  // every GPU event for a reason nobody can see.
+  // -----------------------------------------------------------------------------------------------
+  bool root = false;
+  {
+    rdcstr out;
+    const ResultDetails su = protocol->ExecCommand(urlStr, "su -c id", &out);
+    const QString who = ToQStringDisplay(out).trimmed();
+
+    root = su.OK() && who.contains(QStringLiteral("uid=0"));
+
+    if(root)
+      Log(result, QStringLiteral("root: available via su (%1)").arg(Summarise(who, 120)));
+    else
+      Log(result, QStringLiteral("root: not available (%1)")
+                      .arg(Summarise(who.isEmpty() ? ToQStringDisplay(su.Message()) : who, 120)));
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Step 1b: probe what this device can report about the GPU, and which of its tracepoints can be
+  // collected. This decides which events go into the config, so it has to run before it is written.
+  //
+  // Two independent gates are measured, because either one alone is misleading:
+  //   * the sysfs nodes `gpuclk` / `gpu_busy_percentage`. If the shell user cannot read them, the
+  //     GPU's state is not published to userland at all.
+  //   * the `enable` files under tracefs. `traced_probes` is what turns an ftrace event on, it runs as
+  //     its own user, and the file is root-owned mode 0644 - so a device can list the event as
+  //     available and still record nothing for it, without any error anywhere.
+  // -----------------------------------------------------------------------------------------------
+  result.gpu = ProbeGpuCapabilities(protocol, urlStr, root, opts.gpuDetail, result);
+  const GpuTraceCapabilities &gpu = result.gpu;
+
+  // GPU lanes: the lanes exist exactly when their events were enabled, and the reason they do not is
+  // reported rather than left as an unexplained absence from the timeline.
+  if(gpu.eventNames.isEmpty() && opts.gpuDetail == GpuTraceDetail::Off)
+  {
+    result.warnings << QStringLiteral(
+        "No GPU lanes: this capture was recorded with the GPU detail set to `off`, so no KGSL or "
+        "thermal tracepoint was requested. The trace is smaller as a result; choose `metrics` or "
+        "`metrics + command lanes` to record GPU frequency, utilisation, temperature and command "
+        "intervals.");
+  }
+  else if(gpu.eventNames.isEmpty())
+  {
+    result.warnings << QStringLiteral(
+        "No GPU lanes: none of the KGSL/thermal tracepoints could be enabled on this device. The "
+        "events are present but their `enable` files are root-owned, so `traced_probes` cannot turn "
+        "them on without root (this session has %1). CPU frequency, idle residency, scheduling and "
+        "atrace slices are unaffected.")
+                           .arg(gpu.rootAvailable ? QStringLiteral("root, but no event became "
+                                                                   "writable")
+                                                  : QStringLiteral("no root"));
+  }
+  else if(opts.gpuDetail == GpuTraceDetail::Metrics)
+  {
+    // Logged rather than warned about: this is the default level, so a warning would appear on every
+    // ordinary capture. It still needs to be said somewhere, because an empty GPU Commands lane group
+    // would otherwise read as a broken importer.
+    Log(result, QStringLiteral("GPU command and fence-wait lanes are not recorded at the `metrics` "
+                 "detail level; choose `metrics + command lanes` to include them"));
+  }
+
+  // A non-empty eventNames list is not sufficient to prove that the requested detail is complete:
+  // a device may expose the metrics events while refusing the command or wait pair. Report that
+  // partial downgrade explicitly, otherwise selecting `Commands` can silently produce only metrics.
+  QStringList missingGpuEvents;
+  for(const auto &entry : kGpuFtraceEvents)
+  {
+    if(DetailCovers(opts.gpuDetail, entry.needs) &&
+       !gpu.eventNames.contains(QLatin1String(entry.event)))
+      missingGpuEvents << QLatin1String(entry.event);
+  }
+  if(!missingGpuEvents.isEmpty() && !gpu.eventNames.isEmpty())
+  {
+    result.warnings << QStringLiteral(
+        "GPU detail is partially unavailable: the requested tracepoints that could not be enabled "
+        "are %1. The corresponding GPU lanes may be incomplete; see the Capture Log for each event "
+        "and its reason.")
+                           .arg(missingGpuEvents.join(QStringLiteral(", ")));
+  }
+
+  if(!gpu.perfcounterNode)
+  {
+    result.warnings << QStringLiteral(
+        "No per-stage GPU counters: /sys/class/kgsl/kgsl-3d0/perfcounter does not exist on this "
+        "device, so Snapdragon Profiler's counter set (% Shader ALU Capacity Utilized, % Texture "
+        "Fetch Stall, Vertices/Fragments Shaded, bandwidth) cannot be read here by any tool. That "
+        "node is only present when the kernel is built with CONFIG_QCOM_KGSL_PERFCOUNTER. GPU "
+        "frequency, utilisation, command batches and temperature are unaffected.");
+  }
+
+  if(gpu.sysfsReadable && !gpu.gpuClock.isEmpty())
+    Log(result, QStringLiteral("GPU clock: %1 Hz").arg(gpu.gpuClock));
 
   // -----------------------------------------------------------------------------------------------
   // Step 1: probe perfetto. A device without it cannot be traced by this path at all, and saying so
@@ -437,7 +742,8 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   {
     rdcstr out;
     const ResultDetails mk = protocol->ExecCommand(
-        urlStr, QStringLiteral("mkdir -p %1").arg(ShellQuote(deviceDir)), &out);
+        urlStr, RootedCommand(root, QStringLiteral("mkdir -p %1").arg(ShellQuote(deviceDir))),
+        &out);
 
     if(!mk.OK())
     {
@@ -473,9 +779,10 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   // who knows which counters they want is not limited to the default surface.
   // -----------------------------------------------------------------------------------------------
   {
-    const QString configText = opts.configText.isEmpty()
-                                   ? DefaultPerfettoConfig(opts.durationMs, opts.bufferSizeKb)
-                                   : opts.configText;
+    const QString configText =
+        opts.configText.isEmpty()
+            ? DefaultPerfettoConfig(opts.durationMs, opts.bufferSizeKb, gpu.eventNames)
+            : opts.configText;
 
     QFile configFile(localConfig);
     if(!configFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
@@ -519,8 +826,22 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   // output in that platform-managed directory.
   // -----------------------------------------------------------------------------------------------
   {
-    const QString command = QStringLiteral("cat %1 | perfetto --txt -c - -o %2")
-                                .arg(ShellQuote(deviceConfig), ShellQuote(deviceTrace));
+    // With root the config can be handed to perfetto directly. Without it, the unprivileged
+    // perfetto_cmd domain cannot open a file this session pushed, so the config travels on stdin
+    // instead: Perfetto's own process reads it from the pipe it inherits.
+    QString command;
+    if(root)
+    {
+      command = QStringLiteral("perfetto --txt -c %1 -o %2")
+                    .arg(ShellQuote(deviceConfig), ShellQuote(deviceTrace));
+    }
+    else
+    {
+      command = QStringLiteral("cat %1 | perfetto --txt -c - -o %2")
+                    .arg(ShellQuote(deviceConfig), ShellQuote(deviceTrace));
+    }
+
+    command = RootedCommand(root, command);
 
     Log(result, QStringLiteral("recording: %1 (blocking for the configured duration)")
                     .arg(command));
@@ -544,7 +865,8 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
     // non-fatal reason, so the existence and size of the output are checked rather than assumed.
     rdcstr stat;
     const ResultDetails ls = protocol->ExecCommand(
-        urlStr, QStringLiteral("ls -l %1").arg(ShellQuote(deviceTrace)), &stat);
+        urlStr, RootedCommand(root, QStringLiteral("ls -l %1").arg(ShellQuote(deviceTrace))),
+        &stat);
 
     if(!ls.OK())
     {
@@ -556,6 +878,24 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
     }
 
     Log(result, QStringLiteral("recorded: %1").arg(Summarise(ToQStringDisplay(stat), 300)));
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Step 4b: make the recorded trace pullable. A trace recorded through `su` is owned by root with
+  // mode 0600, which the shell user that does the pull cannot open - the pull then fails with
+  // 'Permission denied' on a file that demonstrably exists. The mode is widened first so the pull
+  // path is identical with and without root.
+  // -----------------------------------------------------------------------------------------------
+  if(root)
+  {
+    rdcstr ignored;
+    const ResultDetails chmod = protocol->ExecCommand(
+        urlStr, RootedCommand(true, QStringLiteral("chmod 644 %1").arg(ShellQuote(deviceTrace))),
+        &ignored);
+
+    if(!chmod.OK())
+      Log(result, QStringLiteral("chmod of %1 failed (non-fatal until the pull): %2")
+                      .arg(deviceTrace, ToQStringDisplay(chmod.Message())));
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -591,8 +931,8 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   {
     rdcstr ignored;
     const ResultDetails rm = protocol->ExecCommand(
-        urlStr, QStringLiteral("rm -rf %1; rm -f %2")
-                    .arg(ShellQuote(deviceDir), ShellQuote(deviceTrace)),
+        urlStr, RootedCommand(root, QStringLiteral("rm -rf %1; rm -f %2")
+                                        .arg(ShellQuote(deviceDir), ShellQuote(deviceTrace))),
         &ignored);
     if(!rm.OK())
       Log(result, QStringLiteral("cleanup of %1 and %2 failed (non-fatal): %3")
