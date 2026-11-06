@@ -126,6 +126,13 @@ public:
   // is recorded, and the call is marshalled onto the UI thread where that record is read.
   void SetActiveRemoteSession(const QString &url);
 
+  // Point the ReplayManager at a device so captures replay through the device driver. An Android
+  // GLES/Vulkan capture replayed locally uses the desktop driver, which has none of the hardware
+  // counters the device exposes, so counter tools silently report an empty list until this runs.
+  // `deviceCapture` is an absolute path on the device to open after connecting, or empty to only
+  // change the driver.
+  ToolResult ConnectRemoteReplay(const QString &url, const QString &deviceCapture, CallContext &call);
+
   // Shader tools run a capture-stable UI transaction and replay-only callbacks.
   ToolResult ShaderTool(const QString &name, const QJsonObject &args, CallContext &call);
   ToolResult ResourceTool(const QString &name, const QJsonObject &args, CallContext &call);
@@ -274,12 +281,27 @@ public:
   ToolResult HotEvents(uint32_t topCount, CallContext &call,
                        const QStringList &fields = QStringList());
 
+  // Fetch arbitrary performance counters by name or id and return their per-event samples. This is
+  // the generic counter path: EventGPUDuration is the only counter the other tools use, so without
+  // this any vendor counter the driver enumerates is listed but unreadable. Counters that read zero
+  // everywhere carry an explicit allZero flag, because on Adreno the enumerated GGPM counters cannot
+  // be addressed yet and a silent zero would be indistinguishable from real idle time.
+  ToolResult FetchCounters(const QStringList &names, const QVector<uint32_t> &ids, int maxSamples,
+                           CallContext &call);
+
   // Multi-evidence analysis of one hot event: the event itself, its GPU
   // duration, the pipeline state, resource/shader counts and (optionally) the
   // mesh data. Each conclusion carries an EvidenceRef + Confidence so clients can
   // separate facts from inference. Requires replay for the pipeline/mesh parts.
   ToolResult AnalyzeHotEvent(uint32_t eventId, bool includeShaderInfo, bool includeMeshData,
                              CallContext &call, const QStringList &fields = QStringList());
+
+  // Place the current frame's actions on an imported system trace's timeline, and report which GPU
+  // command batch each one falls inside. The alignment comes from CorrelateSystemTrace(), so it is
+  // only produced when the trace and the capture actually agree on a clock; when they do not, the
+  // result says so and carries no times rather than inventing them. Requires replay for the per-event
+  // GPU durations that give the actions their in-frame offsets.
+  ToolResult CorrelateSystemTrace(const QString &filePath, int maxActions, CallContext &call);
 
   // ---- P1-3 pass graph, producer/consumer tracking and reverse search -------
 

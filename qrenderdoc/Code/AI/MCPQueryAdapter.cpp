@@ -43,6 +43,8 @@
 
 #include "Code/Interface/QRDInterface.h"
 #include "Code/QRDUtils.h"
+#include "Code/SystemTrace.h"
+#include "Code/SystemTraceCorrelation.h"
 
 #include <QDateTime>
 #include <QFile>
@@ -343,6 +345,126 @@ void QueryAdapter::SetActiveRemoteSession(const QString &url)
     }
 
     return 0;
+  });
+}
+
+ToolResult QueryAdapter::ConnectRemoteReplay(const QString &url, const QString &deviceCapture,
+                                            CallContext &call)
+{
+  if(m_Ctx == NULL)
+    return ToolResult::Failure(Error(ErrorCode::Unsupported, "No native capture context"));
+
+  const QString target = url.trimmed();
+  if(target.isEmpty())
+    return ToolResult::Failure(Error(ErrorCode::InvalidParams,
+                                     "url must name a remote host, for example adb://<serial>"));
+
+  // Switching drivers closes whatever is open, so the one thing that must not be lost is a capture
+  // the user has edited and not saved. A plain loaded capture is only a view of a file.
+  if(m_Ctx->IsCaptureLoading())
+    return ToolResult::Failure(Error(ErrorCode::CaptureBusy, "Capture is loading"));
+  if(m_Ctx->IsCaptureLoaded() &&
+     (m_Ctx->IsCaptureTemporary() || m_Ctx->GetCaptureModifications() != CaptureModifications::NoModifications))
+    return ToolResult::Failure(Error(ErrorCode::CaptureBusy,
+                                     "Save or close the temporary/modified capture before changing "
+                                     "the replay driver"));
+
+  IReplayManager &replay = m_Ctx->Replay();
+
+  RemoteHost host(rdcstr(target.toUtf8().constData()));
+  host.CheckStatus();
+
+  QJsonObject launched;
+  if(!host.IsServerRunning())
+  {
+    const ResultDetails result = host.Launch();
+    launched[QStringLiteral("code")] = int(uint32_t(result.code));
+    launched[QStringLiteral("message")] = FromRdcStr(result.Message());
+    launched[QStringLiteral("ok")] = result.OK();
+    host.CheckStatus();
+  }
+
+  QJsonObject out;
+  out[QStringLiteral("url")] = target;
+  out[QStringLiteral("name")] = FromRdcStr(host.Name());
+  out[QStringLiteral("serverRunning")] = host.IsServerRunning();
+  if(!launched.isEmpty())
+    out[QStringLiteral("launch")] = launched;
+
+  // A connection owned by something else is not a failure of this call to report as one: the
+  // caller needs the reason, not an exception.
+  const bool alreadyConnected = host.Protocol() != NULL && host.IsConnected();
+  if(host.IsBusy() && !alreadyConnected)
+  {
+    out[QStringLiteral("ok")] = false;
+    out[QStringLiteral("message")] =
+        QStringLiteral("The remote server is in use by another client; only one replay can connect "
+                       "at a time. A capture layer inside the application already owns it, so "
+                       "close the application first or launch with the server as the target.");
+    return ToolResult::Success(out);
+  }
+
+  if(!alreadyConnected)
+  {
+    const ResultDetails connected = replay.ConnectToRemoteServer(host);
+    out[QStringLiteral("connectCode")] = int(uint32_t(connected.code));
+    out[QStringLiteral("connectMessage")] = FromRdcStr(connected.Message());
+    out[QStringLiteral("connected")] = connected.OK();
+    out[QStringLiteral("ok")] = connected.OK();
+    if(!connected.OK())
+      return ToolResult::Success(out);
+  }
+  else
+  {
+    out[QStringLiteral("connected")] = true;
+    out[QStringLiteral("ok")] = true;
+  }
+
+  if(call.IsCancelled())
+    return ToolResult::Failure(Error(ErrorCode::Cancelled, "Request was cancelled"));
+
+  if(deviceCapture.isEmpty())
+  {
+    out[QStringLiteral("message")] =
+        QStringLiteral("Replay now runs on the device. Open a capture that lives on the device so "
+                       "the replay driver is the device driver, which is the only place hardware "
+                       "counters exist.");
+    return ToolResult::Success(out);
+  }
+
+  if(!deviceCapture.startsWith(QLatin1Char('/')))
+    return ToolResult::Failure(Error(ErrorCode::InvalidParams,
+                                     "capturePath must be an absolute path on the device, starting "
+                                     "with '/'. A local file replays with the local driver and has "
+                                     "no device counters."));
+
+  const QString path = deviceCapture;
+  return WithCaptureUI(call, [path](ICaptureContext &ctx) -> ToolResult {
+    if(ctx.IsCaptureLoading())
+      return ToolResult::Failure(Error(ErrorCode::CaptureBusy, "Capture is loading"));
+
+    ctx.LoadCapture(rdcstr(path.toUtf8().constData()), ctx.Config().DefaultReplayOptions,
+                    rdcstr(path.toUtf8().constData()), false, false);
+
+    QJsonObject out;
+    out[QStringLiteral("ok")] = ctx.IsCaptureLoaded();
+    out[QStringLiteral("capturePath")] = path;
+    out[QStringLiteral("captureLoaded")] = ctx.IsCaptureLoaded();
+    out[QStringLiteral("local")] = false;
+    if(ctx.IsCaptureLoaded())
+    {
+      const APIProperties props = ctx.APIProps();
+      out[QStringLiteral("remoteReplay")] = props.remoteReplay;
+      out[QStringLiteral("api")] = detail::GraphicsAPIName(props.pipelineType);
+      out[QStringLiteral("message")] =
+          QStringLiteral("Capture is replayed on the device, so counter tools see the device "
+                         "counters rather than the local driver's.");
+    }
+    else
+    {
+      out[QStringLiteral("message")] = QStringLiteral("The device did not open that capture path.");
+    }
+    return ToolResult::Success(out);
   });
 }
 
@@ -1962,6 +2084,452 @@ ToolResult QueryAdapter::HotEvents(uint32_t topCount, CallContext &call, const Q
     }
 
     return ToolResult::Success(j);
+  });
+}
+
+ToolResult QueryAdapter::FetchCounters(const QStringList &names, const QVector<uint32_t> &ids,
+                                        int maxSamples, CallContext &call)
+{
+  if(maxSamples <= 0)
+    maxSamples = 200;
+
+  if(names.isEmpty() && ids.isEmpty())
+    return ToolResult::Failure(
+        Error(ErrorCode::InvalidParams, "name at least one counter by name or id"));
+
+  return DispatchBlock("renderdoc_fetchCounters", call,
+                       [names, ids, maxSamples](IReplayController &replay) -> ToolResult {
+    const rdcarray<GPUCounter> available = replay.EnumerateCounters();
+
+    // Resolve by id first, then by name: exact case-insensitive match, and only then substring
+    // matching, so "Shader ALU Capacity Utilized" resolves to that counter rather than to every
+    // counter that happens to mention "Shader".
+    rdcarray<GPUCounter> wanted;
+    QStringList unknown;
+    QStringList ambiguous;
+
+    // Build the counter catalog once. On a device replay every DescribeCounter is an IPC round-trip,
+    // so describing the catalog inside the per-name matching loop made a 55 name request cost 55 x
+    // 56 round-trips - tens of seconds of pure latency that the sampling itself never spent.
+    struct CatalogEntry
+    {
+      GPUCounter counter;
+      QString name;
+      CounterDescription desc;
+    };
+
+    QVector<CatalogEntry> catalog;
+    catalog.reserve(int(available.size()));
+    for(GPUCounter counter : available)
+    {
+      CatalogEntry e;
+      e.counter = counter;
+      e.desc = replay.DescribeCounter(counter);
+      e.name = QString::fromUtf8(e.desc.name.c_str());
+      catalog.push_back(e);
+    }
+
+    const auto describe = [&catalog](GPUCounter counter) -> const CatalogEntry * {
+      for(const CatalogEntry &e : catalog)
+      {
+        if(e.counter == counter)
+          return &e;
+      }
+      return NULL;
+    };
+
+    for(uint32_t id : ids)
+    {
+      if(!available.contains(GPUCounter(id)))
+      {
+        unknown << QString::number(id);
+        continue;
+      }
+      if(!wanted.contains(GPUCounter(id)))
+        wanted.push_back(GPUCounter(id));
+    }
+
+    for(const QString &name : names)
+    {
+      const QString needle = name.trimmed();
+      if(needle.isEmpty())
+        continue;
+
+      QVector<GPUCounter> exact, partial;
+      for(const CatalogEntry &e : catalog)
+      {
+        if(QString::compare(e.name, needle, Qt::CaseInsensitive) == 0)
+          exact.push_back(e.counter);
+        else if(e.name.contains(needle, Qt::CaseInsensitive))
+          partial.push_back(e.counter);
+      }
+
+      const QVector<GPUCounter> &matches = exact.isEmpty() ? partial : exact;
+      if(matches.isEmpty())
+      {
+        unknown << name;
+        continue;
+      }
+      if(matches.size() > 1)
+        ambiguous << name;
+      for(GPUCounter counter : matches)
+      {
+        if(!wanted.contains(counter))
+          wanted.push_back(counter);
+      }
+    }
+
+    if(wanted.isEmpty())
+    {
+      QJsonArray unknownArray;
+      for(const QString &u : unknown)
+        unknownArray.append(u);
+      QJsonArray availableArray;
+      for(const CatalogEntry &e : catalog)
+        availableArray.append(e.name);
+      return ToolResult::Success(QJsonObject{
+          {QStringLiteral("ok"), false},
+          {QStringLiteral("frameNumber"), double(replay.GetFrameInfo().frameNumber)},
+          {QStringLiteral("unknownCounters"), unknownArray},
+          {QStringLiteral("availableCounters"), availableArray},
+          {QStringLiteral("message"), QStringLiteral(
+                                         "None of the requested counters exist for this capture. "
+                                         "The list above is everything the replay driver reports, "
+                                         "which is what can be fetched.")}});
+    }
+
+    rdcarray<GPUCounter> fetchArray;
+    for(GPUCounter counter : wanted)
+      fetchArray.push_back(counter);
+
+    // One FetchCounters call for the whole set: the driver groups the counters into the passes it
+    // needs, and asking per counter would repeat every pass once per counter.
+    rdcarray<CounterResult> results = replay.FetchCounters(fetchArray);
+
+    QJsonArray counters;
+    for(GPUCounter counter : wanted)
+    {
+      const CatalogEntry *entryPtr = describe(counter);
+      if(entryPtr == NULL)
+        continue;
+      const CounterDescription &desc = entryPtr->desc;
+      const QString counterName = entryPtr->name;
+
+      QVector<QPair<uint32_t, double>> samples;
+      for(const CounterResult &result : results)
+      {
+        if(result.counter != counter)
+          continue;
+        const double value = result.value.d;
+        if(!std::isfinite(value))
+          continue;
+        samples.push_back(qMakePair(result.eventId, value));
+      }
+
+      std::sort(samples.begin(), samples.end(),
+                [](const QPair<uint32_t, double> &a, const QPair<uint32_t, double> &b) {
+                  return a.first < b.first;
+                });
+
+      double min = 0.0, max = 0.0, sum = 0.0;
+      bool allZero = true;
+      for(int i = 0; i < samples.size(); i++)
+      {
+        const double v = samples[i].second;
+        if(i == 0 || v < min) min = v;
+        if(i == 0 || v > max) max = v;
+        sum += v;
+        if(v != 0.0)
+          allZero = false;
+      }
+
+      QJsonArray sampleArray;
+      for(int i = 0; i < samples.size() && i < maxSamples; i++)
+      {
+        sampleArray.append(QJsonObject{{QStringLiteral("eventId"), double(samples[i].first)},
+                                       {QStringLiteral("value"), samples[i].second}});
+      }
+
+      QJsonObject entry{{QStringLiteral("id"), double(uint32_t(counter))},
+          {QStringLiteral("name"), counterName},
+          {QStringLiteral("category"), QString::fromUtf8(desc.category.c_str())},
+          {QStringLiteral("description"), QString::fromUtf8(desc.description.c_str())},
+          {QStringLiteral("unit"), int(uint32_t(desc.unit))},
+          {QStringLiteral("resultType"), int(uint32_t(desc.resultType))},
+          {QStringLiteral("sampleCount"), samples.size()},
+          {QStringLiteral("samplesOmitted"), qMax(0, samples.size() - maxSamples)},
+          // An enumerated counter that reads zero everywhere is not the same as one that is working
+          // and happened to be idle: this flag is what lets a reader tell "the backend cannot address
+          // this counter" from a real zero.
+          {QStringLiteral("allZero"), allZero},
+          {QStringLiteral("samples"), sampleArray}};
+
+      if(!samples.isEmpty())
+      {
+        entry[QStringLiteral("stats")] = QJsonObject{
+            {QStringLiteral("min"), min},
+            {QStringLiteral("max"), max},
+            {QStringLiteral("mean"), sum / double(samples.size())},
+            {QStringLiteral("sum"), sum}};
+      }
+      else
+      {
+        entry[QStringLiteral("stats")] = QJsonValue::Null;
+      }
+
+      counters.append(entry);
+    }
+
+    QJsonArray unknownArray;
+    for(const QString &u : unknown)
+      unknownArray.append(u);
+    QJsonArray ambiguousArray;
+    for(const QString &a : ambiguous)
+      ambiguousArray.append(a);
+
+    QString notes = QStringLiteral(
+        "Values are the replay driver's samples, one per event that reported the counter, so an "
+        "event between draws can legitimately read zero: read stats.max to see whether the counter "
+        "ever moved inside the frame. A counter reporting allZero true never read non-zero on any "
+        "event. That is not proof the GPU did no work - on Adreno the Qualcomm/GGPM counters are "
+        "derived from raw performance-monitor counters, and several of them only move under a "
+        "workload the capture may not contain (local/global memory instructions need compute or "
+        "buffer traffic, preemption counters need preemption events). "
+        "An Adreno capture replayed on the host reports only the desktop driver's counters; open it "
+        "with renderdoc_connectRemoteReplay so the replay runs on the device and these counters "
+        "exist at all. Sampling on a device costs one GPU fence wait per sampled draw, so the first "
+        "fetch over a large frame is slow by nature rather than stuck; events already measured stay "
+        "cached for the rest of the session, which makes asking for a different subset of counters "
+        "afterwards cheap.");
+    if(!ambiguous.isEmpty())
+      notes += QStringLiteral(
+          " Some names matched more than one counter; every match was returned, so read the name "
+          "field rather than assuming the first entry is the one meant.");
+
+    QJsonObject out{{QStringLiteral("ok"), true},
+        {QStringLiteral("frameNumber"), double(replay.GetFrameInfo().frameNumber)},
+        {QStringLiteral("counterCount"), counters.size()},
+        {QStringLiteral("counters"), counters},
+        {QStringLiteral("unknownCounters"), unknownArray},
+        {QStringLiteral("ambiguousNames"), ambiguousArray},
+        {QStringLiteral("notes"), notes}};
+    return ToolResult::Success(out);
+  });
+}
+
+ToolResult QueryAdapter::CorrelateSystemTrace(const QString &filePath, int maxActions,
+                                               CallContext &call)
+{
+  QFileInfo file(filePath);
+  if(!file.isAbsolute() || !file.isFile())
+    return ToolResult::Failure(Error(ErrorCode::InvalidParams,
+                                     "filePath must name an existing absolute system trace file"));
+
+  if(maxActions <= 0)
+    maxActions = 400;
+
+  // Everything is read on the replay thread, from one frame: the frame number, the action tree and the
+  // per-event durations. Reading the frame number from the UI context instead would give the invalid
+  // id whenever no event happened to be selected, and pairing a UI frame with replay counters from a
+  // different frame would silently mix two frames' data.
+  return DispatchBlock("renderdoc_correlateSystemTrace", call,
+                       [this, filePath, fileName = file.fileName(), maxActions](
+                            IReplayController &replay) -> ToolResult {
+    const uint32_t frame = replay.GetFrameInfo().frameNumber;
+    // The capture only carries a frame number if the capturing driver recorded one; ~0U means it did
+    // not. Reporting that as a number would invite a caller to match it against a trace boundary.
+    const bool frameKnown = frame != ~0u;
+    const rdcarray<ActionDescription> roots = replay.GetRootActions();
+    if(roots.empty())
+      return ToolResult::Failure(
+          Error(ErrorCode::Unsupported, "the current frame has no root actions"));
+
+    bool supported = false;
+    for(GPUCounter counter : replay.EnumerateCounters())
+    {
+      if(counter == GPUCounter::EventGPUDuration)
+        supported = true;
+    }
+
+    QHash<uint32_t, double> starts;
+    double total = 0.0;
+    int durationSamples = 0;
+
+    if(supported)
+    {
+      std::vector<CounterResult> sorted;
+      for(const CounterResult &cr : replay.FetchCounters({GPUCounter::EventGPUDuration}))
+        sorted.push_back(cr);
+      std::sort(sorted.begin(), sorted.end(),
+                [](const CounterResult &a, const CounterResult &b) { return a.eventId < b.eventId; });
+
+      for(const CounterResult &cr : sorted)
+      {
+        starts.insert(cr.eventId, total);
+        if(std::isfinite(cr.value.d) && cr.value.d > 0.0)
+          total += cr.value.d;
+        durationSamples++;
+      }
+    }
+
+    const QVector<TraceActionRef> actions = FlattenActionsForCorrelation(roots, frame, starts);
+
+    // No anchor when the frame number is unknown: an anchor that merely repeats a placeholder number
+    // would match a trace boundary by coincidence and produce an offset out of nothing.
+    QVector<TraceFrameAnchor> anchors;
+    if(frameKnown)
+    {
+      TraceFrameAnchor anchor;
+      anchor.frameNumber = frame;
+      anchor.timeSec = 0.0;
+      anchors.push_back(anchor);
+    }
+
+    const SystemTrace trace = ImportSystemTraceFile(filePath);
+    // Qualified: this class has a member of the same name.
+    const TraceCorrelation correlation = ::CorrelateSystemTrace(trace, actions, anchors);
+
+    // Batch windows, sorted once so every action's containment test is a binary search rather than a
+    // scan of the whole trace.
+    QVector<QPair<double, double>> windows = trace.gpuExecWindows;
+    std::sort(windows.begin(), windows.end(),
+              [](const QPair<double, double> &a, const QPair<double, double> &b) {
+                return a.first < b.first;
+              });
+
+    auto containingWindow = [&windows](double timeSec, double &beginSec, double &endSec) {
+      // The last window that starts at or before the time is the only candidate: windows may nest
+      // when two contexts overlap, and the latest start is the innermost one.
+      int lo = 0, hi = windows.size() - 1, best = -1;
+      while(lo <= hi)
+      {
+        const int mid = (lo + hi) / 2;
+        if(windows[mid].first <= timeSec)
+        {
+          best = mid;
+          lo = mid + 1;
+        }
+        else
+        {
+          hi = mid - 1;
+        }
+      }
+      if(best < 0 || timeSec > windows[best].second)
+        return false;
+      beginSec = windows[best].first;
+      endSec = windows[best].second;
+      return true;
+    };
+
+    QJsonArray array;
+    int placed = 0, insideBatch = 0, withoutDuration = 0;
+    const bool aligned = correlation.aligned();
+    const double offset = correlation.offsetSeconds();
+
+    for(const TraceActionRef &action : correlation.actions)
+    {
+      if(!action.hasGpuDuration)
+        withoutDuration++;
+      if(array.size() >= maxActions)
+        continue;
+      if(action.hasGpuDuration && aligned)
+        placed++;
+
+      QJsonObject entry{{QStringLiteral("eventId"), double(action.eventId)},
+          {QStringLiteral("name"), action.name}};
+
+      if(action.hasGpuDuration)
+        entry[QStringLiteral("offsetInFrameSec")] = action.timeSec;
+
+      if(action.hasGpuDuration && aligned)
+      {
+        const double traceTime = action.timeSec + offset;
+        entry[QStringLiteral("traceTimeSec")] = traceTime;
+
+        double beginSec = 0.0, endSec = 0.0;
+        if(containingWindow(traceTime, beginSec, endSec))
+        {
+          insideBatch++;
+          entry[QStringLiteral("gpuBatch")] = QJsonObject{
+              {QStringLiteral("beginSec"), beginSec},
+              {QStringLiteral("endSec"), endSec},
+              {QStringLiteral("durationSec"), endSec - beginSec}};
+        }
+        else
+        {
+          entry[QStringLiteral("gpuBatch")] = QJsonValue::Null;
+        }
+      }
+      else
+      {
+        entry[QStringLiteral("traceTimeSec")] = QJsonValue::Null;
+        entry[QStringLiteral("gpuBatch")] = QJsonValue::Null;
+      }
+
+      array.append(entry);
+    }
+
+    const char *confidence = "unknown";
+    switch(correlation.alignment.confidence)
+    {
+      case ClockDomainConfidence::AssumedShared: confidence = "assumedShared"; break;
+      case ClockDomainConfidence::EstimatedFromFrameTiming: confidence = "estimatedFromFrameTiming"; break;
+      case ClockDomainConfidence::Unknown: confidence = "unknown"; break;
+    }
+
+    QJsonObject alignment{{QStringLiteral("confidence"), QString::fromLatin1(confidence)},
+        {QStringLiteral("aligned"), aligned},
+        {QStringLiteral("offsetSec"), offset},
+        {QStringLiteral("toleranceSec"), correlation.alignment.toleranceSec},
+        {QStringLiteral("description"), correlation.alignment.description},
+        {QStringLiteral("matchedFrames"), correlation.matchedFrames}};
+
+    QJsonArray warnings;
+    for(const QString &warning : trace.warnings)
+      warnings.append(warning);
+
+    // What the numbers above are, stated once so no reader has to infer it from the field names.
+    QString basis = QStringLiteral(
+        "Actions are placed on the trace clock by prefix-summing EventGPUDuration inside frame %1, "
+        "because the capture records no gaps between events; the positions are therefore contiguous "
+        "rather than measured. A gpuBatch means the action's time falls inside a batch whose GPU "
+        "counters were validated - a containment test, not evidence that the batch carried that "
+        "draw, which the capture does not record.")
+                        .arg(frame);
+
+    if(!supported)
+      basis += QStringLiteral(
+          " This capture's API exposes no EventGPUDuration counter, so no action has an in-frame "
+          "offset and nothing could be placed.");
+    if(!aligned)
+      basis += QStringLiteral(
+          " The trace and the capture did not share a clock, so no action was placed on the trace "
+          "timeline at all.");
+    if(!frameKnown)
+      basis += QStringLiteral(
+          " This capture records no frame number, so this frame cannot be paired with a trace frame "
+          "boundary by number; only a trace that declares a shared clock, or several captured "
+          "frames, could still be aligned.");
+
+    return ToolResult::Success(QJsonObject{
+        {QStringLiteral("ok"), true},
+        {QStringLiteral("frameNumber"), frameKnown ? QJsonValue(double(frame)) : QJsonValue()},
+        {QStringLiteral("frameNumberKnown"), frameKnown},
+        {QStringLiteral("fileName"), fileName},
+        {QStringLiteral("traceValid"), trace.valid},
+        {QStringLiteral("timingSupported"), supported},
+        {QStringLiteral("durationSamples"), durationSamples},
+        {QStringLiteral("frameDurationSec"), total},
+        {QStringLiteral("actionCount"), correlation.actions.size()},
+        {QStringLiteral("actionsReturned"), array.size()},
+        {QStringLiteral("actionsPlacedOnTrace"), placed},
+        {QStringLiteral("actionsWithoutDuration"), withoutDuration},
+        {QStringLiteral("actionsInsideGpuBatch"), insideBatch},
+        {QStringLiteral("gpuBatchCount"), windows.size()},
+        {QStringLiteral("alignment"), alignment},
+        {QStringLiteral("basis"), basis},
+        {QStringLiteral("actions"), array},
+        {QStringLiteral("warnings"), warnings}});
   });
 }
 

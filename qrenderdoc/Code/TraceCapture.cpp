@@ -92,6 +92,14 @@ QString RootedCommand(bool root, const QString &command)
 // nothing and reports no error, which is indistinguishable from a device whose GPU never did
 // anything.
 //
+// The set is the one Snapdragon Profiler's own systrace processor reads, plus the two events this
+// importer already understood. Every entry is polled by name because the kernels differ: msm-4.9 on
+// the Pixel 3 prints the GPU's operating point as `kgsl_pwrlevel`, while a kernel with
+// `CONFIG_QCOM_KGSL_SIMPLE_LM` replaced it with `kgsl_pwr_set_state`, and a GPU that never changes
+// power level emits `kgsl_pwrlevel` exactly once however long the trace runs. `kgsl_clk` is what
+// still reports the frequency in that case. Requesting all of them and letting the parse decide is
+// the only way to cover those kernels without a per-device table.
+//
 // The `needs` column is what keeps a default capture small. The command and fence events are the
 // expensive ones -- one pair per submission, tens of thousands per second on a busy application --
 // so they are only requested when the caller asked for the command lanes explicitly.
@@ -102,14 +110,25 @@ const struct
   GpuTraceDetail needs;
 } kGpuFtraceEvents[] = {
     {"kgsl/kgsl_pwrlevel", "GPU clock", GpuTraceDetail::Metrics},
+    {"kgsl/kgsl_clk", "GPU clock frequency", GpuTraceDetail::Metrics},
+    {"kgsl/kgsl_buslevel", "GPU bus level", GpuTraceDetail::Metrics},
     {"kgsl/kgsl_gpubusy", "GPU utilisation", GpuTraceDetail::Metrics},
     {"kgsl/adreno_cmdbatch_submitted", "GPU command submission", GpuTraceDetail::Commands},
     {"kgsl/adreno_cmdbatch_retired", "GPU command retirement", GpuTraceDetail::Commands},
     {"kgsl/adreno_drawctxt_wait_start", "GPU fence waits", GpuTraceDetail::Commands},
     {"kgsl/adreno_drawctxt_wait_done", "GPU fence waits", GpuTraceDetail::Commands},
     {"kgsl/adreno_drawctxt_switch", "GPU context switches", GpuTraceDetail::Commands},
+    {"thermal/thermal_temperature", "GPU temperature", GpuTraceDetail::Metrics},
     {"thermal/thermal_query_temp", "GPU temperature", GpuTraceDetail::Metrics},
     {"thermal/thermal_power_devfreq_limit", "GPU thermal frequency cap", GpuTraceDetail::Metrics},
+    {"thermal/thermal_power_devfreq_get_power", "GPU power estimate", GpuTraceDetail::Metrics},
+    {"thermal/thermal_zone_trip", "GPU thermal trip points", GpuTraceDetail::Metrics},
+    // DDR bandwidth is the one memory measurement a systrace carries: the GPU counters count
+    // requests, not bytes that reached DRAM. `power` carries it, next to the thermal events that
+    // explain why a device was being held back.
+    {"power/bw_hwmon_meas", "DDR bandwidth", GpuTraceDetail::Metrics},
+    // GPU power state transitions, i.e. whether the device was even powered while work was queued.
+    {"kgsl/kgsl_pwr_set_state", "GPU power states", GpuTraceDetail::Metrics},
     {"thermal/cdev_update", "GPU throttling state", GpuTraceDetail::Metrics},
 };
 
@@ -203,9 +222,13 @@ GpuTraceCapabilities ProbeGpuCapabilities(IDeviceProtocolController *protocol, c
   QStringList parts;
   if(root && !candidates.isEmpty())
   {
-    parts << QStringLiteral(
-        "chmod 666 /sys/kernel/tracing/events/kgsl/*/enable "
-        "/sys/kernel/tracing/events/thermal/*/enable 2>/dev/null");
+    // Only the events this capture actually asks for are opened up, one `enable` file at a time. A
+    // subsystem glob would be broader than needed, and the list spans three subsystems (`kgsl`,
+    // `thermal`, `power`) whose directories differ between kernels, so the event path is the only
+    // stable way to name the file.
+    parts << QStringLiteral("for e in %1; do f=/sys/kernel/tracing/events/$e/enable; "
+                            "[ -e $f ] && chmod 666 $f 2>/dev/null; done")
+                 .arg(candidates.join(QLatin1Char(' ')));
   }
   // Writability is measured from the file's mode rather than with `[ -w ]`. `[ -w ]` asks whether
   // *this* shell may write, and root may write anything, so running it under `su` would report every

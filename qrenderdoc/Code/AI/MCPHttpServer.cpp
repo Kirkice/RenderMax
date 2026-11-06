@@ -626,8 +626,14 @@ void HttpServer::ProcessNextRequest(QTcpSocket *sock)
     // Keep normal tools at 60 seconds; large captures need a longer dedicated budget.
     const bool assetExport = toolName == QStringLiteral("renderdoc_exportFrameAssets") ||
                              toolName == QStringLiteral("renderdoc_exportDrawAssets");
+    // Counter sampling on a device is dominated by GPU round-trips rather than by the data it
+    // returns: every sampled draw needs its own fence wait, so a frame with a few hundred draws
+    // takes minutes even when only one counter is asked for. Failing at the generic deadline would
+    // report a timeout for work that is progressing normally, so this tool gets its own budget.
+    const bool counterFetch = toolName == QStringLiteral("renderdoc_fetchCounters");
     call.deadlineMs = QDateTime::currentMSecsSinceEpoch() +
-                      (assetExport ? qint64(30 * 60 * 1000) : kToolDeadlineMs);
+                      (assetExport ? qint64(30 * 60 * 1000)
+                                   : counterFetch ? qint64(10 * 60 * 1000) : kToolDeadlineMs);
     const ToolResult result = registry->Call(toolName, arguments, call);
 
     QJsonObject item;

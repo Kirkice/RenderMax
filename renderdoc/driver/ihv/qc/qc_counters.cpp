@@ -24,412 +24,102 @@
 
 #include "qc_counters.h"
 
-#include "common/common.h"
-#include "common/formatting.h"
+#if ENABLED(RDOC_ANDROID)
 
-#include <algorithm>
 #include <dlfcn.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <algorithm>
 
-// This translation unit is only built for Android (see CMakeLists.txt). On
-// other platforms qc_counters_stub.cpp is used instead, exactly like the ARM
-// backend.
+#include "qc_ggpm_metrics.h"
 
-namespace
+// GL_AMD_performance_monitor. The constants are repeated here rather than including a GL header:
+// this file is also compiled for the Vulkan backend, and the counter plumbing has no other need
+// for GL types.
+enum
 {
-// A single entry of the Qualcomm / Adreno GGPM counter catalog.
-//
-// The `PERF_*` names below are the counter names observed in the device-side
-// Snapdragon Profiler GGPM plugin string table (see the planning document
-// section 8.4). IDs are assigned deterministically (sorted by name) so that a
-// counter keeps the same public GPUCounter value across versions and devices -
-// see pitfall P-3. We must never assign IDs from the runtime enumeration order.
-struct QCCounterMeta
+  GL_PERFMON_RESULT_AVAILABLE_AMD = 0x8BC4,
+  GL_PERFMON_RESULT_SIZE_AMD = 0x8BC5,
+  GL_PERFMON_RESULT_AMD = 0x8BC6,
+  GL_COUNTER_TYPE_AMD = 0x8BC0,
+  GL_COUNTER_RANGE_AMD = 0x8BC1,
+  GL_UNSIGNED_BYTE = 0x1401,
+  GL_INT = 0x1404,
+  GL_UNSIGNED_INT = 0x1405,
+  GL_FLOAT = 0x1406,
+};
+
+typedef void (*PFN_glGenPerfMonitorsAMD)(int n, uint32_t *monitors);
+typedef void (*PFN_glDeletePerfMonitorsAMD)(int n, uint32_t *monitors);
+typedef void (*PFN_glGetPerfMonitorGroupsAMD)(int32_t *numGroups, int32_t groupsSize,
+                                              uint32_t *groups);
+typedef void (*PFN_glGetPerfMonitorCountersAMD)(uint32_t group, int32_t *numCounters,
+                                                int32_t *maxActive, int32_t countersSize,
+                                                uint32_t *counters);
+typedef void (*PFN_glGetPerfMonitorGroupStringAMD)(uint32_t group, int32_t bufSize,
+                                                   int32_t *length, char *groupString);
+typedef void (*PFN_glGetPerfMonitorCounterStringAMD)(uint32_t group, uint32_t counter,
+                                                     int32_t bufSize, int32_t *length,
+                                                     char *counterString);
+typedef void (*PFN_glGetPerfMonitorCounterInfoAMD)(uint32_t group, uint32_t counter, uint32_t pname,
+                                                   void *data);
+typedef void (*PFN_glSelectPerfMonitorCountersAMD)(uint32_t monitor, uint8_t enable,
+                                                   uint32_t group, int32_t numCounters,
+                                                   uint32_t *counterList);
+typedef void (*PFN_glBeginPerfMonitorAMD)(uint32_t monitor);
+typedef void (*PFN_glEndPerfMonitorAMD)(uint32_t monitor);
+typedef void (*PFN_glGetPerfMonitorCounterDataAMD)(uint32_t monitor, uint32_t pname,
+                                                   int32_t dataSize, uint32_t *data,
+                                                   int32_t *bytesWritten);
+
+namespace {
+double NowSeconds()
 {
-  const char *perfName;
-  const char *humanName;
-  const char *description;
-  const char *category;
-  // hardware block this metric belongs to - one of the prefixes in kQCBlocks below.
-  // GGPM names every raw counter `PERF_<BLOCK>_...` (section 8.4), so the block is
-  // what the raw counter hierarchy is keyed on.
-  const char *block;
-  CounterUnit unit;
-  CompType resultType;
-  // minimum Adreno generation (600 = A6xx, 700 = A7xx, 800 = A8xx) on which this
-  // counter is expected to be valid. Different generations do not necessarily
-  // expose the same PERF_* set - see pitfall P-4.
-  uint32_t minAdrenoGen;
-};
-
-// The 33 hardware blocks of the Adreno GGPM catalog (section 8.4). `count` is the
-// observed number of `PERF_<BLOCK>_...` names in that block and `meaning` is the
-// [推断] expansion of the block prefix. The counts are kept as [观测] evidence and
-// are also a consistency check: per section 8.4 they must sum to exactly the 1828
-// unique PERF_* names extracted from pluginGPU-GGPM.
-struct QCBlock
-{
-  const char *prefix;
-  uint32_t count;
-  const char *meaning;
-};
-
-static const QCBlock kQCBlocks[] = {
-    {"SP", 208, "Shader Processor"},
-    {"GMU", 157, "Graphics Management Unit"},
-    {"HLSQ", 139, "High Level Sequencer"},
-    {"TSE", 139, "Triangle Setup Engine"},
-    {"PC", 138, "Primitive/Parameter Cache"},
-    {"VPC", 118, "Varying/Primitive Cache"},
-    {"CP", 107, "Command Processor"},
-    {"UCHE", 103, "Unified Cache Hierarchy Engine (L2)"},
-    {"UFC", 92, "Universal Front-end Cache"},
-    {"GBIF", 77, "Graphics Bandwidth Interface"},
-    {"CMPDECMP", 86, "Compression/Decompression"},
-    {"TP", 82, "Texture Pipe"},
-    {"CCHE", 81, "Color Cache"},
-    {"RB", 63, "Render Backend"},
-    {"CCU", 51, "Color Control Unit"},
-    {"LRZ", 40, "Low Resolution Z"},
-    {"RAS", 39, "Rasterizer"},
-    {"RBBM", 31, "Register-Bus/Block Manager"},
-    {"VFD", 25, "Vertex Fetch Decoder"},
-    {"CRE", 9, "Compute Runtime Engine"},
-    {"VSC", 9, "Visibility Stream Compressor"},
-    {"FCHE", 7, "Fragment Cache"},
-    {"GLC", 6, "Graphics L2 Controller"},
-    {"VFDP", 5, "VFD Primitive"},
-    {"TESS", 4, "Tessellation"},
-    {"BYPC", 3, "Bypass color path"},
-    {"BYPD", 2, "Bypass depth path"},
-    {"MHUB", 2, "Memory Hub"},
-    {"DHUB", 1, "Display Hub"},
-    {"VHUB", 1, "Video Hub"},
-    {"GMUCLK", 1, "GMU clock"},
-    {"ALWAYSON", 1, "Always-on counters"},
-    {"RESERVED", 1, "Reserved"},
-};
-
-// Categories observed in the GGPM plugin (sections 8.4 and 9.3). The three "GPU
-// Metrics Category" entries carry the profiler's own description strings verbatim;
-// "GPU General" is the basic-metrics category seen when the GGPM registration
-// function (FUN_001b3234) registers the VBIF basic metrics (section 9.3).
-static const char *kCatShader = "GPU Shader Processing";
-static const char *kCatPrimitive = "GPU Primitive Processing";
-static const char *kCatStalls = "GPU Stalls";
-static const char *kCatGeneral = "GPU General";
-
-static const char *kDescShader = "Metrics related to GPU shader processing.";
-static const char *kDescPrimitive = "Metrics relating to primitive counts, rejection, etc.";
-static const char *kDescStalls = "GPU metrics that measure stalls within the pipeline.";
-static const char *kDescGeneral = "Basic GPU metrics.";
-
-// The catalog. This is the RenderDoc-side, original representation of the GGPM
-// metrics - it contains no Qualcomm code, only our own declared names, units,
-// descriptions and block classification derived from the observed behaviour.
-//
-// Section 8.4 establishes that the full on-device catalog holds 1828 raw `PERF_*`
-// names (see kQCBlocks), of which a smaller set are the *derived* high level metrics
-// that the profiler's UI actually presents. Those derived metrics are the ones listed
-// here, since only their names/semantics are [观测]; the remaining raw block
-// counters are classified through kQCBlocks but cannot be enumerated by name without
-// further evidence (their individual names were not recovered).
-static const QCCounterMeta kQCCatalog[] = {
-    // ---- GPU Shader Processing ----
-    {"PERF_PERCENT_SHADERS_BUSY", "Shaders Busy",
-     "Percentage of the time the shader processors were busy.", kCatShader, "SP",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_PERCENT_SHADERS_STALLED", "Shaders Stalled",
-     "Percentage of the time the shader processors were stalled.", kCatShader, "SP",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_PERCENT_SHADER_ALU_CAPACITY_UTILIZED", "Shader ALU Capacity Utilized",
-     "Percentage of the shader ALU capacity that was utilized.", kCatShader, "SP",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_PERCENT_TEXTURE_PIPES_BUSY", "Texture Pipes Busy",
-     "Percentage of the time the texture pipes were busy.", kCatShader, "TP",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_PERCENT_TEXTURE_FETCH_STALL", "Texture Fetch Stall",
-     "Percentage of shader execution stalled on texture fetches.", kCatShader, "UCHE",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_PERCENT_VERTEX_FETCH_STALL", "Vertex Fetch Stall",
-     "Percentage of shader execution stalled on vertex fetches.", kCatShader, "VFD",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_PERCENT_BVH_FETCH_STALL", "BVH Fetch Stall",
-     "Percentage of shader execution stalled on BVH fetches.", kCatShader, "UCHE",
-     CounterUnit::Percentage, CompType::Float, 700},
-    {"PERF_ALU_PER_VERTEX", "ALU / Vertex",
-     "Average number of full precision ALU instructions issued per vertex.", kCatShader, "SP",
-     CounterUnit::Ratio, CompType::Float, 600},
-    {"PERF_EFU_PER_VERTEX", "EFU / Vertex",
-     "Average number of elementary function unit operations per vertex.", kCatShader, "SP",
-     CounterUnit::Ratio, CompType::Float, 600},
-    {"PERF_TEXTURES_PER_VERTEX", "Textures / Vertex",
-     "Average number of texture fetches per vertex.", kCatShader, "TP", CounterUnit::Ratio,
-     CompType::Float, 600},
-    {"PERF_L1_TEXTURE_CACHE_MISS_PER_PIXEL", "L1 Texture Cache Miss / Pixel",
-     "Average number of L1 texture cache misses per pixel.", kCatShader, "TP",
-     CounterUnit::Ratio, CompType::Float, 600},
-    {"PERF_VERTEX_INSTRUCTIONS", "Vertex Instructions",
-     "Total number of vertex shader instructions executed.", kCatShader, "SP",
-     CounterUnit::Absolute, CompType::UInt, 600},
-    {"PERF_VERTEX_INSTRUCTIONS_PER_SECOND", "Vertex Instructions Per Second",
-     "Vertex shader instructions executed per second.", kCatShader, "SP",
-     CounterUnit::Absolute, CompType::Float, 600},
-
-    // ---- GPU Primitive Processing ----
-    {"PERF_PERCENT_BUSY", "Percent Busy",
-     "Overall percentage of the time the GPU was busy.", kCatPrimitive, "ALWAYSON",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_GPU_PERCENT_BUS_BUSY", "GPU Bus Busy",
-     "Percentage of the time the GPU memory bus was busy.", kCatPrimitive, "GBIF",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_PERCENT_LRZ_BUSY", "LRZ Busy",
-     "Percentage of the time the low resolution Z unit was busy.", kCatPrimitive, "LRZ",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_PERCENT_RTU_BUSY", "RTU Busy",
-     "Percentage of the time the render target unit was busy.", kCatPrimitive, "RB",
-     CounterUnit::Percentage, CompType::Float, 600},
-    {"PERF_LRZ_PIXELS_KILLED", "LRZ Pixels Killed",
-     "Number of pixels rejected by low resolution Z.", kCatPrimitive, "LRZ",
-     CounterUnit::Absolute, CompType::UInt, 600},
-    {"PERF_VERTEX_MEMORY_READ", "Vertex Memory Read",
-     "Bytes of vertex data read from memory.", kCatPrimitive, "VFD", CounterUnit::Bytes,
-     CompType::UInt, 600},
-    {"PERF_AVG_BYTES_PER_VERTEX", "Average Bytes / Vertex",
-     "Average number of bytes read per vertex.", kCatPrimitive, "VFD", CounterUnit::Ratio,
-     CompType::Float, 600},
-
-    // ---- GPU Stalls ----
-    {"PERF_PERCENT_STALLED_ON_SYSTEM_MEMORY", "Stalled On System Memory",
-     "Percentage of the time the GPU was stalled on system memory accesses.", kCatStalls, "MHUB",
-     CounterUnit::Percentage, CompType::Float, 600},
-
-    // ---- GPU General (basic metrics, section 9.3) ----
-    // The registration function registers the VBIF basic metrics under the "GPU
-    // General" / "Basic GPU metrics." category; the `PERF_` prefix follows the
-    // observed `PERF_<NAME>` convention for the remaining catalog entries.
-    {"PERF_VBIF", "VBIF", "Video/system bus interface activity.", kCatGeneral, "GBIF",
-     CounterUnit::Absolute, CompType::Float, 600},
-    {"PERF_VBIF_PWR", "VBIF Power", "Power/energy proxy for the video/system bus interface.",
-     kCatGeneral, "GBIF", CounterUnit::Absolute, CompType::Float, 600},
-
-    // ---- Frequency / clock ----
-    {"PERF_GPU_FREQUENCY", "GPU Frequency", "GPU frequency in Hz.", kCatPrimitive, "GMUCLK",
-     CounterUnit::Hertz, CompType::Float, 600},
-    {"PERF_GMUCLK", "GMU Clock", "Graphics Management Unit clock in Hz.", kCatPrimitive,
-     "GMUCLK", CounterUnit::Hertz, CompType::Float, 600},
-};
-
-// ---- device-side gsl (id, group) catalog: PLACEHOLDER ----
-//
-// gsl_perfcounter_select and gsl_perfcounter_read address a counter by the PAIR
-// (id, group); the PERF_* name is a host-side label and is never sent to the
-// driver. The mapping therefore has to come from the device, and it is the one
-// piece of this backend that cannot be derived from the host SDP distribution:
-// the catalog lives in the device's own libgsl.so, and gsl_perfcounter_query_
-// selections() — the only documented way to enumerate it — reports *currently
-// selectable* counters, not a name-to-pair mapping.
-//
-// Status: NOT POPULATED. The table holds only a sentinel entry, because no pair has
-// been observed on real hardware yet. This is a deliberate placeholder, not an
-// unfinished edit and not a defect, and its consequence is stated plainly so it is
-// not mistaken for one: every counter keeps QCCounters::kUnknownGslId, so
-// BeginPass() selects nothing, EndSample() reads nothing, and QC counters return
-// zero on device even though the UI lists them by name.
-//
-// REQUIRES REAL-DEVICE VERIFICATION before any entry is enabled. To fill one in:
-//   1. On an Adreno device with a live GL/Vulkan context, dlopen libgsl.so and
-//      call gsl_perfcounter_query_selections() to learn which pairs the driver
-//      currently exposes.
-//   2. For each pair, select it alone, run a known workload, and read it back to
-//      establish what the counter actually measures.
-//   3. Compare the measured behaviour against the GGPM PERF_* semantics recorded
-//      in kQCCatalog, and only then record the pair here.
-// Until step 3 has been done for a name, guessing a pair is strictly worse than
-// reading nothing: a wrong id silently reports an unrelated hardware counter under
-// the wrong label, which is undetectable downstream. An explicit zero is honest;
-// a plausible-looking wrong number is not.
-//
-// `minAdrenoGen`-style filtering does not apply here: a pair is a property of a
-// specific driver build, so each entry records the generation it was verified on
-// and is only used on exactly that generation.
-struct QCGslPair
-{
-  const char *perfName;
-  uint32_t gslId;
-  uint32_t gslGroup;
-  // Adreno generation (600 / 700 / 800) the pair was verified on. A pair is a
-  // driver-build property, so it is not assumed to carry across generations.
-  uint32_t verifiedGen;
-};
-
-static const QCGslPair kQCVerifiedGslPairs[] = {
-    // PLACEHOLDER — awaiting real-device verification. Append entries in this form
-    // once a pair has been measured on hardware:
-    // {"PERF_PERCENT_SHADERS_BUSY", <id>, <group>, 740},
-
-    // One sentinel entry with no perfName keeps the table non-empty without
-    // claiming anything is verified. LookupGslPair() skips it and the count in
-    // LogCatalogStatistics() ignores it, so appending a real entry is all that is
-    // needed to enable a counter.
-    {NULL, 0, 0, 0},
-};
-
-// Number of entries that actually describe a verified counter. A sentinel-only
-// table reports 0, which is what makes the "nothing is addressable yet" warning
-// in LogCatalogStatistics() accurate rather than hard-coded.
-static uint32_t VerifiedGslPairCount()
-{
-  uint32_t count = 0;
-  for(const QCGslPair &pair : kQCVerifiedGslPairs)
-  {
-    if(pair.perfName != NULL)
-      count++;
-  }
-  return count;
+  timespec ts = {};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return double(ts.tv_sec) + double(ts.tv_nsec) * 1.0e-9;
 }
 
-// Looks up the verified (id, group) pair for a PERF_* name on a specific Adreno
-// generation. Returns false when no pair has been verified, which is the current
-// state of every entry - callers must treat that as "cannot address this counter
-// on the device", never as zero.
-static bool LookupGslPair(const char *perfName, uint32_t adrenoGen, uint32_t &gslId,
-                          uint32_t &gslGroup)
+// Case-insensitive comparison, used because the driver's spelling of a counter name and the
+// profiler's name table are independent strings ("AXI0_READ_DATA_BEATS_TOTAL" and friends appear
+// without the PERF_ prefix on GBIF).
+bool NameEquals(const char *a, const char *b)
 {
-  if(perfName == NULL)
+  if(a == NULL || b == NULL)
     return false;
 
-  for(const QCGslPair &pair : kQCVerifiedGslPairs)
+  while(*a && *b)
   {
-    // Skip the sentinel and any name that is not this counter.
-    if(pair.perfName == NULL || strcmp(pair.perfName, perfName) != 0)
-      continue;
-
-    // The generation must match exactly: a pair is a property of a particular
-    // driver build, so reusing one across generations would silently address a
-    // different counter.
-    if(pair.verifiedGen == adrenoGen)
-    {
-      gslId = pair.gslId;
-      gslGroup = pair.gslGroup;
-      return true;
-    }
+    char ca = *a, cb = *b;
+    if(ca >= 'a' && ca <= 'z')
+      ca = char(ca - 'a' + 'A');
+    if(cb >= 'a' && cb <= 'z')
+      cb = char(cb - 'a' + 'A');
+    if(ca != cb)
+      return false;
+    a++;
+    b++;
   }
 
-  return false;
+  return *a == *b;
 }
 
-// Logs the section 8.4 taxonomy as a category/block breakdown. `descs` are the
-// counters that are actually available on this Adreno generation - the block table
-// describes the *full* on-device catalog regardless, so it is reported separately.
-static void LogCatalogStatistics(const rdcarray<CounterDescription> &descs)
+// Read one integer out of a /sys node, 0 when it is missing or unparsable.
+uint64_t ReadSysUInt64(const char *path)
 {
-  uint32_t total = 0;
-  for(const QCBlock &b : kQCBlocks)
-    total += b.count;
+  FILE *f = fopen(path, "r");
+  if(f == NULL)
+    return 0;
 
-  // Section 8.4: the 33 blocks must account for exactly the 1828 PERF_* names
-  // extracted from the GGPM plugin. If this ever fails, kQCBlocks is out of date.
-  if(total != 1828)
-    RDCWARN("Qualcomm counters: block taxonomy sums to %u PERF_* names, expected 1828", total);
+  unsigned long long value = 0;
+  if(fscanf(f, "%llu", &value) != 1)
+    value = 0;
 
-  std::map<rdcstr, uint32_t> byCategory;
-  for(const CounterDescription &d : descs)
-    byCategory[d.category]++;
-
-  const uint32_t catalogSize = (uint32_t)(sizeof(kQCCatalog) / sizeof(kQCCatalog[0]));
-  const uint32_t blockCount = (uint32_t)(sizeof(kQCBlocks) / sizeof(kQCBlocks[0]));
-  const uint32_t pairCount = VerifiedGslPairCount();
-
-  RDCLOG("Qualcomm counters: %u/%u derived counters available across %u categories "
-         "(full catalog: %u blocks / %u PERF_* names)",
-         (uint32_t)descs.size(), catalogSize, (uint32_t)byCategory.size(), blockCount, total);
-
-  for(const std::pair<const rdcstr, uint32_t> &cat : byCategory)
-    RDCLOG("  [%s] %u counters", cat.first.c_str(), cat.second);
-
-  // State the device-addressability status up front rather than leaving an analyst
-  // to work out why every counter reads zero. This is a placeholder, not a defect:
-  // no (id, group) pair has been verified on real hardware yet.
-  if(pairCount == 0)
-  {
-    RDCWARN("Qualcomm counters: 0/%u counters have a verified device (id, group) pair - the catalog "
-            "is listed by name only and every sample will be zero until kQCVerifiedGslPairs is "
-            "populated on a real Adreno device",
-            catalogSize);
-  }
-  else
-  {
-    RDCLOG("Qualcomm counters: %u/%u counters have a verified device (id, group) pair",
-           pairCount, catalogSize);
-  }
+  fclose(f);
+  return uint64_t(value);
 }
-
-// ---- device-side gsl_perfcounter_* entry point types ----
-//
-// [观测] These signatures are no longer inferred from symbol names: they were
-// recovered by disassembling the call sites in the device-side GGPM plugin
-// (pluginGPU-GGPM, AArch64). See the planning document section 8.9.1 for the
-// evidence trail. The recovered ABI is:
-//
-//   The device and context are 32-bit integer handles (NOT `void**`/opaque
-//   pointers): the plugin stores them as `int` at object offsets +0xc (device,
-//   from gsl_device_open) and +0x10 (context, from gsl_context_create), and
-//   treats context == -1 as "no live context".
-//
-//   * gsl_perfcounter_select(device, context, count, uint32_t *ids,
-//                            uint32_t *groups, uint64_t *out[, uint64_t *out2])
-//         older driver ABI: 6 args, writes a 32-bit selection id into *out.
-//         newer driver ABI: 7 args, writes a 64-bit value into *out2 (and a
-//         32-bit value into *out) - selected when gsl_library_version() reports
-//         a minor version >= 9. Return 0 == success; non-zero is an error code
-//         (the plugin logs "Could not select %s:%d (%x)").
-//   * gsl_perfcounter_deselect(device, context, 0, count, uint32_t *ids,
-//                              uint32_t *groups)
-//         The third argument is a constant 0; return value is ignored (void).
-//   * gsl_perfcounter_query_selections(device, context, selectionType,
-//                              uint32_t count, uint32_t *outIds, uint32_t *outCount)
-//         Two-call protocol: first with count == 0 and outIds == NULL and
-//         outCount != NULL to learn the required count, then again with
-//         count == n and outIds == buffer and outCount == NULL to fill it.
-//   * gsl_perfcounter_read(device, uint32_t id, uint32_t group, uint64_t *outValue)
-//         Reads one counter value. Result is masked to 32 bits when the counter
-//         id is 0xd.
-//
-//   [观测] A counter is addressed by the PAIR (id, group); both arrays are
-//   parallel and `count` elements long. Any id greater than 0x38 (56) is
-//   clamped to 0xffffffff before the call, i.e. 56 is the largest valid id.
-typedef int (*PFN_gsl_perfcounter_select)(uint32_t device, uint32_t context, uint32_t count,
-                                          uint32_t *ids, uint32_t *groups, uint64_t *out);
-typedef int (*PFN_gsl_perfcounter_select_ex)(uint32_t device, uint32_t context, uint32_t count,
-                                             uint32_t *ids, uint32_t *groups, uint64_t *out,
-                                             uint64_t *out2);
-typedef int (*PFN_gsl_perfcounter_query_selections)(uint32_t device, uint32_t context,
-                                                    uint32_t selectionType, uint32_t count,
-                                                    uint32_t *outIds, uint32_t *outCount);
-typedef int (*PFN_gsl_perfcounter_read)(uint32_t device, uint32_t id, uint32_t group,
-                                        uint64_t *outValue);
-typedef void (*PFN_gsl_perfcounter_deselect)(uint32_t device, uint32_t context, uint32_t unused,
-                                             uint32_t count, uint32_t *ids, uint32_t *groups);
-
-// [观测] The session entry points. gsl_library_open/close bracket the lifetime of
-// the gsl library, gsl_device_open/close the device, and gsl_context_create/destroy
-// the context. The device is addressed by a numeric device id (0 is the primary
-// GPU) and both open calls take a flags word (the plugin passes 0).
-typedef int (*PFN_gsl_library_open)(uint32_t flags);
-typedef int (*PFN_gsl_library_close)(void);
-typedef int (*PFN_gsl_library_version)(void);
-typedef int (*PFN_gsl_device_open)(int deviceId, uint32_t flags);
-typedef int (*PFN_gsl_device_close)(int device);
-typedef int (*PFN_gsl_context_create)(int device, uint32_t flags);
-typedef int (*PFN_gsl_context_destroy)(int device, int context);
-
-// [观测] The largest counter id the GGPM plugin will pass through; anything
-// above this is replaced with 0xffffffff (an intentional "invalid" sentinel).
-static const uint32_t kQCPerfCounterMaxId = 0x38;
-
-// [观测] The counter id the plugin masks to 32 bits after reading (its value is a
-// 32-bit quantity even though every read returns a 64-bit slot).
-static const uint32_t kQCPerfCounter32BitId = 0xd;
 }    // namespace
 
 QCCounters::QCCounters()
@@ -438,619 +128,1033 @@ QCCounters::QCCounters()
 
 QCCounters::~QCCounters()
 {
-#if ENABLED(RDOC_ANDROID)
-  if(m_Gsl.context_destroy && m_GslDevice >= 0 && m_GslContext >= 0)
+  if(m_Perf.module)
   {
-    PFN_gsl_context_destroy destroy = (PFN_gsl_context_destroy)m_Gsl.context_destroy;
-    destroy(m_GslDevice, m_GslContext);
+    if(m_Monitor && m_Perf.delete_monitors)
+    {
+      PFN_glDeletePerfMonitorsAMD del =
+          (PFN_glDeletePerfMonitorsAMD)m_Perf.delete_monitors;
+      del(1, &m_Monitor);
+      m_Monitor = 0;
+    }
+
+    dlclose(m_Perf.module);
+    m_Perf = {};
   }
 
-  if(m_Gsl.device_close && m_GslDevice >= 0)
-  {
-    PFN_gsl_device_close close = (PFN_gsl_device_close)m_Gsl.device_close;
-    close(m_GslDevice);
-  }
-
-  if(m_Gsl.library_close)
-  {
-    PFN_gsl_library_close close = (PFN_gsl_library_close)m_Gsl.library_close;
-    close();
-  }
-
-  m_GslDevice = -1;
-  m_GslContext = -1;
-
-  if(m_Gsl.module)
-  {
-    m_Gsl.select = NULL;
-    m_Gsl.select_ex = NULL;
-    m_Gsl.read = NULL;
-    m_Gsl.query_selections = NULL;
-    m_Gsl.deselect = NULL;
-    m_Gsl.library_open = NULL;
-    m_Gsl.library_close = NULL;
-    m_Gsl.library_version = NULL;
-    m_Gsl.device_open = NULL;
-    m_Gsl.device_close = NULL;
-    m_Gsl.context_create = NULL;
-    m_Gsl.context_destroy = NULL;
-
-    dlclose(m_Gsl.module);
-    m_Gsl.module = NULL;
-  }
-#endif
+  DestroyGLContext();
 }
 
-#if ENABLED(RDOC_ANDROID)
-bool QCCounters::LoadGSL()
+bool QCCounters::CreateGLContext()
 {
-  // libgsl.so is the Adreno user-mode driver and is only present on the device.
-  // We never bundle it - it is resolved from the device's own system libraries.
-  //
-  // [观测] The device-side GGPM plugin resolves this same library through
-  // dlopen("libgsl.so") (falling back to "libgsl.so.1" and, on Android,
-  // android_dlopen_ext with the "sphal" namespace - section 8.9.1). We only need
-  // the primary soname because a working GL/Vulkan context already implies the
-  // driver is loaded in the process.
-  m_Gsl.module = dlopen("libgsl.so", RTLD_NOW | RTLD_LOCAL);
+  // dlopen rather than link: the counter plumbing is compiled into both the GL and the Vulkan
+  // driver and must not add a link-time dependency on EGL for the Vulkan one.
+  m_EglModule = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+  if(m_EglModule == NULL)
+    return false;
 
-  if(!m_Gsl.module)
+  typedef void *(*PFN_eglGetDisplay)(void *);
+  typedef int (*PFN_eglInitialize)(void *, int *, int *);
+  typedef int (*PFN_eglChooseConfig)(void *, const int32_t *, void **, int32_t, int32_t *);
+  typedef void *(*PFN_eglCreateContext)(void *, void *, void *, const int32_t *);
+  typedef void *(*PFN_eglCreatePbufferSurface)(void *, void *, const int32_t *);
+  typedef int (*PFN_eglMakeCurrent)(void *, void *, void *, void *);
+  typedef int (*PFN_eglBindAPI)(uint32_t);
+  typedef int (*PFN_eglGetError)();
+
+  PFN_eglGetDisplay getDisplay = (PFN_eglGetDisplay)dlsym(m_EglModule, "eglGetDisplay");
+  PFN_eglInitialize initialize = (PFN_eglInitialize)dlsym(m_EglModule, "eglInitialize");
+  PFN_eglChooseConfig chooseConfig = (PFN_eglChooseConfig)dlsym(m_EglModule, "eglChooseConfig");
+  PFN_eglCreateContext createContext =
+      (PFN_eglCreateContext)dlsym(m_EglModule, "eglCreateContext");
+  PFN_eglCreatePbufferSurface createSurface =
+      (PFN_eglCreatePbufferSurface)dlsym(m_EglModule, "eglCreatePbufferSurface");
+  PFN_eglMakeCurrent makeCurrent = (PFN_eglMakeCurrent)dlsym(m_EglModule, "eglMakeCurrent");
+  PFN_eglBindAPI bindAPI = (PFN_eglBindAPI)dlsym(m_EglModule, "eglBindAPI");
+
+  if(!getDisplay || !initialize || !chooseConfig || !createContext || !createSurface ||
+     !makeCurrent || !bindAPI)
   {
-    RDCLOG("Qualcomm counters: failed to dlopen libgsl.so (%s)", dlerror());
+    RDCLOG("QCCounters: libEGL.so is missing the entry points needed to create a context");
+    DestroyGLContext();
     return false;
   }
 
-  m_Gsl.select = dlsym(m_Gsl.module, "gsl_perfcounter_select");
-  m_Gsl.select_ex = dlsym(m_Gsl.module, "gsl_perfcounter_select_ex");
-  m_Gsl.query_selections = dlsym(m_Gsl.module, "gsl_perfcounter_query_selections");
-  m_Gsl.read = dlsym(m_Gsl.module, "gsl_perfcounter_read");
-  m_Gsl.deselect = dlsym(m_Gsl.module, "gsl_perfcounter_deselect");
-
-  m_Gsl.library_open = dlsym(m_Gsl.module, "gsl_library_open");
-  m_Gsl.library_close = dlsym(m_Gsl.module, "gsl_library_close");
-  m_Gsl.library_version = dlsym(m_Gsl.module, "gsl_library_version");
-  m_Gsl.device_open = dlsym(m_Gsl.module, "gsl_device_open");
-  m_Gsl.device_close = dlsym(m_Gsl.module, "gsl_device_close");
-  m_Gsl.context_create = dlsym(m_Gsl.module, "gsl_context_create");
-  m_Gsl.context_destroy = dlsym(m_Gsl.module, "gsl_context_destroy");
-
-  // At minimum the counter entry points and the read/select pair must exist. The
-  // session entry points are needed to obtain a device/context; if they are
-  // missing we cannot open a session and report failure rather than calling a
-  // counter function with an invalid handle.
-  if(!m_Gsl.query_selections || !m_Gsl.read || !m_Gsl.deselect ||
-     (!m_Gsl.select && !m_Gsl.select_ex) || !m_Gsl.device_open || !m_Gsl.context_create)
+  // EGL_DEFAULT_DISPLAY is a null native display and EGL_NONE is 0.
+  m_EglDisplay = getDisplay(NULL);
+  if(m_EglDisplay == NULL)
   {
-    RDCLOG("Qualcomm counters: libgsl.so loaded but gsl_perfcounter_*/session entry points are "
-           "missing");
+    DestroyGLContext();
     return false;
   }
 
-  // [观测] The plugin gates the newer select/context ABI on gsl_library_version()
-  // reporting a minor version >= 9. That predicate could not be reproduced
-  // statically, so rather than mirroring the version rule we use a simpler
-  // capability check: prefer select_ex whenever libgsl.so exports it. This is
-  // deliberately weaker than the plugin's version gate ([推断]).
-  m_UseSelectEx = (m_Gsl.select_ex != NULL);
-
-  if(m_Gsl.library_version)
+  int major = 0, minor = 0;
+  if(!initialize(m_EglDisplay, &major, &minor))
   {
-    PFN_gsl_library_version version = (PFN_gsl_library_version)m_Gsl.library_version;
-    m_LibraryVersion = (uint32_t)version();
-    RDCLOG("Qualcomm counters: libgsl.so reports version 0x%x (select_ex=%s)", m_LibraryVersion,
-           m_UseSelectEx ? "yes" : "no");
+    RDCLOG("QCCounters: eglInitialize failed for the counter-sampling context");
+    m_EglDisplay = NULL;
+    DestroyGLContext();
+    return false;
   }
 
-  // Open our own library/device/context session. The plugin does the same: the
-  // device handle comes from gsl_device_open and the context from
-  // gsl_context_create, and counter calls always use those handles - never the
-  // API-level context (section 8.9.1).
-  if(m_Gsl.library_open)
+  // EGL_OPENGL_ES_API, EGL_OPENGL_ES3_BIT_KHR
+  bindAPI(0x30A0);
+
+  const int32_t configAttribs[] = {
+      0x3033, 0x0001,    // EGL_SURFACE_TYPE, EGL_PBUFFER_BIT
+      0x3040, 0x0004,    // EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT
+      0x3024, 8,         // EGL_RED_SIZE
+      0x3023, 8,         // EGL_GREEN_SIZE
+      0x3022, 8,         // EGL_BLUE_SIZE
+      0x3021, 8,         // EGL_ALPHA_SIZE
+      0x3038, 0,         // EGL_NONE
+  };
+
+  void *config = NULL;
+  int32_t numConfigs = 0;
+  if(!chooseConfig(m_EglDisplay, configAttribs, &config, 1, &numConfigs) || numConfigs < 1)
   {
-    PFN_gsl_library_open open = (PFN_gsl_library_open)m_Gsl.library_open;
-    if(open(0) != 0)
-    {
-      RDCLOG("Qualcomm counters: gsl_library_open failed");
-      return false;
-    }
+    RDCLOG("QCCounters: no EGL config available for the counter-sampling context");
+    DestroyGLContext();
+    return false;
   }
 
+  const int32_t surfaceAttribs[] = {0x3057, 1, 0x3056, 1, 0x3038, 0};    // WIDTH, HEIGHT, EGL_NONE
+  m_EglSurface = createSurface(m_EglDisplay, config, surfaceAttribs);
+  if(m_EglSurface == NULL)
   {
-    PFN_gsl_device_open open = (PFN_gsl_device_open)m_Gsl.device_open;
-    m_GslDevice = open(0, 0);
-    if(m_GslDevice < 0)
-    {
-      RDCLOG("Qualcomm counters: gsl_device_open failed (%d)", m_GslDevice);
-      return false;
-    }
+    RDCLOG("QCCounters: could not create the counter-sampling pbuffer");
+    DestroyGLContext();
+    return false;
   }
 
+  // ES 2 is enough for the perf-monitor extension, and asking for the lowest version the driver
+  // supports avoids depending on an ES 3 context being creatable next to a Vulkan device.
+  const int32_t contextAttribs[] = {0x3098, 2, 0x3038, 0};    // EGL_CONTEXT_CLIENT_VERSION, EGL_NONE
+  m_EglContext = createContext(m_EglDisplay, config, NULL, contextAttribs);
+
+  if(m_EglContext == NULL)
   {
-    PFN_gsl_context_create create = (PFN_gsl_context_create)m_Gsl.context_create;
-    m_GslContext = create(m_GslDevice, 0);
-    if(m_GslContext < 0)
-    {
-      RDCLOG("Qualcomm counters: gsl_context_create failed (%d)", m_GslContext);
-      return false;
-    }
+    const int32_t es3Attribs[] = {0x3098, 3, 0x3038, 0};
+    m_EglContext = createContext(m_EglDisplay, config, NULL, es3Attribs);
   }
 
+  if(m_EglContext == NULL)
+  {
+    RDCLOG("QCCounters: could not create the counter-sampling GLES context");
+    DestroyGLContext();
+    return false;
+  }
+
+  if(!makeCurrent(m_EglDisplay, m_EglSurface, m_EglSurface, m_EglContext))
+  {
+    RDCLOG("QCCounters: could not make the counter-sampling context current");
+    DestroyGLContext();
+    return false;
+  }
+
+  m_OwnContext = true;
+  RDCLOG("QCCounters: created a private GLES context to sample counters from the Vulkan replay");
   return true;
 }
 
-int QCCounters::SelectCounters(const rdcarray<uint32_t> &ids, const rdcarray<uint32_t> &groups)
+void QCCounters::DestroyGLContext()
 {
-  if(ids.empty() || ids.size() != groups.size() || m_GslDevice < 0 || m_GslContext < 0)
-    return -1;
+  if(m_EglModule == NULL)
+    return;
 
-  // [观测] The plugin clamps any id above 0x38 to 0xffffffff before the call
-  // (an explicit "invalid" sentinel). We do the same so that an out-of-range id
-  // is rejected by the driver rather than silently mis-selecting.
-  rdcarray<uint32_t> clampedIds = ids;
-  for(uint32_t &id : clampedIds)
-  {
-    if(id > kQCPerfCounterMaxId)
-      id = 0xffffffffu;
-  }
+  typedef int (*PFN_eglMakeCurrent)(void *, void *, void *, void *);
+  typedef int (*PFN_eglDestroyContext)(void *, void *);
+  typedef int (*PFN_eglDestroySurface)(void *, void *);
+  typedef int (*PFN_eglTerminate)(void *);
 
-  // The gsl_* ABI takes non-const `uint32_t *` arrays, but `groups` arrives as a
-  // const reference. Take a mutable copy so the pointer we hand to the driver
-  // matches the parameter type (mirroring the clampedIds copy above).
-  rdcarray<uint32_t> mutableGroups = groups;
+  PFN_eglMakeCurrent makeCurrent = (PFN_eglMakeCurrent)dlsym(m_EglModule, "eglMakeCurrent");
+  PFN_eglDestroyContext destroyContext =
+      (PFN_eglDestroyContext)dlsym(m_EglModule, "eglDestroyContext");
+  PFN_eglDestroySurface destroySurface =
+      (PFN_eglDestroySurface)dlsym(m_EglModule, "eglDestroySurface");
+  PFN_eglTerminate terminate = (PFN_eglTerminate)dlsym(m_EglModule, "eglTerminate");
 
-  uint64_t out = 0;
-  const uint32_t count = (uint32_t)clampedIds.size();
+  if(makeCurrent && m_EglDisplay)
+    makeCurrent(m_EglDisplay, NULL, NULL, NULL);
 
-  if(m_UseSelectEx && m_Gsl.select_ex)
-  {
-    PFN_gsl_perfcounter_select_ex select = (PFN_gsl_perfcounter_select_ex)m_Gsl.select_ex;
-    uint64_t out2 = 0;
-    return select((uint32_t)m_GslDevice, (uint32_t)m_GslContext, count, clampedIds.data(),
-                  mutableGroups.data(), &out, &out2);
-  }
+  if(destroyContext && m_EglDisplay && m_EglContext)
+    destroyContext(m_EglDisplay, m_EglContext);
 
-  PFN_gsl_perfcounter_select select = (PFN_gsl_perfcounter_select)m_Gsl.select;
-  return select((uint32_t)m_GslDevice, (uint32_t)m_GslContext, count, clampedIds.data(),
-                mutableGroups.data(), &out);
+  if(destroySurface && m_EglDisplay && m_EglSurface)
+    destroySurface(m_EglDisplay, m_EglSurface);
+
+  if(terminate && m_EglDisplay)
+    terminate(m_EglDisplay);
+
+  m_EglDisplay = NULL;
+  m_EglContext = NULL;
+  m_EglSurface = NULL;
+  m_OwnContext = false;
+
+  dlclose(m_EglModule);
+  m_EglModule = NULL;
 }
 
-uint32_t QCCounters::ResolveAdrenoGen(const char *renderer) const
+void QCCounters::MakeCurrent()
 {
-  if(!renderer)
-    return 0;
+  if(!m_OwnContext || m_EglDisplay == NULL)
+    return;
 
-  // GL_RENDERER for Adreno looks like "Adreno (TM) 640". Extract the leading
-  // digit of the model number to get the generation (6 -> A6xx, 7 -> A7xx ...).
-  const char *p = strstr(renderer, "Adreno");
-  if(!p)
-    return 0;
+  typedef int (*PFN_eglMakeCurrent)(void *, void *, void *, void *);
+  PFN_eglMakeCurrent makeCurrent = (PFN_eglMakeCurrent)dlsym(m_EglModule, "eglMakeCurrent");
 
-  p += strlen("Adreno");
-  while(*p && (*p < '0' || *p > '9'))
-    p++;
-
-  if(*p >= '1' && *p <= '9')
-    return uint32_t(*p - '0') * 100;
-
-  return 0;
+  if(makeCurrent)
+    makeCurrent(m_EglDisplay, m_EglSurface, m_EglSurface, m_EglContext);
 }
 
-GPUCounter QCCounters::StableIdFromPerfName(const char *perfName)
+bool QCCounters::Init(ApiType api, void *context, const char *renderer)
 {
-  // FNV-1a over the PERF_* name, folded into the Qualcomm counter range. Deriving
-  // the public ID from the name (rather than from the list position) guarantees a
-  // given counter keeps the same GPUCounter value on every Adreno generation and
-  // across versions, even though only a subset is available on a given device
-  // (pitfall P-3). The device-local index is deliberately NOT used for the ID.
+  m_Api = api;
+  m_ApiContext = context;
+
+  // The counters are read through the GL driver's perf-monitor extension. There is no counter
+  // extension on this driver's Vulkan side, but the counters are hardware block activity rather
+  // than anything owned by a particular API or context, so a Vulkan replay samples them through a
+  // private GLES context created inside the replay process.
+  if(api == ApiType::Vk && !CreateGLContext())
+  {
+    RDCLOG("QCCounters: could not create the GLES context a Vulkan replay needs to sample "
+           "counters with");
+    return false;
+  }
+
+  if(!LoadPerfMon())
+  {
+    RDCLOG("QCCounters: this driver does not expose GL_AMD_performance_monitor entry points");
+    return false;
+  }
+
+  m_AdrenoPart = QCGGPMDeviceIdFromRenderer(renderer);
+  if(m_AdrenoPart == 0)
+    RDCLOG("QCCounters: unrecognised GPU \"%s\", metrics that scale by pipe counts will be "
+           "reported as unavailable",
+           renderer ? renderer : "");
+
+  SampleDeviceClock();
+
+  EnumerateCatalog();
+  if(m_DeviceGroups.empty())
+  {
+    RDCLOG("QCCounters: the driver reported no performance monitor groups");
+    return false;
+  }
+
+  ResolveNeeds();
+  BuildCatalog();
+
+  RDCLOG("QCCounters: %u Adreno groups, %u raw counters resolved of %u needed, %u metrics "
+         "published (max clock %.0f Hz)",
+         (uint32_t)m_DeviceGroups.size(),
+         (uint32_t)std::count_if(m_Needs.begin(), m_Needs.end(),
+                                 [](const NeedBinding &n) { return n.resolved; }),
+         kQCGGPMNeedCount, (uint32_t)m_Built.size(), m_MaxClockHz);
+
+  return !m_Built.empty();
+}
+
+bool QCCounters::LoadPerfMon()
+{
+  // The extension string cannot be trusted: this Adreno 610 reports zero
+  // GL_AMD_performance_monitor counters in the extension list while the entry points below are
+  // all present and sample real data. Availability is therefore decided by the entry points.
+  void *lib = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+  if(lib == NULL)
+    return false;
+
+  typedef void *(*PFN_eglGetProcAddress)(const char *);
+  PFN_eglGetProcAddress getProc =
+      (PFN_eglGetProcAddress)dlsym(lib, "eglGetProcAddress");
+  if(getProc == NULL)
+  {
+    dlclose(lib);
+    return false;
+  }
+
+  struct Entry
+  {
+    void **slot;
+    const char *name;
+  };
+
+  const Entry entries[] = {
+      {(void **)&m_Perf.gen_monitors, "glGenPerfMonitorsAMD"},
+      {(void **)&m_Perf.delete_monitors, "glDeletePerfMonitorsAMD"},
+      {(void **)&m_Perf.get_groups, "glGetPerfMonitorGroupsAMD"},
+      {(void **)&m_Perf.get_counters, "glGetPerfMonitorCountersAMD"},
+      {(void **)&m_Perf.get_group_string, "glGetPerfMonitorGroupStringAMD"},
+      {(void **)&m_Perf.get_counter_string, "glGetPerfMonitorCounterStringAMD"},
+      {(void **)&m_Perf.get_counter_info, "glGetPerfMonitorCounterInfoAMD"},
+      {(void **)&m_Perf.select_counters, "glSelectPerfMonitorCountersAMD"},
+      {(void **)&m_Perf.begin, "glBeginPerfMonitorAMD"},
+      {(void **)&m_Perf.end, "glEndPerfMonitorAMD"},
+      {(void **)&m_Perf.get_counter_data, "glGetPerfMonitorCounterDataAMD"},
+      // Not fatal if missing: only used to push the monitor's start marker down to the GPU
+      // before unrelated work is submitted, which matters when sampling a Vulkan replay.
+      {(void **)&m_Perf.flush, "glFlush"},
+  };
+
+  bool complete = true;
+  for(const Entry &e : entries)
+  {
+    *e.slot = getProc(e.name);
+
+    if(*e.slot == NULL && strcmp(e.name, "glFlush") == 0)
+      continue;
+
+    if(*e.slot == NULL)
+    {
+      RDCLOG("QCCounters: %s is missing", e.name);
+      complete = false;
+    }
+  }
+
+  if(!complete)
+  {
+    dlclose(lib);
+    m_Perf = {};
+    return false;
+  }
+
+  m_Perf.module = lib;
+  return true;
+}
+
+void QCCounters::EnumerateCatalog()
+{
+  PFN_glGetPerfMonitorGroupsAMD getGroups = (PFN_glGetPerfMonitorGroupsAMD)m_Perf.get_groups;
+  PFN_glGetPerfMonitorCountersAMD getCounters =
+      (PFN_glGetPerfMonitorCountersAMD)m_Perf.get_counters;
+  PFN_glGetPerfMonitorGroupStringAMD getGroupString =
+      (PFN_glGetPerfMonitorGroupStringAMD)m_Perf.get_group_string;
+  PFN_glGetPerfMonitorCounterStringAMD getCounterString =
+      (PFN_glGetPerfMonitorCounterStringAMD)m_Perf.get_counter_string;
+
+  int32_t groupCount = 0;
+  getGroups(&groupCount, 0, NULL);
+
+  if(groupCount <= 0)
+    return;
+
+  rdcarray<uint32_t> groupIds;
+  groupIds.resize(groupCount);
+  int32_t written = groupCount;
+  getGroups(&written, groupCount, groupIds.data());
+
+  for(int32_t g = 0; g < written; g++)
+  {
+    DeviceGroup group;
+    group.group = groupIds[g];
+
+    int32_t length = 0;
+    getGroupString(group.group, 0, &length, NULL);
+    group.name.resize(length + 1);
+    getGroupString(group.group, length + 1, &length, group.name.data());
+    group.name.resize(length + 1);
+    group.name.back() = 0;
+
+    int32_t counterCount = 0;
+    int32_t maxActive = 0;
+    getCounters(group.group, &counterCount, &maxActive, 0, NULL);
+    group.maxActive = maxActive > 0 ? uint32_t(maxActive) : 1;
+
+    if(counterCount > 0)
+    {
+      rdcarray<uint32_t> counterIds;
+      counterIds.resize(counterCount);
+      int32_t counterWritten = counterCount;
+      getCounters(group.group, &counterWritten, &maxActive, counterCount, counterIds.data());
+
+      for(int32_t c = 0; c < counterWritten; c++)
+      {
+        DeviceCounter counter;
+        counter.group = group.group;
+        counter.counter = counterIds[c];
+
+        int32_t nameLength = 0;
+        getCounterString(group.group, counter.counter, 0, &nameLength, NULL);
+        counter.name.resize(nameLength + 1);
+        getCounterString(group.group, counter.counter, nameLength + 1, &nameLength,
+                         counter.name.data());
+        counter.name.resize(nameLength + 1);
+        counter.name.back() = 0;
+
+        group.counters.push_back(counter);
+      }
+    }
+
+    m_DeviceGroups.push_back(group);
+  }
+}
+
+const QCCounters::DeviceCounter *QCCounters::FindDeviceCounter(const rdcarray<DeviceGroup> &groups,
+                                                              const char *name, uint32_t *maxActive)
+{
+  for(const DeviceGroup &group : groups)
+  {
+    for(const DeviceCounter &counter : group.counters)
+    {
+      if(NameEquals(counter.name.data(), name))
+      {
+        *maxActive = group.maxActive;
+        return &counter;
+      }
+    }
+  }
+
+  return NULL;
+}
+
+void QCCounters::ResolveNeeds()
+{
+  m_Needs.clear();
+
+  uint32_t unresolved = 0;
+
+  for(uint32_t i = 0; i < kQCGGPMNeedCount; i++)
+  {
+    NeedBinding binding;
+    binding.index = i;
+
+    const char *name = QCGGPMCounterName(kQCGGPMNeeds[i].block, kQCGGPMNeeds[i].id);
+    if(name == NULL)
+    {
+      RDCWARN("QCCounters: no profiler name for %s[%u]", kQCGGPMNeeds[i].block,
+              kQCGGPMNeeds[i].id);
+      unresolved++;
+      m_Needs.push_back(binding);
+      continue;
+    }
+
+    uint32_t maxActive = 1;
+    const DeviceCounter *counter = FindDeviceCounter(m_DeviceGroups, name, &maxActive);
+    if(counter != NULL)
+    {
+      binding.group = counter->group;
+      binding.counter = counter->counter;
+      binding.maxActive = maxActive;
+      binding.resolved = true;
+    }
+    else
+    {
+      RDCLOG("QCCounters: this driver does not report %s[%u] (\"%s\")", kQCGGPMNeeds[i].block,
+             kQCGGPMNeeds[i].id, name);
+      unresolved++;
+    }
+
+    m_Needs.push_back(binding);
+  }
+
+  if(unresolved > 0)
+    RDCLOG("QCCounters: %u of %u raw counters are unavailable on this device", unresolved,
+           kQCGGPMNeedCount);
+}
+
+void QCCounters::SampleDeviceClock()
+{
+  // The profiler's "% Utilization" divides by the part's maximum GPU clock, not by the clock the
+  // GPU happens to be running at, so that is the value that has to be read here. The kgsl node is
+  // readable on a rooted device; when it is not, that metric reports unavailable rather than
+  // dividing by zero.
+  m_MaxClockHz = double(ReadSysUInt64("/sys/class/kgsl/kgsl-3d0/max_gpuclk"));
+
+  if(m_MaxClockHz <= 0.0)
+    RDCLOG("QCCounters: max_gpuclk is not readable, GPU %% Utilization will be unavailable");
+}
+
+void QCCounters::BuildCatalog()
+{
+  m_CounterIds.clear();
+  m_Built.clear();
+
+  for(uint32_t i = 0; i < kQCGGPMMetricCount; i++)
+  {
+    const QCGGPMMetric &metric = kQCGGPMMetrics[i];
+
+    BuiltMetric built;
+    built.id = StableIdFromKey(metric.key);
+    built.metric = i;
+
+    // A metric is only published when every raw counter it reads is addressable here. Publishing
+    // it anyway would offer a counter that can never produce a value, and the user could not tell
+    // that apart from a GPU that genuinely has nothing to report.
+    built.available = true;
+
+    uint32_t deps = 0;
+    for(uint32_t d = 0; d < kQCGGPMDepCount; d++)
+    {
+      if(strcmp(kQCGGPMDeps[d].metric, metric.key) != 0)
+        continue;
+
+      deps++;
+
+      const int needIndex = QCGGPMSample::IndexOf(kQCGGPMDeps[d].block, kQCGGPMDeps[d].id);
+      if(needIndex < 0 || !m_Needs[size_t(needIndex)].resolved)
+        built.available = false;
+    }
+
+    // A metric with no declared dependency would always report a constant, so treat it as
+    // unavailable rather than publishing it.
+    if(deps == 0)
+      built.available = false;
+
+    m_Built.push_back(built);
+    m_CounterIds.push_back(built.id);
+  }
+}
+
+GPUCounter QCCounters::StableIdFromKey(const char *key)
+{
+  // FNV-1a over the metric key, folded into the Qualcomm counter range. Deriving the public ID
+  // from the name rather than from the list position guarantees a given counter keeps the same
+  // GPUCounter value on every Adreno generation and across versions, even though the set of
+  // metrics a device can evaluate differs.
   const uint32_t range =
-      (uint32_t)GPUCounter::LastQualcomm - (uint32_t)GPUCounter::FirstQualcomm + 1;
+      uint32_t(GPUCounter::LastQualcomm) - uint32_t(GPUCounter::FirstQualcomm) + 1;
 
   uint32_t hash = 2166136261u;
-  for(const char *p = perfName; p && *p; p++)
+  for(const char *p = key; p != NULL && *p; p++)
   {
-    hash ^= (uint8_t)*p;
+    hash ^= uint8_t(*p);
     hash *= 16777619u;
   }
 
-  return GPUCounter((uint32_t)GPUCounter::FirstQualcomm + (hash % range));
+  return GPUCounter(uint32_t(GPUCounter::FirstQualcomm) + (hash % range));
 }
 
 int32_t QCCounters::IndexForId(GPUCounter counter) const
 {
-  for(int32_t i = 0; i < (int32_t)m_Built.size(); i++)
+  for(uint32_t i = 0; i < m_Built.size(); i++)
   {
     if(m_Built[i].id == counter)
-      return i;
+      return int32_t(i);
   }
 
   return -1;
 }
 
-void QCCounters::BuildCatalog(uint32_t adrenoGen)
-{
-  // Build the set of counters available on this Adreno generation. The public ID is
-  // derived from the PERF_* name (StableIdFromPerfName), so we sort purely to make
-  // the device-local index deterministic - the ID does NOT depend on this order or
-  // on which of the entries are filtered out by generation (pitfall P-3).
-  rdcarray<const QCCounterMeta *> available;
-
-  for(const QCCounterMeta &meta : kQCCatalog)
-  {
-    if(adrenoGen == 0 || meta.minAdrenoGen <= adrenoGen)
-      available.push_back(&meta);
-  }
-
-  std::sort(available.begin(), available.end(), [](const QCCounterMeta *a, const QCCounterMeta *b) {
-    return strcmp(a->perfName, b->perfName) < 0;
-  });
-
-  for(const QCCounterMeta *meta : available)
-  {
-    const GPUCounter id = StableIdFromPerfName(meta->perfName);
-
-    // A hash fold can in principle collide inside the reserved range. Drop the
-    // later entry rather than aliasing two counters onto one public ID; with this
-    // catalog size no collisions are expected.
-    bool duplicate = false;
-    for(const QCBuiltCounter &built : m_Built)
-    {
-      if(built.id == id)
-      {
-        RDCWARN("Qualcomm counters: stable ID collision between '%s' and '%s' - dropping the latter",
-                built.perfName, meta->perfName);
-        duplicate = true;
-        break;
-      }
-    }
-
-    if(duplicate)
-      continue;
-
-    CounterDescription desc;
-    desc.name = meta->humanName;
-    desc.counter = id;
-    desc.category = meta->category;
-    desc.description = meta->description;
-    desc.resultByteWidth = 8;
-    desc.resultType = meta->resultType;
-    desc.unit = meta->unit;
-
-    // [未知] The device-resident (id, group) pair is not known host-side: it lives
-    // in the device's own libgsl.so catalog, which is not part of the SDP
-    // distribution (section 8.9.1). A pair is only used when it has been verified
-    // on this exact generation (kQCVerifiedGslPairs), which today is none of them,
-    // so the entry keeps kUnknownGslId and the runtime selects/reads nothing for it.
-    QCBuiltCounter built = {};
-    built.id = id;
-    built.perfName = meta->perfName;
-    built.gslId = kUnknownGslId;
-    built.gslGroup = 0;
-
-    if(LookupGslPair(meta->perfName, adrenoGen, built.gslId, built.gslGroup))
-      RDCLOG("Qualcomm counters: %s verified as (id %u, group %u) on Adreno gen %u",
-             meta->perfName, built.gslId, built.gslGroup, adrenoGen);
-
-    m_Built.push_back(built);
-    m_CounterDescriptions.push_back(desc);
-    m_CounterIds.push_back(desc.counter);
-  }
-
-  // Emit the section 8.4 category/block taxonomy once the generation-specific set
-  // is known, so a debug log records exactly which derived counters are available
-  // and how they map onto the full on-device catalog.
-  LogCatalogStatistics(m_CounterDescriptions);
-}
-#endif
-
-bool QCCounters::Init(ApiType api, void *context, const char *renderer)
-{
-#if ENABLED(RDOC_ANDROID)
-  m_Api = api;
-  m_ApiContext = context;
-
-  if(!LoadGSL())
-    return false;
-
-  m_AdrenoGen = ResolveAdrenoGen(renderer);
-
-  if(m_AdrenoGen == 0)
-    RDCLOG("Qualcomm counters: could not determine Adreno generation from '%s'",
-           renderer ? renderer : "<null>");
-
-  // [观测] gsl_perfcounter_query_selections() uses a two-call protocol: the first
-  // call passes count == 0 and outIds == NULL with a valid outCount to learn the
-  // size of the currently-available selection set. We then re-query that size and
-  // use it as the per-pass bound - a conservative but evidence-backed default for
-  // how many counters the hardware can hold at once (pitfall P-5).
-  {
-    PFN_gsl_perfcounter_query_selections query =
-        (PFN_gsl_perfcounter_query_selections)m_Gsl.query_selections;
-
-    if(query && m_GslDevice >= 0 && m_GslContext >= 0)
-    {
-      uint32_t availCount = 0;
-      int res = query((uint32_t)m_GslDevice, (uint32_t)m_GslContext, 0 /* selectionType */,
-                      0 /* count */, NULL /* outIds */, &availCount);
-
-      if(res == 0 && availCount > 0)
-      {
-        m_MaxPerPass = availCount;
-        RDCLOG("Qualcomm counters: device reports %u available selections (per-pass bound)",
-               availCount);
-      }
-      else
-      {
-        RDCLOG("Qualcomm counters: query_selections returned %d (count %u), keeping default bound "
-               "%u",
-               res, availCount, m_MaxPerPass);
-      }
-    }
-  }
-
-  BuildCatalog(m_AdrenoGen);
-
-  if(m_CounterIds.empty())
-  {
-    RDCLOG("Qualcomm counters: no counters available for Adreno generation %u", m_AdrenoGen);
-    return false;
-  }
-
-  RDCLOG("Qualcomm counters: initialised, %u counters available (Adreno gen %u, max %u per pass)",
-         (uint32_t)m_CounterIds.size(), m_AdrenoGen, m_MaxPerPass);
-
-  return true;
-#else
-  return false;
-#endif
-}
-
 rdcarray<GPUCounter> QCCounters::GetPublicCounterIds()
 {
-#if ENABLED(RDOC_ANDROID)
-  return m_CounterIds;
-#else
-  return {};
-#endif
+  rdcarray<GPUCounter> ret;
+  for(const BuiltMetric &built : m_Built)
+  {
+    if(built.available)
+      ret.push_back(built.id);
+  }
+
+  return ret;
 }
 
-CounterDescription QCCounters::GetCounterDescription(GPUCounter index)
+CounterDescription QCCounters::GetCounterDescription(GPUCounter counter)
 {
-#if ENABLED(RDOC_ANDROID)
-  const int32_t idx = IndexForId(index);
-  if(idx < 0)
+  const int32_t index = IndexForId(counter);
+
+  CounterDescription desc;
+  desc.counter = counter;
+
+  if(index < 0)
   {
-    RDCERR("Qualcomm counters: no description for counter %u", (uint32_t)index);
-    return CounterDescription();
+    desc.name = "Unknown";
+    return desc;
   }
 
-  return m_CounterDescriptions[(size_t)idx];
-#else
-  return {};
-#endif
-}
+  const QCGGPMMetric &metric = kQCGGPMMetrics[m_Built[size_t(index)].metric];
 
-void QCCounters::EnableCounter(GPUCounter counter)
-{
-#if ENABLED(RDOC_ANDROID)
-  const int32_t idx = IndexForId(counter);
-  if(idx < 0)
-  {
-    RDCERR("Qualcomm counters: EnableCounter called with unknown counter %u", (uint32_t)counter);
-    return;
-  }
+  desc.name = metric.label;
+  desc.description = metric.description;
+  desc.category = metric.category;
+  desc.resultType = CompType::Float;
+  desc.resultByteWidth = 8;
 
-  // De-duplicate: selecting the same counter twice would otherwise emit it twice
-  // into the pass slices. m_EnabledCounters holds device-local indices.
-  const uint32_t dev = (uint32_t)idx;
-  for(uint32_t enabled : m_EnabledCounters)
-  {
-    if(enabled == dev)
-      return;
-  }
+  // The units map onto RenderDoc's counter units so the table shows the right suffix. The values
+  // themselves are in the same scale Snapdragon Profiler reports, i.e. percentages are 0..100 and
+  // "% Texture L2 Miss" can legitimately exceed 100.
+  if(strcmp(metric.unit, "%") == 0)
+    desc.unit = CounterUnit::Percentage;
+  else if(strcmp(metric.unit, "B") == 0 || strcmp(metric.unit, "B/s") == 0)
+    desc.unit = CounterUnit::Bytes;
+  else if(strcmp(metric.unit, "cyc") == 0)
+    desc.unit = CounterUnit::Cycles;
+  else if(strcmp(metric.unit, "us") == 0)
+    desc.unit = CounterUnit::Absolute;    // microseconds: RenderDoc has no microsecond unit, and
+                                         // calling it Seconds would display values off by 1e6
+  else
+    desc.unit = CounterUnit::Absolute;
 
-  m_EnabledCounters.push_back(dev);
-#endif
+  return desc;
 }
 
 void QCCounters::DisableAllCounters()
 {
-#if ENABLED(RDOC_ANDROID)
   m_EnabledCounters.clear();
-#endif
+  m_Passes.clear();
+
+  // Each fetch starts from a clean slate: a sample left over from an earlier fetch would be
+  // paired with counters it was never measured for. The session-wide cache is deliberately kept:
+  // it only ever holds values that were really measured, and ReuseSample() checks each counter a
+  // selection reads before handing a cached event back.
+  m_Samples.clear();
+}
+
+void QCCounters::EnableCounter(GPUCounter counter)
+{
+  const int32_t index = IndexForId(counter);
+  if(index < 0)
+    return;
+
+  if(!m_EnabledCounters.contains(uint32_t(index)))
+    m_EnabledCounters.push_back(uint32_t(index));
+
+  // The pass layout depends on which metrics are enabled, since it is built from the raw counters
+  // those metrics read.
+  m_Passes.clear();
+}
+
+void QCCounters::BuildPasses()
+{
+  m_Passes.clear();
+
+  if(m_EnabledCounters.empty())
+    return;
+
+  // Which raw counters are actually needed: the union, over the enabled metrics, of the counters
+  // their formulas read (kQCGGPMDeps). Selecting only those keeps a fetch from spending GPU time
+  // sampling blocks no enabled metric looks at.
+  rdcarray<uint32_t> needed;
+
+  for(uint32_t enabled : m_EnabledCounters)
+  {
+    const char *key = kQCGGPMMetrics[m_Built[enabled].metric].key;
+
+    for(uint32_t d = 0; d < kQCGGPMDepCount; d++)
+    {
+      if(strcmp(kQCGGPMDeps[d].metric, key) != 0)
+        continue;
+
+      const int needIndex = QCGGPMSample::IndexOf(kQCGGPMDeps[d].block, kQCGGPMDeps[d].id);
+      if(needIndex < 0 || !m_Needs[size_t(needIndex)].resolved)
+        continue;
+
+      if(!needed.contains(uint32_t(needIndex)))
+        needed.push_back(uint32_t(needIndex));
+    }
+  }
+
+  if(needed.empty())
+    return;
+
+  // One pass can hold at most `maxActive` counters from the same hardware block, so walk the
+  // blocks in turn and start a new pass whenever a block's budget would be exceeded.
+  std::map<uint32_t, uint32_t> usedInPass;
+
+  rdcarray<uint32_t> current;
+
+  for(uint32_t needIndex : needed)
+  {
+    const NeedBinding &binding = m_Needs[needIndex];
+    const uint32_t limit = binding.maxActive > 0 ? binding.maxActive : 1;
+
+    if(usedInPass[binding.group] + 1 > limit)
+    {
+      m_Passes.push_back(current);
+      current.clear();
+      usedInPass.clear();
+    }
+
+    usedInPass[binding.group]++;
+    current.push_back(needIndex);
+  }
+
+  if(!current.empty())
+    m_Passes.push_back(current);
 }
 
 uint32_t QCCounters::GetPassCount()
 {
-#if ENABLED(RDOC_ANDROID)
-  // The hardware can only select a limited number of counters at once, so the
-  // requested set may have to be read over several passes (pitfall P-5).
-  if(m_EnabledCounters.empty())
-    return 0;
+  if(m_Passes.empty())
+    BuildPasses();
 
-  if(m_MaxPerPass == 0)
-    return 1;
-
-  return (uint32_t)((m_EnabledCounters.size() + m_MaxPerPass - 1) / m_MaxPerPass);
-#else
-  return 0;
-#endif
+  return uint32_t(m_Passes.size());
 }
 
 void QCCounters::BeginPass(uint32_t passID)
 {
-#if ENABLED(RDOC_ANDROID)
-  m_passIndex = passID;
+  m_OpenPass = passID;
 
-  // Select the subset of counters that belongs to this pass.
-  uint32_t start = passID * m_MaxPerPass;
-  uint32_t end = RDCMIN((uint32_t)m_EnabledCounters.size(), start + m_MaxPerPass);
+  MakeCurrent();
 
-  if(start >= (uint32_t)m_EnabledCounters.size())
+  if(passID >= m_Passes.size())
     return;
 
-  // [观测] select addresses counters by the parallel (id, group) pair. The device
-  // pair is unknown host-side (see QCBuiltCounter), so a counter whose pair is not
-  // resolved is skipped rather than guessed - a wrong id would silently select an
-  // unrelated hardware counter.
-  rdcarray<uint32_t> ids;
-  rdcarray<uint32_t> groups;
-  for(uint32_t i = start; i < end; i++)
-  {
-    const QCBuiltCounter &built = m_Built[m_EnabledCounters[i]];
-    if(!built.HasDevicePair())
-      continue;
+  // A monitor is created per pass so the selection cannot accumulate across passes: the driver's
+  // select call only adds to the current selection.
+  PFN_glGenPerfMonitorsAMD gen = (PFN_glGenPerfMonitorsAMD)m_Perf.gen_monitors;
+  PFN_glSelectPerfMonitorCountersAMD select =
+      (PFN_glSelectPerfMonitorCountersAMD)m_Perf.select_counters;
 
-    ids.push_back(built.gslId);
-    groups.push_back(built.gslGroup);
-  }
+  if(m_Monitor == 0)
+    gen(1, &m_Monitor);
 
-  if(ids.empty())
-  {
-    // This is the expected outcome while kQCVerifiedGslPairs is a sentinel only: the
-    // pass holds only counters whose device pair has not been verified on this
-    // generation, and selecting a guessed pair would report an unrelated hardware
-    // counter under the right name.
-    RDCLOG("Qualcomm counters: pass %u has no selectable counters (device-side (id, group) pairs "
-           "unresolved - see kQCVerifiedGslPairs)",
-           passID);
+  if(m_Monitor == 0)
     return;
-  }
 
-  int res = SelectCounters(ids, groups);
-  if(res != 0)
-    RDCLOG("Qualcomm counters: gsl_perfcounter_select failed for %u counters (%d)",
-           (uint32_t)ids.size(), res);
-#endif
+  const rdcarray<uint32_t> &pass = m_Passes[passID];
+
+  // Group the selection by hardware block: one select call per group with all of that block's
+  // counters in this pass, which is the form the extension is specified for.
+  for(size_t i = 0; i < pass.size();)
+  {
+    const uint32_t group = m_Needs[pass[i]].group;
+
+    rdcarray<uint32_t> counters;
+    while(i < pass.size() && m_Needs[pass[i]].group == group)
+    {
+      counters.push_back(m_Needs[pass[i]].counter);
+      i++;
+    }
+
+    select(m_Monitor, 1, group, int32_t(counters.size()), counters.data());
+  }
 }
 
 void QCCounters::EndPass()
 {
-#if ENABLED(RDOC_ANDROID)
-  uint32_t start = m_passIndex * m_MaxPerPass;
-  uint32_t end = RDCMIN((uint32_t)m_EnabledCounters.size(), start + m_MaxPerPass);
+  MakeCurrent();
 
-  if(start >= (uint32_t)m_EnabledCounters.size())
-    return;
-
-  if(!m_Gsl.deselect || m_GslDevice < 0 || m_GslContext < 0)
-    return;
-
-  rdcarray<uint32_t> ids;
-  rdcarray<uint32_t> groups;
-  for(uint32_t i = start; i < end; i++)
+  if(m_Monitor && m_Perf.delete_monitors)
   {
-    const QCBuiltCounter &built = m_Built[m_EnabledCounters[i]];
-    if(!built.HasDevicePair())
-      continue;
+    PFN_glDeletePerfMonitorsAMD del = (PFN_glDeletePerfMonitorsAMD)m_Perf.delete_monitors;
+    del(1, &m_Monitor);
+    m_Monitor = 0;
+  }
+}
 
-    ids.push_back(built.gslId);
-    groups.push_back(built.gslGroup);
+bool QCCounters::ReuseSample(uint32_t eventId)
+{
+  std::map<uint32_t, EventSample>::const_iterator it = m_SampleCache.find(eventId);
+  if(it == m_SampleCache.end())
+    return false;
+
+  // A pass layout of zero passes means the selection reads no raw counter at all, so there is
+  // nothing a cached event could answer.
+  if(m_Passes.empty())
+    return false;
+
+  for(size_t p = 0; p < m_Passes.size(); p++)
+  {
+    for(size_t i = 0; i < m_Passes[p].size(); i++)
+    {
+      const uint32_t need = m_Passes[p][i];
+      if(need >= it->second.attempted.size() || !it->second.attempted[need])
+        return false;
+    }
   }
 
-  if(ids.empty())
-    return;
-
-  // [观测] deselect mirrors select but takes a constant 0 third argument and
-  // returns void. We still pass the same (id, group) pair set that was selected.
-  PFN_gsl_perfcounter_deselect deselect = (PFN_gsl_perfcounter_deselect)m_Gsl.deselect;
-  deselect((uint32_t)m_GslDevice, (uint32_t)m_GslContext, 0 /* constant */, (uint32_t)ids.size(),
-           ids.data(), groups.data());
-#endif
+  m_Samples[eventId] = it->second;
+  return true;
 }
 
 void QCCounters::BeginSample(uint32_t eventId)
 {
-#if ENABLED(RDOC_ANDROID)
-  m_EventId = eventId;
-#endif
+  if(m_Monitor == 0 || m_Sampling)
+    return;
+
+  MakeCurrent();
+
+  PFN_glBeginPerfMonitorAMD begin = (PFN_glBeginPerfMonitorAMD)m_Perf.begin;
+  begin(m_Monitor);
+
+  // Push the start marker to the GPU now. When the work being measured is submitted from another
+  // API (a Vulkan replay) nothing else would flush this context before that work runs, and the
+  // window would then start after it.
+  if(m_Perf.flush)
+  {
+    typedef void (*PFN_glFlush)();
+    ((PFN_glFlush)m_Perf.flush)();
+  }
+
+  m_CurrentEvent = eventId;
+  m_SampleStartSec = NowSeconds();
+  m_Sampling = true;
 }
 
 void QCCounters::EndSample()
 {
-#if ENABLED(RDOC_ANDROID)
-  PFN_gsl_perfcounter_read read = (PFN_gsl_perfcounter_read)m_Gsl.read;
+  if(!m_Sampling)
+    return;
 
-  // [观测] Only the counters belonging to the current pass were selected by
-  // BeginPass(), and gsl_perfcounter_read only returns a valid value for a
-  // selected counter. Reading every enabled counter here would let a later pass
-  // overwrite an earlier pass's valid sample with a zero from a counter that was
-  // not selected (the multi-pass loop in FetchCountersQC re-runs Begin/EndPass
-  // per pass against the same event set). Restrict the readback to this pass's
-  // slice, exactly like BeginPass()/EndPass().
-  const uint32_t start = m_passIndex * m_MaxPerPass;
-  const uint32_t end = RDCMIN((uint32_t)m_EnabledCounters.size(), start + m_MaxPerPass);
+  m_Sampling = false;
 
-  for(uint32_t i = start; i < end; i++)
+  MakeCurrent();
+
+  PFN_glEndPerfMonitorAMD end = (PFN_glEndPerfMonitorAMD)m_Perf.end;
+  end(m_Monitor);
+
+  // The caller has already waited on a fence, so the GPU has finished this draw and the result
+  // should be ready. The wait below is a bounded safety net for the case where the driver defers
+  // publication; when it expires the sample is dropped rather than filled with stale values.
+  PFN_glGetPerfMonitorCounterDataAMD getData =
+      (PFN_glGetPerfMonitorCounterDataAMD)m_Perf.get_counter_data;
+
+  uint32_t available = 0;
+  const double waitEnd = NowSeconds() + 2.0;
+  while(NowSeconds() < waitEnd)
   {
-    const uint32_t counterId = m_EnabledCounters[i];
-    CounterValue data;
-    data.u64 = 0;
+    getData(m_Monitor, GL_PERFMON_RESULT_AVAILABLE_AMD, sizeof(available), &available, NULL);
+    if(available)
+      break;
+    usleep(1000);
+  }
 
-    const QCBuiltCounter &built = m_Built[counterId];
-    const CounterDescription &desc = m_CounterDescriptions[counterId];
+  if(!available)
+  {
+    RDCWARN("QCCounters: no result for event %u, counters for this draw are unavailable",
+            m_CurrentEvent);
+    return;
+  }
 
-    // [观测] gsl_perfcounter_read(device, id, group, &out) reads one counter. The
-    // counter is identified by the same (id, group) pair used for select; the
-    // plugin additionally masks the result to 32 bits for id 0xd. Only a resolved
-    // pair can be read - an unresolved one yields zero rather than a bad read.
-    if(read && built.HasDevicePair() && m_GslDevice >= 0)
+  const double window = NowSeconds() - m_SampleStartSec;
+
+  int32_t size = 0;
+  getData(m_Monitor, GL_PERFMON_RESULT_SIZE_AMD, sizeof(size), (uint32_t *)&size, NULL);
+
+  if(size <= 0)
+    return;
+
+  // The driver reports one record per selected counter. Terminating zeroes are not one of the
+  // layouts the extension defines, so the buffer is read with the size the driver just reported.
+  rdcarray<uint32_t> words;
+  words.resize(size_t(size / 4) + 1);
+
+  int32_t written = 0;
+  getData(m_Monitor, GL_PERFMON_RESULT_AMD, size, words.data(), &written);
+
+  EventSample &sample = m_Samples[m_CurrentEvent];
+
+  // A sample accumulates across passes: each pass selects a different slice of the raw counters, so
+  // resetting here would erase the values an earlier pass already collected for this event.
+  if(sample.raw.size() != size_t(kQCGGPMNeedCount))
+  {
+    sample.raw.resize(kQCGGPMNeedCount);
+    for(uint32_t i = 0; i < kQCGGPMNeedCount; i++)
+      sample.raw[i] = -1.0;
+  }
+
+  sample.dt = window;
+
+  const size_t wordCount = written > 0 ? size_t(written / 4) : size_t(size / 4);
+
+  if(m_Passes.empty())
+    return;
+
+  ReadResults(m_Passes[m_OpenPass < m_Passes.size() ? m_OpenPass : 0], words.data(), wordCount,
+              sample.raw.data());
+
+  // Fold this pass into the session cache. Values are only ever merged, never cleared, so a pass
+  // that covers a different slice of the raw counters adds to what earlier passes measured for the
+  // same event instead of replacing it.
+  EventSample &cached = m_SampleCache[m_CurrentEvent];
+  if(cached.raw.size() != size_t(kQCGGPMNeedCount))
+  {
+    cached.raw.resize(kQCGGPMNeedCount);
+    for(uint32_t i = 0; i < kQCGGPMNeedCount; i++)
+      cached.raw[i] = -1.0;
+  }
+  if(cached.attempted.size() != size_t(kQCGGPMNeedCount))
+  {
+    cached.attempted.resize(kQCGGPMNeedCount);
+    for(uint32_t i = 0; i < kQCGGPMNeedCount; i++)
+      cached.attempted[i] = 0;
+  }
+  const rdcarray<uint32_t> &openPass =
+      m_Passes[m_OpenPass < m_Passes.size() ? m_OpenPass : 0];
+  for(size_t i = 0; i < openPass.size(); i++)
+  {
+    if(openPass[i] < uint32_t(cached.attempted.size()))
+      cached.attempted[openPass[i]] = 1;
+  }
+  if(cached.dt <= 0.0)
+    cached.dt = window;
+  for(size_t i = 0; i < sample.raw.size() && i < cached.raw.size(); i++)
+  {
+    if(sample.raw[i] >= 0.0)
+      cached.raw[i] = sample.raw[i];
+  }
+}
+
+bool QCCounters::ReadResults(const rdcarray<uint32_t> &needIndices, const uint32_t *words,
+                             size_t wordCount, double *out)
+{
+  // Two result layouts exist in the wild and they cannot be told apart by the extension string:
+  //
+  //   * the Adreno driver on this part emits a fixed four-word record per counter,
+  //     {group, counter, value, unused}. It is NOT the layout the extension specifies.
+  //   * the specified layout is {group, counter, numInstances, type} followed by numInstances
+  //     values.
+  //
+  // Both layouts carry the group and counter of every record, so the values are read by matching
+  // those against the selection instead of by position. A layout whose records do not map onto
+  // the selection is rejected outright rather than producing plausible-looking garbage.
+  struct Wanted
+  {
+    uint32_t group;
+    uint32_t counter;
+    uint32_t need;
+  };
+
+  rdcarray<Wanted> wanted;
+  wanted.reserve(needIndices.size());
+  for(uint32_t needIndex : needIndices)
+  {
+    Wanted w;
+    w.group = m_Needs[needIndex].group;
+    w.counter = m_Needs[needIndex].counter;
+    w.need = needIndex;
+    wanted.push_back(w);
+  }
+
+  bool any = false;
+
+  // Layout 1: 4 words per record {group, counter, value, unused}.
+  //
+  // The count is not required to match the selection exactly - this driver drops a few records
+  // when a block hits its active-counter limit - but every record that is present must map onto a
+  // selected counter and must carry the zero fourth word, which is what separates this layout from
+  // the specified one below.
+  if((wordCount % 4) == 0 && wordCount >= 4)
+  {
+    bool matches = true;
+
+    for(size_t i = 0; i < wordCount / 4 && matches; i++)
     {
-      uint64_t raw = 0;
-      int res = read((uint32_t)m_GslDevice, built.gslId, built.gslGroup, &raw);
-
-      if(res != 0)
+      if(words[i * 4 + 3] != 0)
       {
-        RDCLOG("Qualcomm counters: gsl_perfcounter_read failed for %s (%d)", built.perfName, res);
-        raw = 0;
-      }
-      else if(built.gslId == kQCPerfCounter32BitId)
-      {
-        raw = raw & 0xffffffffu;
+        matches = false;
+        break;
       }
 
-      data.u64 = raw;
+      bool found = false;
+      for(const Wanted &w : wanted)
+      {
+        if(w.group == words[i * 4 + 0] && w.counter == words[i * 4 + 1])
+        {
+          found = true;
+          break;
+        }
+      }
+
+      if(!found)
+        matches = false;
     }
 
-    // [推断] The read returns a raw 64-bit slot. For counters the catalog types as
-    // floating point we surface the raw integer as a double; any unit scaling the
-    // hardware applies is not recoverable from the host distribution, so it is left
-    // to the presentation layer.
-    if(desc.resultType == CompType::Float)
-      data.d = (double)data.u64;
+    if(matches)
+    {
+      for(size_t i = 0; i < wordCount / 4; i++)
+      {
+        for(const Wanted &w : wanted)
+        {
+          if(w.group == words[i * 4 + 0] && w.counter == words[i * 4 + 1])
+          {
+            out[w.need] = double(words[i * 4 + 2]);
+            any = true;
+            break;
+          }
+        }
+      }
 
-    m_CounterData[m_EventId][counterId] = data;
+      return any;
+    }
   }
-#endif
+
+  // Layout 2: the layout the extension actually specifies.
+  size_t offset = 0;
+  while(offset + 4 <= wordCount)
+  {
+    const uint32_t group = words[offset + 0];
+    const uint32_t counter = words[offset + 1];
+    const uint32_t instances = words[offset + 2];
+    const uint32_t type = words[offset + 3];
+
+    offset += 4;
+
+    if(instances == 0 || offset + instances > wordCount)
+      break;
+
+    // Guard against reading a buffer in the wrong layout: the specified layout always records a
+    // GL enum for the type, and a value-shaped word would not be one.
+    if(type != GL_FLOAT && type != GL_UNSIGNED_INT && type != GL_UNSIGNED_BYTE && type != GL_INT)
+      break;
+
+    for(const Wanted &w : wanted)
+    {
+      if(w.group == group && w.counter == counter)
+      {
+        // Only the first instance is used: every counter selected here is a scalar block counter.
+        double value = 0.0;
+        if(type == GL_FLOAT)
+          memcpy(&value, &words[offset], sizeof(float));
+        else
+          value = double(words[offset]);
+
+        out[w.need] = value;
+        any = true;
+        break;
+      }
+    }
+
+    offset += instances;
+  }
+
+  return any;
 }
 
 rdcarray<CounterResult> QCCounters::GetCounterData(const rdcarray<uint32_t> &eventIDs,
                                                    const rdcarray<GPUCounter> &counters)
 {
-  rdcarray<CounterResult> result;
-#if ENABLED(RDOC_ANDROID)
-  for(size_t i = 0; i < eventIDs.size(); i++)
+  rdcarray<CounterResult> ret;
+
+  for(uint32_t eventId : eventIDs)
   {
-    uint32_t eventId = eventIDs[i];
-    for(size_t j = 0; j < counters.size(); j++)
+    std::map<uint32_t, EventSample>::const_iterator it = m_Samples.find(eventId);
+    if(it == m_Samples.end())
+      continue;
+
+    QCGGPMSample sample;
+    sample.Init();
+    sample.dt = it->second.dt;
+    sample.maxClockHz = m_MaxClockHz;
+    sample.deviceId = m_AdrenoPart;
+
+    const size_t count = std::min(it->second.raw.size(), size_t(kQCGGPMNeedCount));
+    for(size_t i = 0; i < count; i++)
     {
-      GPUCounter counter = counters[j];
-      const int32_t idx = IndexForId(counter);
-      if(idx < 0)
-      {
-        RDCERR("Qualcomm counters: GetCounterData called with unknown counter %u",
-               (uint32_t)counter);
+      sample.values[i] = it->second.raw[i];
+      if(sample.values[i] >= 0.0)
+        sample.countersReady = true;
+    }
+
+    for(GPUCounter counter : counters)
+    {
+      const int32_t index = IndexForId(counter);
+      if(index < 0)
         continue;
-      }
 
-      const CounterDescription &desc = m_CounterDescriptions[(size_t)idx];
-      const CounterValue &data = m_CounterData[eventId][(uint32_t)idx];
+      const QCGGPMMetric &metric = kQCGGPMMetrics[m_Built[size_t(index)].metric];
 
-      if(desc.resultType == CompType::Float)
-        result.push_back(CounterResult(eventId, counter, data.d));
-      else
-        result.push_back(CounterResult(eventId, counter, data.u64));
+      double value = 0.0;
+      if(!QCGGPMEvaluate(metric.key, sample, &value))
+        continue;
+
+      ret.push_back(CounterResult(eventId, counter, value));
     }
   }
-#endif
-  return result;
+
+  return ret;
 }
+
+#endif    // ENABLED(RDOC_ANDROID)

@@ -604,27 +604,25 @@ rdcarray<CounterResult> VulkanReplay::FetchCountersAMD(const rdcarray<GPUCounter
 
 struct VulkanQCActionCallback : public VulkanActionCallback
 {
-  VulkanQCActionCallback(WrappedVulkan *dev, VulkanReplay *rp, uint32_t &sampleIndex,
-                         rdcarray<uint32_t> &eventIDs)
-      : m_pDriver(dev), m_pReplay(rp), m_pSampleId(&sampleIndex), m_pEventIds(&eventIDs)
+  VulkanQCActionCallback(WrappedVulkan *dev, rdcarray<uint32_t> &eventIDs)
+      : m_pDriver(dev), m_pEventIds(&eventIDs)
   {
     m_pDriver->SetActionCB(this);
   }
 
   virtual ~VulkanQCActionCallback() { m_pDriver->SetActionCB(NULL); }
 
+  // Only collects the events of the frame. The counters are not sampled from here: a perf monitor
+  // can only be closed once the draw's GPU work has finished, and waiting for that requires
+  // submitting and blocking on the queue, which cannot be done while a command buffer is still
+  // being recorded. FetchCountersQC samples each event with its own replay instead.
   void PreDraw(uint32_t eid, ActionFlags flags, VkCommandBuffer cmd) override
   {
     m_pEventIds->push_back(eid);
-
-    m_pReplay->GetQCCounters()->BeginSample(eid);
-
-    ++*m_pSampleId;
   }
 
   bool PostDraw(uint32_t eid, ActionFlags flags, VkCommandBuffer cmd) override
   {
-    m_pReplay->GetQCCounters()->EndSample();
     return false;
   }
 
@@ -683,7 +681,6 @@ struct VulkanQCActionCallback : public VulkanActionCallback
 
   uint32_t *m_pSampleId;
   WrappedVulkan *m_pDriver;
-  VulkanReplay *m_pReplay;
   rdcarray<uint32_t> *m_pEventIds;
   // events which are the 'same' from being the same command buffer resubmitted
   // multiple times in the frame. We will only get the full callback when we're
@@ -692,16 +689,15 @@ struct VulkanQCActionCallback : public VulkanActionCallback
   rdcarray<rdcpair<uint32_t, uint32_t>> m_AliasEvents;
 };
 
-void VulkanReplay::FillTimersQC(uint32_t *eventStartID, uint32_t *sampleIndex,
-                                rdcarray<uint32_t> *eventIDs)
+void VulkanReplay::FillTimersQC(uint32_t *eventStartID, rdcarray<uint32_t> *eventIDs)
 {
   uint32_t maxEID = m_pDriver->GetMaxEID();
 
   RDCASSERT(m_pQCActionCallback == NULL);
 
-  m_pQCActionCallback = new VulkanQCActionCallback(m_pDriver, this, *sampleIndex, *eventIDs);
+  m_pQCActionCallback = new VulkanQCActionCallback(m_pDriver, *eventIDs);
 
-  // replay the events to perform all the queries
+  // replay the frame once to learn which events it contains and which events alias each other
   m_pDriver->ReplayLog(*eventStartID, maxEID, eReplay_Full);
 }
 
@@ -726,9 +722,11 @@ rdcarray<CounterResult> VulkanReplay::FetchCountersQC(const rdcarray<GPUCounter>
 
   uint32_t passCount = m_pQCCounters->GetPassCount();
 
-  uint32_t sampleIndex = 0;
-
   rdcarray<uint32_t> eventIDs;
+
+  // Aliases are only reported by the callback, so they are collected on each pass and kept from
+  // the last one - the set is the same for every pass.
+  rdcarray<rdcpair<uint32_t, uint32_t>> aliasEvents;
 
   for(uint32_t i = 0; i < passCount; i++)
   {
@@ -736,29 +734,56 @@ rdcarray<CounterResult> VulkanReplay::FetchCountersQC(const rdcarray<GPUCounter>
 
     uint32_t eventStartID = 0;
 
-    sampleIndex = 0;
-
     eventIDs.clear();
 
     // delete any callback from a previous pass, we only use it for EID aliasing
     SAFE_DELETE(m_pQCActionCallback);
 
-    FillTimersQC(&eventStartID, &sampleIndex, &eventIDs);
+    FillTimersQC(&eventStartID, &eventIDs);
 
-    // leave this one alive, it will be deleted below
+    if(m_pQCActionCallback)
+      aliasEvents = m_pQCActionCallback->m_AliasEvents;
+
+    // Drop the callback before the sampling replays: it is only needed for collection, and if it
+    // stayed installed every sampling replay would append the same events to eventIDs again.
+    SAFE_DELETE(m_pQCActionCallback);
+
+    // Sampling replays each event on its own: the perf monitor is opened, the draw is replayed
+    // and submitted, the queue is drained so its GPU work is definitely included, and only then
+    // is the monitor closed. Nothing here runs inside a replay callback, so no command buffer is
+    // still being recorded when the submit and wait happen.
+    const rdcarray<uint32_t> toSample = eventIDs;
+
+    for(uint32_t eid : toSample)
+    {
+      // Answered from a previous fetch in this session: re-measuring would cost another submit and
+      // queue drain for a draw whose counters are already known.
+      if(m_pQCCounters->ReuseSample(eid))
+        continue;
+
+      m_pQCCounters->BeginSample(eid);
+
+      m_pDriver->ReplayLog(0, eid, eReplay_WithoutDraw);
+      m_pDriver->ReplayLog(0, eid, eReplay_OnlyDraw);
+
+      m_pDriver->SubmitCmds();
+      m_pDriver->FlushQ();
+
+      m_pQCCounters->EndSample();
+    }
 
     m_pQCCounters->EndPass();
   }
 
   rdcarray<CounterResult> ret = m_pQCCounters->GetCounterData(eventIDs, counters);
 
-  for(size_t i = 0; i < m_pQCActionCallback->m_AliasEvents.size(); i++)
+  for(size_t i = 0; i < aliasEvents.size(); i++)
   {
     for(size_t c = 0; c < counters.size(); c++)
     {
       CounterResult search;
       search.counter = counters[c];
-      search.eventId = m_pQCActionCallback->m_AliasEvents[i].first;
+      search.eventId = aliasEvents[i].first;
 
       // find the result we're aliasing
       int32_t idx = ret.indexOf(search);
@@ -766,7 +791,7 @@ rdcarray<CounterResult> VulkanReplay::FetchCountersQC(const rdcarray<GPUCounter>
       {
         // duplicate the result and append
         CounterResult aliased = ret[idx];
-        aliased.eventId = m_pQCActionCallback->m_AliasEvents[i].second;
+        aliased.eventId = aliasEvents[i].second;
         ret.push_back(aliased);
       }
       else

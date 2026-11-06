@@ -939,7 +939,7 @@ private:
   rdcarray<CounterResult> FetchCountersAMD(const rdcarray<GPUCounter> &counters);
 
   // Qualcomm/Adreno counters
-  void FillTimersQC(uint32_t *eventStartID, uint32_t *sampleIndex, rdcarray<uint32_t> *eventIDs);
+  void FillTimersQC(uint32_t *eventStartID, rdcarray<uint32_t> *eventIDs);
 
   rdcarray<CounterResult> FetchCountersQC(const rdcarray<GPUCounter> &counters);
 

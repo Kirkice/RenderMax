@@ -93,6 +93,13 @@ struct TraceFrameBoundary
 {
   uint32_t frameNumber = 0;
   double timeSec = 0.0;
+  // Time the GPU spent executing command batches inside this frame, or negative when it could not
+  // be measured. It is the union of the batches' GPU-counter windows intersected with the frame, so
+  // the GPU is counted once however many contexts were in flight, and it is not the frame interval:
+  // a frame can be bounded by the CPU while the GPU idled, or the reverse. Negative means the trace
+  // carried no usable GPU counters (or this is the last frame, which has no closing boundary),
+  // never zero.
+  double gpuBusySec = -1.0;
   // Empty when the trace itself declared this frame number (an explicit frame index in `args` or a
   // "Frame <n>" slice), so it can be matched against the capture by number. Non-empty when the
   // boundary was derived from an observed per-frame marker: it names that marker, and
@@ -207,6 +214,44 @@ struct ClockDomainAlignment
   QString description;
 };
 
+// What the importer could and could not measure about the GPU's own command stream. Kept on the
+// trace rather than only baked into `warnings` so a machine reader can tell "the GPU never ran"
+// from "the counters were unusable": the two look identical in the frame table's dashes.
+struct TraceGpuStats
+{
+  // Command batches whose submission and retirement were both in the trace.
+  int commandBatches = 0;
+  // Batches placed on the trace clock from their own `ticks`/`start`/`retire` counters, with the
+  // execution window validated against the submit..retire interval.
+  int anchoredBatches = 0;
+  // Batches that carried no counter readings at all, so only the queued-to-retired interval is
+  // known. This includes batches whose submission was not in the trace.
+  int batchesWithoutCounters = 0;
+  // Batches that did carry counters but whose values did not bracket their own interval, so they
+  // were not used. Non-zero here means the 19.2 MHz tick base is wrong for this kernel.
+  int rejectedBatches = 0;
+  // Batches and fence waits still open when the recording ended.
+  int unterminatedBatches = 0;
+  int unterminatedWaits = 0;
+  // Distinct GPU temperature zones that reported a reading.
+  int thermalZones = 0;
+  // GPU power-state changes the driver published (`kgsl_pwr_set_state`), and thermal trip points a
+  // GPU zone crossed. Both are counters rather than rows of their own in the trace summary: what they
+  // answer is "was this event type present at all", which is what makes an absent GPU power row a
+  // statement about the kernel instead of about the importer.
+  int powerStateChanges = 0;
+  int thermalTrips = 0;
+  // `bw_hwmon_meas` records for bus masters that are not the GPU. Kept so a trace that carries
+  // bandwidth data can say so even when none of it belongs to the GPU.
+  int bandwidthOtherDevices = 0;
+  // Fixed base the Adreno counters are divided by (the value SDP uses). Reported so the arithmetic
+  // is checkable from outside instead of being an unexplained constant.
+  double tickHz = 19.2e6;
+
+  // True when at least one batch's GPU-side execution window is known.
+  bool HasExecutionWindows() const { return anchoredBatches > 0; }
+};
+
 // The outcome of importing a trace. `valid` is true only when at least one series, one span or one
 // frame boundary was parsed. `warnings` records everything that was missing, ambiguous or dropped,
 // rather than silently discarding it.
@@ -220,6 +265,18 @@ struct SystemTrace
   bool sharedClock = false;
   QVector<TraceSeries> series;
   QVector<TraceFrameBoundary> frameBoundaries;
+  // GPU command-stream accounting, as above.
+  TraceGpuStats gpuStats;
+  // Each command batch's GPU-side execution window (begin, end), on the trace clock, unordered.
+  // Only batches whose counters were validated contribute: a wall-clock queued-to-retired interval
+  // would put a draw "inside" a batch that was merely queued at the same time. Kept separately from
+  // the drawn spans because it is the timing evidence a correlation reads, not display data.
+  QVector<QPair<double, double>> gpuExecWindows;
+  // Event types the importer met but has no model for, with how many times each occurred, sorted by
+  // name. Exposed in full rather than only as the truncated summary sentence in `warnings`: a trace
+  // full of `kgsl/...` events this build does not parse looks exactly like a trace that recorded
+  // nothing, and that difference has to be readable from outside.
+  QVector<QPair<QString, int>> unmodelledEvents;
   // The lane structure of the trace, in display order: counter lanes first, then process/thread
   // lanes. Empty when the source carried only counters.
   QVector<TraceTrack> tracks;

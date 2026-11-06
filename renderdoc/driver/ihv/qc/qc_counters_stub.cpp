@@ -80,6 +80,13 @@ void QCCounters::EndSample()
 {
 }
 
+bool QCCounters::ReuseSample(uint32_t eventId)
+{
+  // No counter session exists on this platform, so nothing is ever cached and every caller has to
+  // take its normal path.
+  return false;
+}
+
 rdcarray<CounterResult> QCCounters::GetCounterData(const rdcarray<uint32_t> &eventIDs,
                                                    const rdcarray<GPUCounter> &counters)
 {

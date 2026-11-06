@@ -597,6 +597,16 @@ void GLReplay::FillTimersQC(uint32_t *eventStartID, uint32_t *sampleIndex,
 
     eventIDs->push_back(a.eventId);
 
+    // A previous fetch in this session may already have measured this event with the counters the
+    // current selection reads. Replaying it again would cost another full GPU sync to recompute
+    // values that are already known, so the cached sample is used instead. The draw still runs as
+    // part of the next sampled event's replay, so the replayed state stays correct.
+    if(m_pQCCounters->ReuseSample(a.eventId))
+    {
+      ++*sampleIndex;
+      continue;
+    }
+
     m_pDriver->ReplayLog(*eventStartID, a.eventId, eReplay_WithoutDraw);
 
     m_pQCCounters->BeginSample(a.eventId);

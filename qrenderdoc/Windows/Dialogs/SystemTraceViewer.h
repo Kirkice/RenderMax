@@ -183,6 +183,10 @@ private:
   QLineEdit *m_TracePath = NULL;
   QListWidget *m_Series = NULL;
   QTableWidget *m_Frames = NULL;
+  // Explains what the Frames table's times are and are not, because the two answers a user wants
+  // from it - "how long did this frame take" and "how long did the GPU spend on it" - come from
+  // different sources and differ by more than a rounding error.
+  QLabel *m_FramesCaption = NULL;
   QTableWidget *m_ThreadTime = NULL;
   QCheckBox *m_ThreadTimeFrame = NULL;
   QLabel *m_ThreadTimeCaption = NULL;

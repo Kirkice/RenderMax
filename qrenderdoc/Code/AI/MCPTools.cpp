@@ -979,6 +979,33 @@ int RegisterCoreTools(ToolRegistry &registry, QueryAdapter &adapter)
 
   {
     QJsonObject props;
+    AddSchemaProperty(props, "filePath", "string",
+                      "Absolute path to an imported system trace (systrace text or JSON-lines).");
+    AddSchemaProperty(props, "maxActions", "integer",
+                      "Maximum actions to return (default 400). Counts always cover every action.");
+
+    registry.Add(
+        ToolDefinition{QStringLiteral("renderdoc_correlateSystemTrace"),
+                       QStringLiteral("Correlate System Trace"),
+                       QStringLiteral("Place the currently shown frame's actions on an imported "
+                                      "system trace's timeline and report which GPU command batch "
+                                      "each one falls inside. The clock alignment is only produced "
+                                      "from frame boundaries that actually matched, and the answer "
+                                      "states the basis: action positions are a prefix sum of "
+                                      "EventGPUDuration inside the frame, and batch membership is a "
+                                      "containment test rather than proof of what the batch drew. "
+                                      "Requires replay."),
+                       ToolEffects::ReadOnly,
+                       ToolRequirements::LoadedCapture | ToolRequirements::ReplayController,
+                       MakeSchema(props)},
+        [&adapter](const QJsonObject &args, CallContext &call) -> ToolResult {
+          return adapter.CorrelateSystemTrace(ArgStr(args, "filePath"),
+                                              int(ArgU32(args, "maxActions", 400)), call);
+        });
+  }
+
+  {
+    QJsonObject props;
     AddSchemaProperty(props, "eventId", "integer", "The event id to analyse.");
     AddSchemaProperty(props, "includeShaderInfo", "boolean",
                       "Include the per-stage shader reflection summary (default false).");
@@ -1990,6 +2017,51 @@ int RegisterCoreTools(ToolRegistry &registry, QueryAdapter &adapter)
   // ---------------------------------------------------------------------------
   // Pipeline
   // ---------------------------------------------------------------------------
+
+  {
+    QJsonObject props;
+    AddSchemaProperty(props, "counters", "array",
+                      "Counter names to fetch, e.g. \"Event GPUDuration\" or \"Shaders Busy\". "
+                      "Exact case-insensitive match wins, otherwise every name containing the text.");
+    AddSchemaProperty(props, "counterIds", "array",
+                      "Counter ids from renderdoc_enumerateCounters, for callers that already have "
+                      "them.");
+    AddSchemaProperty(props, "maxSamplesPerCounter", "integer",
+                      "Samples to return per counter, lowest event id first (default 200).");
+
+    registry.Add(
+        ToolDefinition{QStringLiteral("renderdoc_fetchCounters"),
+                       QStringLiteral("Fetch Counters"),
+                       QStringLiteral("Fetch any performance counter the capture exposes, by name or "
+                                      "id, and return its per-event samples plus min/max/mean. Any "
+                                      "counter the replay driver enumerates works here, not only "
+                                      "EventGPUDuration. A counter that reads zero on every event "
+                                      "is flagged allZero, which is different from an idle GPU. The "
+                                      "list is whatever the driver that is replaying exposes, so an "
+                                      "Android capture opened locally shows only desktop counters: "
+                                      "connect remote replay and open the capture on the device to "
+                                      "see the Adreno counters. Requires replay."),
+                       ToolEffects::ReadOnly,
+                       ToolRequirements::LoadedCapture | ToolRequirements::ReplayController,
+                       MakeSchema(props)},
+        [&adapter](const QJsonObject &args, CallContext &call) -> ToolResult {
+          QStringList names;
+          for(const QJsonValue &value : args.value(QStringLiteral("counters")).toArray())
+          {
+            if(value.isString())
+              names << value.toString();
+          }
+          QVector<uint32_t> ids;
+          for(const QJsonValue &value : args.value(QStringLiteral("counterIds")).toArray())
+          {
+            const double id = value.toDouble(-1.0);
+            if(id >= 0.0)
+              ids.push_back(uint32_t(id));
+          }
+          return adapter.FetchCounters(names, ids,
+                                       int(ArgU32(args, "maxSamplesPerCounter", 200)), call);
+        });
+  }
 
   {
     QJsonObject props;

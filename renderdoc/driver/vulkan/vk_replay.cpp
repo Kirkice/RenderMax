@@ -281,7 +281,7 @@ bool VulkanReplay::BeginSceneReplay(uint32_t anchor, uint32_t end,
             if(dynamicIndex >= bound.offsets.size()) continue;
             offset += bound.offsets[dynamicIndex]; draw.dynamicIndex = dynamicIndex;
           }
-          GetBufferData(slot.resource, offset, RDCMIN(uint64_t(slot.GetRange()), 4096ULL), draw.bytes);
+          GetBufferData(slot.resource, offset, RDCMIN<uint64_t>(uint64_t(slot.GetRange()), uint64_t(4096)), draw.bytes);
           if(draw.bytes.size() < 64) continue;
           float matrix[16]; memcpy(matrix, draw.bytes.data(), 64);
           // Stripped Unity SPIR-V stores the camera VP as the first vec4[4]

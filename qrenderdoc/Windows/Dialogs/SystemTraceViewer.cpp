@@ -2873,11 +2873,36 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   });
 
   m_Frames = new QTableWidget(this);
-  m_Frames->setColumnCount(2);
-  m_Frames->setHorizontalHeaderLabels({tr("Frame"), tr("Trace start")});
+  m_Frames->setColumnCount(3);
+  m_Frames->setHorizontalHeaderLabels({tr("Frame"), tr("Trace start"), tr("GPU busy")});
   m_Frames->horizontalHeader()->setStretchLastSection(true);
   m_Frames->verticalHeader()->setVisible(false);
   m_Frames->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  m_Frames->horizontalHeaderItem(1)->setToolTip(
+      tr("When the marker that starts this frame was written, in the trace's own clock (seconds since "
+         "device boot). It is not a frame duration."));
+  m_Frames->horizontalHeaderItem(2)->setToolTip(
+      tr("GPU execution time inside this frame, added up from the kernel's own GPU counters and "
+         "counted once however many contexts were in flight. Not the interval to the next frame."));
+
+  // The Frames tab said "GPU busy" with nothing anywhere explaining where the number comes from, and
+  // the obvious reading of a table of frame boundaries - subtract two rows and call it the frame time
+  // - is exactly the inference this panel must not invite. The distance between two derived
+  // boundaries is the spacing of the markers, which is a CPU and vsync artefact; the GPU may have
+  // finished in a fraction of it or still be running when the next marker fires. So both facts are
+  // stated here rather than left to be rediscovered.
+  QWidget *framesPane = new QWidget(this);
+  m_FramesCaption = new QLabel(
+      tr("Trace start is the frame's marker time; the interval between two rows is the marker "
+         "spacing, not GPU time. GPU busy is measured only from the kernel's GPU counters, so a dash "
+         "means the trace could not measure it, and a frame that ran no GPU work at all shows 0."),
+      framesPane);
+  m_FramesCaption->setWordWrap(true);
+
+  QVBoxLayout *framesLayout = new QVBoxLayout(framesPane);
+  framesLayout->setContentsMargins(0, 0, 0, 0);
+  framesLayout->addWidget(m_FramesCaption);
+  framesLayout->addWidget(m_Frames, 1);
 
   // Per-thread scheduler-state totals, the equivalent of SDP's ThreadTime view. These values are
   // computed from exactly the running/runnable/sleeping spans that the timeline draws, so selecting
@@ -2952,7 +2977,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
 
   QTabWidget *sideTabs = new QTabWidget(this);
   sideTabs->addTab(m_Series, tr("Tracks"));
-  sideTabs->addTab(m_Frames, tr("Frames"));
+  sideTabs->addTab(framesPane, tr("Frames"));
   sideTabs->addTab(threadTimePane, tr("Thread Time"));
   sideTabs->addTab(elementPane, tr("Element"));
   sideTabs->addTab(m_Warnings, tr("Warnings"));
@@ -3246,8 +3271,18 @@ void SystemTraceViewer::applyImportedTrace(const QString &path,
     QTableWidgetItem *frameItem = new QTableWidgetItem(QString::number(b.frameNumber));
     QTableWidgetItem *timeItem = new QTableWidgetItem(FormatSeconds(b.timeSec));
 
+    // How much of the frame the GPU spent executing, measured from the kernel's own GPU counters.
+    // Shown as a duration and not as a percentage: the frame's length is the interval to the next
+    // boundary, but a frame usually ends when the CPU presents rather than when the GPU finishes, so
+    // a percentage of it would compare the GPU against something it is not bounded by. A dash means
+    // the trace carried no usable GPU counters, which is a different statement from zero.
+    QTableWidgetItem *gpuItem =
+        new QTableWidgetItem(b.gpuBusySec < 0.0 ? tr("-")
+                                               : FormatSeconds(b.gpuBusySec));
+
     m_Frames->setItem(i, 0, frameItem);
     m_Frames->setItem(i, 1, timeItem);
+    m_Frames->setItem(i, 2, gpuItem);
   }
 
   updateThreadTime();

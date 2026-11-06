@@ -32,15 +32,31 @@
 
 // Qualcomm / Adreno (GGPM) hardware counter backend.
 //
-// This backend is the RenderDoc-side, original implementation of the counter
-// behaviour observed on device in Qualcomm's Snapdragon Profiler (see the
-// integration planning document for the evidence trail). It does NOT link,
-// bundle or redistribute any Qualcomm binary - the device-side access goes
-// through the Adreno user-mode driver's own `gsl_perfcounter_*` entry points,
-// which are resolved at runtime with dlopen/dlsym on the device.
+// This backend is the RenderDoc-side, original implementation of the counter behaviour that
+// Qualcomm's Snapdragon Profiler exposes as GGPM (the "Adreno GPU Metrics" group of counters).
+// It does NOT link, bundle or redistribute any Qualcomm binary.
 //
-// On non-Android builds no counters are available and the stub implementation
-// is compiled instead (qc_counters_stub.cpp), mirroring the ARM backend.
+// Two device mechanisms were evaluated for reading the counters, and the choice matters:
+//
+//   * `GL_AMD_performance_monitor` (the Adreno driver's own perf-monitor extension) is what
+//     actually returns values. The extension string is unreliable - on an Adreno 610 it reports
+//     zero counters while the entry points are present and sample real data - so availability is
+//     decided by resolving the entry points, not by looking at GL_EXTENSIONS.
+//   * `libgsl.so`'s `gsl_perfcounter_*` accepts a select for every (group, id) pair but does not
+//     write values back: the 4-argument read returns 0 with untouched memory, the 5-argument form
+//     crashes, and the batch read leaves its value fields unmodified. Those entry points are
+//     therefore used only to verify that a pair is addressable, never to read.
+//
+// The counters the profiler shows ("% Shaders Busy", "% Texture Pipes Busy", ...) are derived:
+// each one is a formula over raw hardware block counters, computed by libGGPM.so. The raw
+// counters and formulas live in qc_ggpm_metrics.h, transcribed from the decompiled library; the
+// per-block counter name tables live in qc_ggpm_names.h, generated from the plugin's own name
+// arrays. This file is the plumbing: it enumerates the driver's perf-monitor catalog, resolves the
+// raw counters by name, samples them in as few passes as the per-block active limits allow, and
+// evaluates the formulas over the sampled values.
+//
+// On non-Android builds no counters are available and the stub implementation is compiled instead
+// (qc_counters_stub.cpp), mirroring the ARM backend.
 
 class QCCounters
 {
@@ -54,8 +70,8 @@ public:
   QCCounters();
   ~QCCounters();
 
-  // establish the device-side counter session. `renderer` is the GL_RENDERER /
-  // device name string used to resolve the Adreno generation (A6xx/A7xx/A8xx).
+  // Establish the device-side counter session. `renderer` is the GL_RENDERER string, used to
+  // resolve the Adreno part number and with it the per-device constants the formulas need.
   bool Init(ApiType api, void *context, const char *renderer);
   rdcarray<GPUCounter> GetPublicCounterIds();
   CounterDescription GetCounterDescription(GPUCounter index);
@@ -71,122 +87,157 @@ public:
   void BeginSample(uint32_t eventId);
   void EndSample();
 
+  // True when every counter the current selection reads is already cached for this event, in which
+  // case the sample is copied into this fetch's results and the caller can skip replaying it.
+  // Measuring one event costs a full GPU sync on the device, which dominates the cost of a fetch,
+  // so this is what makes a second fetch over the same frame cheap instead of a full re-measure.
+  bool ReuseSample(uint32_t eventId);
+
   rdcarray<CounterResult> GetCounterData(const rdcarray<uint32_t> &eventIDs,
                                          const rdcarray<GPUCounter> &counters);
 
 private:
 #if ENABLED(RDOC_ANDROID)
-  // The sentinel that marks "this counter's device (id, group) pair is unknown".
-  // Declared here so QCBuiltCounter and its consumers share one definition.
-  static const uint32_t kUnknownGslId = 0xffffffffu;
-
-  struct GslApi
+  // The AMD_performance_monitor entry points, resolved through eglGetProcAddress. Declared with
+  // plain C types so this header never has to include a GL header.
+  struct PerfMonApi
   {
     void *module;
-
-    // [观测] Resolved gsl_* entry points. The parameter layouts were recovered by
-    // disassembling the call sites in the device-side GGPM plugin (pluginGPU-GGPM,
-    // AArch64) - see the PFN_gsl_* types in qc_counters.cpp and planning document
-    // section 8.9.1. Each slot is cast to the matching PFN type at the call site.
-    //
-    // `select_ex` is the newer 7-argument select ABI; the plugin picks between the
-    // two forms using a driver-reported capability byte. We resolve both and prefer
-    // `select_ex` when libgsl.so exports it - that preference is [推断] because the
-    // plugin's own predicate could not be reproduced statically.
-    void *select;             // 6-arg select (writes a 32-bit selection id)
-    void *select_ex;          // 7-arg select (writes a 64-bit value)
-    void *query_selections;   // two-call selection enumeration
-    void *read;               // read one (id, group) counter value
-    void *deselect;           // void, third argument is a constant 0
-
-    // [观测] Session entry points used to obtain the gsl device/context handles.
-    // The plugin opens its own device + context rather than reusing the API's (see
-    // planning document section 8.9.1); we mirror that lifecycle.
-    void *library_open;
-    void *library_close;
-    void *library_version;
-    void *device_open;
-    void *device_close;
-    void *context_create;
-    void *context_destroy;
+    void *gen_monitors;
+    void *delete_monitors;
+    void *get_groups;
+    void *get_counters;
+    void *get_group_string;
+    void *get_counter_string;
+    void *get_counter_info;
+    void *select_counters;
+    void *begin;
+    void *end;
+    void *get_counter_data;
+    void *flush;
   };
 
-  bool LoadGSL();
+  // One counter in the driver's own catalog, as enumerated from GL_AMD_performance_monitor.
+  struct DeviceCounter
+  {
+    rdcarray<char> name;
+    uint32_t group = 0;
+    uint32_t counter = 0;
+  };
 
-  // Issue a select for a pass, using whichever select ABI the device exposes.
-  // `ids` and `groups` are parallel, `count`-long arrays.
-  int SelectCounters(const rdcarray<uint32_t> &ids, const rdcarray<uint32_t> &groups);
+  struct DeviceGroup
+  {
+    rdcarray<char> name;
+    uint32_t group = 0;
+    uint32_t maxActive = 0;
+    rdcarray<DeviceCounter> counters;
+  };
 
-  uint32_t ResolveAdrenoGen(const char *renderer) const;
-  void BuildCatalog(uint32_t adrenoGen);
+  // A raw counter the formulas read, resolved to the driver's addressing of it. `index` is the
+  // position in kQCGGPMNeeds; several metrics read the same entry, which is why the needs table
+  // rather than the metric table decides what is selected on the device.
+  struct NeedBinding
+  {
+    uint32_t index = 0;
+    uint32_t group = 0;
+    uint32_t counter = 0;
+    uint32_t maxActive = 0;
+    bool resolved = false;
+  };
 
-  // A catalog entry resolved to its stable public identity. The public GPUCounter
-  // ID is derived from a hash of the PERF_* name, so it is identical on every
-  // Adreno generation and does not depend on which counters happen to be available
-  // on a given device - see pitfall P-3.
-  struct QCBuiltCounter
+  // A metric that is available on this device: a public GPUCounter and the metric it evaluates.
+  struct BuiltMetric
   {
     GPUCounter id;
-    const char *perfName;
-
-    // [未知] The device-resident (id, group) pair that gsl_perfcounter_select and
-    // gsl_perfcounter_read actually address. A counter is identified on device by
-    // that pair, NOT by our PERF_* name, so the mapping genuinely requires the
-    // device's own libgsl.so catalog. That catalog is not part of the host SDP
-    // distribution, so until a pair has been verified on a real device this holds
-    // kUnknownGslId and passes containing only such counters issue no select at all
-    // rather than a guess. See kQCVerifiedGslPairs in qc_counters.cpp.
-    //
-    // kUnknownGslId is a static const member of QCCounters; that is safe here because
-    // it is only ever compared and assigned by value, never address-taken, so it is
-    // never odr-used and needs no out-of-line definition.
-    uint32_t gslId = kUnknownGslId;
-    uint32_t gslGroup = 0;
-
-    // Whether this counter can be addressed on the device at all. The three call
-    // sites that select, deselect and read all need exactly this question answered;
-    // keeping it beside the sentinel means they cannot drift apart.
-    bool HasDevicePair() const { return gslId != kUnknownGslId; }
+    uint32_t metric = 0;
+    bool available = false;
   };
 
-  // Deterministically map a PERF_* name into the Qualcomm ID range.
-  static GPUCounter StableIdFromPerfName(const char *perfName);
+  bool LoadPerfMon();
+  bool CreateGLContext();
+  void DestroyGLContext();
+  void MakeCurrent();
+  void EnumerateCatalog();
+  void ResolveNeeds();
+  void BuildCatalog();
+  void BuildPasses();
+  void SampleDeviceClock();
 
-  // Device index (into m_CounterDescriptions / m_CounterIds) for a public ID, or -1
-  // if the ID does not correspond to a counter available on this device.
+  static const DeviceCounter *FindDeviceCounter(const rdcarray<DeviceGroup> &groups,
+                                                const char *name, uint32_t *maxActive);
+
+  // Deterministically map a metric key into the Qualcomm ID range, so a counter's public ID is
+  // identical on every Adreno generation and does not depend on what the device happens to expose.
+  static GPUCounter StableIdFromKey(const char *key);
+
   int32_t IndexForId(GPUCounter counter) const;
 
-  // [推断] Maximum number of counters that can be selected in a single hardware
-  // pass. gsl_perfcounter_query_selections() reports the device's currently
-  // available selections, and we use the size of that set as the per-pass bound;
-  // the exact relation between the two is not proven by disassembly, so a
-  // conservative default is kept when the query is unavailable (pitfall P-5).
-  uint32_t m_MaxPerPass = 4;
+  bool ReadResults(const rdcarray<uint32_t> &needIndices, const uint32_t *words, size_t wordCount,
+                   double *out);
 
-  GslApi m_Gsl = {};
+  PerfMonApi m_Perf = {};
 
-  // [观测] gsl device/context handles are 32-bit integers, NOT pointers: the
-  // plugin stores them as `int` at object offsets +0xc (device) and +0x10
-  // (context) and treats -1 as "no live context". We open our own session in
-  // Init() and close it in the destructor.
-  int32_t m_GslDevice = -1;
-  int32_t m_GslContext = -1;
-  bool m_UseSelectEx = false;
-  uint32_t m_LibraryVersion = 0;
+  // The driver's catalog, kept both for name resolution and for the diagnostics logged in Init().
+  rdcarray<DeviceGroup> m_DeviceGroups;
 
-  ApiType m_Api;
-  // The API-level context passed to Init(), retained for diagnostics only - it is
-  // NOT a gsl handle and is never passed to a gsl_* call.
+  // kQCGGPMNeeds, resolved to device addressing. index order matches the needs table.
+  rdcarray<NeedBinding> m_Needs;
+
+  // Pass layout: each element is the set of need indices sampled in one pass. A pass exists
+  // because a hardware block can only have so many counters active at once (the driver's
+  // per-group maxActive), not because the caller asked for several passes.
+  rdcarray<rdcarray<uint32_t>> m_Passes;
+
+  ApiType m_Api = ApiType::Ogl;
   void *m_ApiContext = NULL;
 
-  uint32_t m_AdrenoGen = 0;
-  uint32_t m_EventId = 0;
-  uint32_t m_passIndex = 0;
+  // When the counters are sampled from a Vulkan replay the perf-monitor extension still needs a
+  // current GL context, so one is created inside the replay process purely to issue the sampling
+  // calls. The counters themselves are hardware block activity, so the context that issues the
+  // begin/end markers does not have to be the one the work was submitted from.
+  bool m_OwnContext = false;
+  void *m_EglDisplay = NULL;
+  void *m_EglContext = NULL;
+  void *m_EglSurface = NULL;
+  void *m_EglModule = NULL;
+
+  // [观测] The perf-monitor handle is a GLuint allocated by the driver, 0 when no monitor exists.
+  uint32_t m_Monitor = 0;
+  uint32_t m_OpenPass = 0;
+  bool m_Sampling = false;
+  uint32_t m_CurrentEvent = 0;
+  double m_SampleStartSec = 0.0;
+
+  // Derived from the renderer string; 0 when the part is not in the profiler's device table, in
+  // which case every formula that scales by a pipe count reports no value rather than a guess.
+  uint32_t m_AdrenoPart = 0;
+  double m_MaxClockHz = 0.0;
 
   rdcarray<uint32_t> m_EnabledCounters;
-  rdcarray<CounterDescription> m_CounterDescriptions;
   rdcarray<GPUCounter> m_CounterIds;
-  rdcarray<QCBuiltCounter> m_Built;
-  std::map<uint32_t, std::map<uint32_t, CounterValue>> m_CounterData;
+  rdcarray<BuiltMetric> m_Built;
+
+  // Per event: the raw counter values in kQCGGPMNeeds order, and the wall duration of the window
+  // the counters cover. A value of -1.0 means the counter was not measured in that window, which
+  // is what makes an unmeasurable metric distinguishable from a real zero.
+  struct EventSample
+  {
+    rdcarray<double> raw;
+    double dt = 0.0;
+    // One flag per entry of kQCGGPMNeeds: set once a pass has actually tried to measure that raw
+    // counter for this event, whether or not the driver returned a record for it. "Tried" and
+    // "returned a value" are different things - the driver drops records for counters that exceed
+    // a block's active limit - and only "tried" decides whether a later fetch may reuse the event.
+    rdcarray<char> attempted;
+  };
+
+  std::map<uint32_t, EventSample> m_Samples;
+
+  // Samples are retained for the lifetime of the replay session, keyed by event ID. Replaying an
+  // event ID always reproduces the same state inside one capture, so a counter measured once for an
+  // event stays valid for every later fetch - including fetches of a different counter selection.
+  // A value of -1.0 still means "not measured", which is what keeps a counter that a pass did not
+  // cover distinguishable from a counter that was measured as zero.
+  std::map<uint32_t, EventSample> m_SampleCache;
 #endif
 };

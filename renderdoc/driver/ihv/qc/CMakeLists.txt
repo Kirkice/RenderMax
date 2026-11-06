@@ -1,5 +1,7 @@
 set(sources
     qc_counters.h
+    qc_ggpm_names.h
+    qc_ggpm_metrics.h
 )
 
 if(ANDROID)
