@@ -49,6 +49,8 @@ enum
   GL_INT = 0x1404,
   GL_UNSIGNED_INT = 0x1405,
   GL_FLOAT = 0x1406,
+  GL_UNSIGNED_INT64_AMD = 0x8BC2,
+  GL_PERCENTAGE_AMD = 0x8BC3,
 };
 
 typedef void (*PFN_glGenPerfMonitorsAMD)(int n, uint32_t *monitors);
@@ -435,6 +437,9 @@ void QCCounters::EnumerateCatalog()
   PFN_glGetPerfMonitorCounterStringAMD getCounterString =
       (PFN_glGetPerfMonitorCounterStringAMD)m_Perf.get_counter_string;
 
+  PFN_glGetPerfMonitorCounterInfoAMD getCounterInfo =
+      (PFN_glGetPerfMonitorCounterInfoAMD)m_Perf.get_counter_info;
+
   int32_t groupCount = 0;
   getGroups(&groupCount, 0, NULL);
 
@@ -475,6 +480,7 @@ void QCCounters::EnumerateCatalog()
         DeviceCounter counter;
         counter.group = group.group;
         counter.counter = counterIds[c];
+        getCounterInfo(group.group, counter.counter, GL_COUNTER_TYPE_AMD, &counter.type);
 
         int32_t nameLength = 0;
         getCounterString(group.group, counter.counter, 0, &nameLength, NULL);
@@ -538,7 +544,11 @@ void QCCounters::ResolveNeeds()
       binding.group = counter->group;
       binding.counter = counter->counter;
       binding.maxActive = maxActive;
-      binding.resolved = true;
+      binding.type = counter->type;
+      binding.resolved = binding.type == GL_UNSIGNED_INT || binding.type == GL_UNSIGNED_INT64_AMD ||
+                         binding.type == GL_FLOAT || binding.type == GL_PERCENTAGE_AMD;
+      if(!binding.resolved)
+        unresolved++;
     }
     else
     {
@@ -990,127 +1000,65 @@ void QCCounters::EndSample()
 bool QCCounters::ReadResults(const rdcarray<uint32_t> &needIndices, const uint32_t *words,
                              size_t wordCount, double *out)
 {
-  // Two result layouts exist in the wild and they cannot be told apart by the extension string:
-  //
-  //   * the Adreno driver on this part emits a fixed four-word record per counter,
-  //     {group, counter, value, unused}. It is NOT the layout the extension specifies.
-  //   * the specified layout is {group, counter, numInstances, type} followed by numInstances
-  //     values.
-  //
-  // Both layouts carry the group and counter of every record, so the values are read by matching
-  // those against the selection instead of by position. A layout whose records do not map onto
-  // the selection is rejected outright rather than producing plausible-looking garbage.
-  struct Wanted
-  {
-    uint32_t group;
-    uint32_t counter;
-    uint32_t need;
-  };
-
-  rdcarray<Wanted> wanted;
-  wanted.reserve(needIndices.size());
-  for(uint32_t needIndex : needIndices)
-  {
-    Wanted w;
-    w.group = m_Needs[needIndex].group;
-    w.counter = m_Needs[needIndex].counter;
-    w.need = needIndex;
-    wanted.push_back(w);
-  }
-
-  bool any = false;
-
-  // Layout 1: 4 words per record {group, counter, value, unused}.
-  //
-  // The count is not required to match the selection exactly - this driver drops a few records
-  // when a block hits its active-counter limit - but every record that is present must map onto a
-  // selected counter and must carry the zero fourth word, which is what separates this layout from
-  // the specified one below.
-  if((wordCount % 4) == 0 && wordCount >= 4)
-  {
-    bool matches = true;
-
-    for(size_t i = 0; i < wordCount / 4 && matches; i++)
-    {
-      if(words[i * 4 + 3] != 0)
-      {
-        matches = false;
-        break;
-      }
-
-      bool found = false;
-      for(const Wanted &w : wanted)
-      {
-        if(w.group == words[i * 4 + 0] && w.counter == words[i * 4 + 1])
-        {
-          found = true;
-          break;
-        }
-      }
-
-      if(!found)
-        matches = false;
-    }
-
-    if(matches)
-    {
-      for(size_t i = 0; i < wordCount / 4; i++)
-      {
-        for(const Wanted &w : wanted)
-        {
-          if(w.group == words[i * 4 + 0] && w.counter == words[i * 4 + 1])
-          {
-            out[w.need] = double(words[i * 4 + 2]);
-            any = true;
-            break;
-          }
-        }
-      }
-
-      return any;
-    }
-  }
-
-  // Layout 2: the layout the extension actually specifies.
+  // AMD_performance_monitor records are {group, counter, value}; value occupies one or two
+  // words according to GL_COUNTER_TYPE_AMD, not an inline type/instance header. In particular
+  // {group, counter, low, high} is the standard uint64 representation, even when high is zero.
+  // Validate the entire buffer before publishing anything, so truncated or unknown records
+  // cannot leave a partially valid sample behind.
+  rdcarray<uint32_t> decodedNeeds;
+  rdcarray<double> decodedValues;
   size_t offset = 0;
-  while(offset + 4 <= wordCount)
+  while(offset < wordCount)
   {
-    const uint32_t group = words[offset + 0];
-    const uint32_t counter = words[offset + 1];
-    const uint32_t instances = words[offset + 2];
-    const uint32_t type = words[offset + 3];
+    if(wordCount - offset < 3)
+      return false;
 
-    offset += 4;
-
-    if(instances == 0 || offset + instances > wordCount)
-      break;
-
-    // Guard against reading a buffer in the wrong layout: the specified layout always records a
-    // GL enum for the type, and a value-shaped word would not be one.
-    if(type != GL_FLOAT && type != GL_UNSIGNED_INT && type != GL_UNSIGNED_BYTE && type != GL_INT)
-      break;
-
-    for(const Wanted &w : wanted)
+    uint32_t need = ~0U;
+    for(uint32_t index : needIndices)
     {
-      if(w.group == group && w.counter == counter)
+      if(m_Needs[index].group == words[offset] &&
+         m_Needs[index].counter == words[offset + 1])
       {
-        // Only the first instance is used: every counter selected here is a scalar block counter.
-        double value = 0.0;
-        if(type == GL_FLOAT)
-          memcpy(&value, &words[offset], sizeof(float));
-        else
-          value = double(words[offset]);
-
-        out[w.need] = value;
-        any = true;
+        need = index;
         break;
       }
     }
+    if(need == ~0U || std::find(decodedNeeds.begin(), decodedNeeds.end(), need) != decodedNeeds.end())
+      return false;
 
-    offset += instances;
+    const uint32_t type = m_Needs[need].type;
+    offset += 2;
+    double value = 0.0;
+    if(type == GL_UNSIGNED_INT64_AMD)
+    {
+      if(wordCount - offset < 2)
+        return false;
+      uint64_t raw = 0;
+      memcpy(&raw, &words[offset], sizeof(raw));
+      value = double(raw);
+      offset += 2;
+    }
+    else if(type == GL_FLOAT || type == GL_PERCENTAGE_AMD)
+    {
+      float raw = 0.0f;
+      memcpy(&raw, &words[offset++], sizeof(raw));
+      value = double(raw);
+    }
+    else if(type == GL_UNSIGNED_INT)
+    {
+      value = double(words[offset++]);
+    }
+    else
+    {
+      return false;
+    }
+    decodedNeeds.push_back(need);
+    decodedValues.push_back(value);
   }
 
-  return any;
+  for(size_t i = 0; i < decodedNeeds.size(); i++)
+    out[decodedNeeds[i]] = decodedValues[i];
+  return !decodedNeeds.empty();
 }
 
 rdcarray<CounterResult> QCCounters::GetCounterData(const rdcarray<uint32_t> &eventIDs,

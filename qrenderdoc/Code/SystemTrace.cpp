@@ -572,6 +572,9 @@ struct RawLane
 // `thread_name` / `process_name` records routinely follow the spans that they caption.
 struct ChromeTraceBuilder
 {
+  QVector<SystemTrace::Wakeup> wakeups;
+  QVector<SystemTrace::Batch> batches;
+  QMap<QString, int> eventCounts;
   QVector<TraceSeries> series;
   QVector<TraceFrameBoundary> frames;
   // [begin, end) in seconds of every command batch whose GPU execution window was reconstructed
@@ -1533,7 +1536,11 @@ void ConsumeWakeup(const SystraceRecord &rec, ChromeTraceBuilder &builder, Systr
   CloseSleepingSpan(builder, state, tid, rec.timeSec);
 
   if(!state.runnableSince.contains(tid))
+  {
+    SystemTrace::Wakeup wake; wake.tid = tid; wake.cpu = targetCpu; wake.timeSec = rec.timeSec;
+    builder.wakeups.append(wake);
     state.runnableSince.insert(tid, rec.timeSec);
+  }
 
   EnqueueRunnable(builder, state, tid, targetCpu, rec.timeSec);
 }
@@ -1971,6 +1978,12 @@ void ConsumeGpuCmdbatchRetired(const SystraceRecord &rec, ChromeTraceBuilder &bu
                              .arg((batch.span.endSec - batch.span.beginSec) * 1000.0, 0, 'f', 3);
   }
 
+  SystemTrace::Batch evidence;
+  evidence.context = match.captured(1); evidence.timestamp = match.captured(2);
+  evidence.submitSec = known ? batch.submitSec : -1.0; evidence.retireSec = rec.timeSec;
+  evidence.anchored = anchored;
+  if(anchored) { evidence.beginSec = batch.span.beginSec; evidence.endSec = batch.span.endSec; }
+  builder.batches.append(evidence);
   builder.gpuCmdLane.spans.push_back(batch.span);
   builder.stats.spans++;
   builder.stats.systraceSpans++;
@@ -2174,7 +2187,8 @@ void ConsumeBandwidthMeas(const SystraceRecord &rec, ChromeTraceBuilder &builder
 void ConsumeDevfreqPower(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
 {
   static const QRegularExpression typePattern(QStringLiteral("type=([^ ]+)"));
-  static const QRegularExpression powerPattern(QStringLiteral("power=(\\d+)"));
+  static const QRegularExpression powerPattern(
+      QStringLiteral("(?:^|\\s)power=(\\d+)(?=\\s|$)"));
 
   const QRegularExpressionMatch type = typePattern.match(rec.payload);
   const QRegularExpressionMatch power = powerPattern.match(rec.payload);
@@ -2187,12 +2201,9 @@ void ConsumeDevfreqPower(const SystraceRecord &rec, ChromeTraceBuilder &builder,
 
   const QString device = type.captured(1);
   if(!IsGpuDeviceName(device))
-  {
-    builder.stats.bandwidthOtherDevices++;
     return;
-  }
 
-  AddSystraceSample(builder, state, QObject::tr("%1 Power").arg(device), QStringLiteral("mW"),
+  AddSystraceSample(builder, state, QObject::tr("%1 Estimated power").arg(device), QStringLiteral("mW"),
                     false, QObject::tr("Thermal"), -1, rec.timeSec, power.captured(1).toDouble());
 }
 
@@ -2202,8 +2213,12 @@ void ConsumeDevfreqPower(const SystraceRecord &rec, ChromeTraceBuilder &builder,
 // submitted - so the state is drawn as an interval rather than a point.
 void ConsumeGpuPwrState(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
 {
-  static const QRegularExpression namePattern(QStringLiteral("d_name=([^ ]+)"));
-  static const QRegularExpression statePattern(QStringLiteral("state=([A-Za-z_]+)"));
+  // traceconv prints the raw device_name and numeric state, whereas the kernel print format
+  // uses d_name and a symbolic state. Preserve numeric states without guessing a kernel enum map.
+  static const QRegularExpression namePattern(
+      QStringLiteral("(?:^|\\s)(?:device_name|d_name)=([^\\s]+)"));
+  static const QRegularExpression statePattern(
+      QStringLiteral("(?:^|\\s)state=([A-Za-z_]+|\\d+)(?=\\s|$)"));
 
   const QRegularExpressionMatch name = namePattern.match(rec.payload);
   const QRegularExpressionMatch pwr = statePattern.match(rec.payload);
@@ -2218,8 +2233,8 @@ void ConsumeGpuPwrState(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
   if(!IsGpuDeviceName(device))
     return;
 
-  // The previous state's interval ends where the next one begins. A state still open at the end of
-  // the recording stays zero-length at its own start, which reads as "still in this state".
+  // The previous state's interval ends where the next one begins. The final state is closed at
+  // the trace end by ConsumeSystemTraceEvents.
   if(state.gpuPowerOpenValid)
   {
     TraceSpan closed = state.gpuPowerOpen;
@@ -2250,13 +2265,19 @@ void ConsumeGpuPwrState(const SystraceRecord &rec, ChromeTraceBuilder &builder, 
 void ConsumeThermalZoneTrip(const SystraceRecord &rec, ChromeTraceBuilder &builder,
                             SystraceState &state)
 {
-  static const QRegularExpression zonePattern(QStringLiteral("thermal_zone=([^ ]+)"));
-  static const QRegularExpression tripPattern(QStringLiteral("(?:trip|hyst)=(-?\\d+)"));
-  static const QRegularExpression typePattern(QStringLiteral("trip_type=([A-Za-z_]+)"));
+  static const QRegularExpression zonePattern(
+      QStringLiteral("(?:^|\\s)thermal_zone=([^\\s]+)"));
+  static const QRegularExpression tripPattern(
+      QStringLiteral("(?:^|\\s)(trip|hyst)=(-?\\d+)(?=\\s|$)"));
+  static const QRegularExpression typePattern(
+      QStringLiteral("(?:^|\\s)trip_type=([A-Za-z_]+|\\d+)(?=\\s|$)"));
+  static const QRegularExpression directionPattern(
+      QStringLiteral("(?:^|\\s)is_trip=(0|1|true|false)(?=\\s|$)"));
 
   const QRegularExpressionMatch zone = zonePattern.match(rec.payload);
   const QRegularExpressionMatch trip = tripPattern.match(rec.payload);
   const QRegularExpressionMatch type = typePattern.match(rec.payload);
+  const QRegularExpressionMatch direction = directionPattern.match(rec.payload);
 
   if(!zone.hasMatch() || !trip.hasMatch())
   {
@@ -2271,9 +2292,16 @@ void ConsumeThermalZoneTrip(const SystraceRecord &rec, ChromeTraceBuilder &build
   TraceSpan span;
   span.beginSec = rec.timeSec;
   span.endSec = rec.timeSec;
-  span.name = QObject::tr("%1 trip %2")
+  // is_trip distinguishes a trip from hysteresis in raw-field exports. In kernel text the
+  // distinction is encoded in the key itself. Keep numeric trip_type values verbatim.
+  const bool hysteresis = direction.hasMatch()
+                              ? (direction.captured(1) == QStringLiteral("0") ||
+                                 direction.captured(1) == QStringLiteral("false"))
+                              : trip.captured(1) == QStringLiteral("hyst");
+  span.name = QStringLiteral("%1 %2 %3")
                   .arg(type.hasMatch() ? type.captured(1) : QStringLiteral("thermal"))
-                  .arg(trip.captured(1));
+                  .arg(hysteresis ? QStringLiteral("hyst") : QStringLiteral("trip"))
+                  .arg(trip.captured(2));
   span.category = QStringLiteral("thermal-trip");
   span.fields << QStringLiteral("%1: %2").arg(zoneName, rec.payload);
   builder.gpuThermalTripLane.spans.push_back(span);
@@ -2868,6 +2896,7 @@ bool ConsumeSystemTraceEvents(const QString &ftrace, ChromeTraceBuilder &builder
     state.lastTimeSec = qMax(state.lastTimeSec, rec.timeSec);
     builder.stats.systraceEvents++;
 
+    builder.eventCounts[rec.event]++;
     const FtraceEventSpec *spec = FindFtraceEvent(rec.event);
 
     if(spec == NULL)
@@ -2964,6 +2993,25 @@ bool ConsumeSystemTraceEvents(const QString &ftrace, ChromeTraceBuilder &builder
     }
   }
   state.gpuBatches.clear();
+
+  // Close the final GPU power state at the end of the trace as well. Unlike command
+  // batches, power states are opened by a transition and have no matching end event.
+  // Keeping the last state ensures the final state is visible in the timeline.
+  if(state.gpuPowerOpenValid)
+  {
+    TraceSpan span = state.gpuPowerOpen;
+    span.endSec = endSec;
+    span.fields << QStringLiteral("still open at the end of the trace");
+
+    if(span.endSec >= span.beginSec)
+    {
+      builder.gpuPowerLane.spans.push_back(span);
+      builder.stats.spans++;
+      builder.stats.systraceSpans++;
+    }
+
+    state.gpuPowerOpenValid = false;
+  }
 
   for(auto it = state.gpuWaits.begin(); it != state.gpuWaits.end(); ++it)
   {
@@ -3663,6 +3711,9 @@ SystemTrace BuildTraceFromBuilder(ChromeTraceBuilder &builder, const QString &pa
   trace.gpuStats.powerStateChanges = stats.gpuPowerStateChanges;
   trace.gpuStats.thermalTrips = stats.gpuThermalTrips;
   trace.gpuStats.bandwidthOtherDevices = stats.bandwidthOtherDevices;
+  trace.wakeups = builder.wakeups;
+  trace.batches = builder.batches;
+  trace.eventCounts = builder.eventCounts;
   trace.gpuStats.tickHz = kGpuTickHz;
   trace.gpuExecWindows = builder.gpuExecWindows;
 

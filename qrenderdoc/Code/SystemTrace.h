@@ -27,6 +27,7 @@
 #include <stdint.h>
 
 #include <QString>
+#include <QMap>
 #include <QStringList>
 #include <QVector>
 
@@ -263,6 +264,17 @@ struct SystemTrace
   // True when the source declared (via a "clockDomain": "shared" header record) that its
   // timestamps already share the capture's clock domain, so no offset needs to be derived.
   bool sharedClock = false;
+  // Typed provenance retained for MCP analysis; display strings are not an API.
+  struct Wakeup { int tid = -1; int cpu = -1; double timeSec = 0.0; };
+  struct Batch
+  {
+    QString context, timestamp;
+    double submitSec = -1.0, retireSec = -1.0, beginSec = -1.0, endSec = -1.0;
+    bool anchored = false;
+  };
+  QVector<Wakeup> wakeups;
+  QVector<Batch> batches;
+  QMap<QString, int> eventCounts;
   QVector<TraceSeries> series;
   QVector<TraceFrameBoundary> frameBoundaries;
   // GPU command-stream accounting, as above.

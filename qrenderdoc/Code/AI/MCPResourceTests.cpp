@@ -18,6 +18,12 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <limits>
+#include "Code/SystemTrace.h"
+#include <cmath>
+#include <algorithm>
+namespace MCP {
+#include "MCPSystemTraceAnalysis.h"
+}
 
 namespace
 {
@@ -463,5 +469,24 @@ TEST_CASE("Every extension catalog entry and original native capability remains 
     REQUIRE(tool != NULL);
     CHECK(bool(tool->handler));
   }
+}
+TEST_CASE("System Trace MCP window statistics preserve evidence", "[mcp][systemtrace]")
+{
+  TraceSeries s; s.step=true;
+  s.samples={{0.0,10.0},{2.0,20.0},{5.0,30.0}};
+  const auto stats=MCP::TraceAnalysis::SeriesStats(s,1.0,4.0);
+  CHECK(stats.value(QStringLiteral("coveredSec")).toDouble()==3.0);
+  CHECK(stats.value(QStringLiteral("timeWeightedMean")).toDouble()==Approx(50.0/3.0));
+  CHECK(MCP::TraceAnalysis::Union({{1,3},{2,4},{5,7}},0,6)==4.0);
+  SystemTrace trace;trace.valid=true;trace.gpuStats.anchoredBatches=2;
+  trace.gpuExecWindows={{1,3},{2,4}};
+  const auto gpu=MCP::TraceAnalysis::Gpu(trace,0,5);
+  CHECK(gpu.value(QStringLiteral("knownExecutionSec")).toDouble()==3.0);
+  CHECK(gpu.value(QStringLiteral("idleSec")).isNull());
+  TraceFrameBoundary f;f.timeSec=0;f.source=QStringLiteral("marker");trace.frameBoundaries.append(f);
+  f.timeSec=5;trace.frameBoundaries.append(f);
+  const auto frames=MCP::TraceAnalysis::Frames(trace,0,5,{});
+  CHECK(frames[0].toObject().value(QStringLiteral("frameNumber")).isNull());
+  CHECK(frames[1].toObject().value(QStringLiteral("endSec")).isNull());
 }
 #endif

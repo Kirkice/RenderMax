@@ -123,6 +123,7 @@ private:
     rdcarray<char> name;
     uint32_t group = 0;
     uint32_t counter = 0;
+    uint32_t type = 0;
   };
 
   struct DeviceGroup
@@ -142,6 +143,7 @@ private:
     uint32_t group = 0;
     uint32_t counter = 0;
     uint32_t maxActive = 0;
+    uint32_t type = 0;
     bool resolved = false;
   };
 

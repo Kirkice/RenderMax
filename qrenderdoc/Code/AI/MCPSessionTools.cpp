@@ -41,6 +41,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QMap>
+#include <algorithm>
 #include <QRegularExpression>
 #include <QTimer>
 #include <QUuid>
@@ -54,6 +56,7 @@
 
 namespace MCP
 {
+#include "MCPSystemTraceAnalysis.h"
 namespace
 {
 QString Str(const rdcstr &s) { return QString::fromUtf8(s.c_str(), int(s.size())); }
@@ -433,14 +436,28 @@ public:
     return out;
   }
 
-  ToolResult AnalyzeSystemTrace(const QJsonObject &args)
+  ToolResult AnalyzeSystemTrace(const QJsonObject &args, const QString &tool, CallContext &call)
   {
+    if(call.IsCancelled() || call.IsExpired()) return Interrupted(call);
     const QString path = Arg(args, "filePath");
     QFileInfo file(path);
     if(!file.isAbsolute() || !file.isFile())
       return Fail(ErrorCode::InvalidParams, "filePath must name an existing absolute system trace file");
 
-    const SystemTrace trace = ImportSystemTraceFile(file.absoluteFilePath());
+    // Session worker serializes access. Keep only one modest trace and invalidate on file change.
+    static QString cachedPath;
+    static qint64 cachedSize = -1, cachedMTime = -1;
+    static SystemTrace cached;
+    const qint64 mtime = file.lastModified().toMSecsSinceEpoch();
+    SystemTrace imported;
+    const bool hit = cachedPath == file.absoluteFilePath() && cachedSize == file.size() && cachedMTime == mtime;
+    if(!hit) imported = ImportSystemTraceFile(file.absoluteFilePath());
+    if(!hit && file.size() <= 16 * 1024 * 1024)
+    {
+      cached = imported; cachedPath = file.absoluteFilePath(); cachedSize = file.size(); cachedMTime = mtime;
+    }
+    const SystemTrace &trace = hit ? cached : imported;
+    if(call.IsCancelled() || call.IsExpired()) return Interrupted(call);
 
     // An answer, not a dump. The summary below is always returned; the span and sample contents are
     // opt-in and bounded, because a phone trace holds tens of thousands of spans and a million
@@ -462,8 +479,22 @@ public:
       begin = qMax(begin, args.value(QStringLiteral("beginSec")).toDouble());
     if(args.contains(QStringLiteral("endSec")))
       end = qMin(end, args.value(QStringLiteral("endSec")).toDouble());
-    if(end < begin)
-      return Fail(ErrorCode::InvalidParams, "endSec must not be earlier than beginSec");
+    if(!std::isfinite(begin) || !std::isfinite(end) || end <= begin)
+      return Fail(ErrorCode::InvalidParams, "A finite, non-empty window overlapping the trace is required");
+
+    if(tool != QStringLiteral("renderdoc_analyzeSystemTrace"))
+    {
+      if(args.contains(QStringLiteral("compareBeginSec")) || args.contains(QStringLiteral("compareEndSec")))
+      {
+        const double a = args.value(QStringLiteral("compareBeginSec")).toDouble(begin);
+        const double b = args.value(QStringLiteral("compareEndSec")).toDouble(end);
+        if(!std::isfinite(a) || !std::isfinite(b) || b <= a || a < extentBegin || b > extentEnd)
+          return Fail(ErrorCode::InvalidParams, "Comparison window must be non-empty and inside trace extent");
+      }
+      const QJsonObject result = TraceAnalysis::Analyze(tool, trace, args, begin, end);
+      if(call.IsCancelled() || call.IsExpired()) return Interrupted(call);
+      return ToolResult::Success(result);
+    }
 
     auto matches = [](const QString &name, const QString &filter) {
       return filter.isEmpty() || name.contains(filter, Qt::CaseInsensitive);
@@ -485,11 +516,14 @@ public:
         samplesInWindow++;
       }
 
+      const QJsonObject windowStats = TraceAnalysis::SeriesStats(s, begin, end);
       QJsonObject entry{{QStringLiteral("name"), s.name}, {QStringLiteral("unit"), s.unit},
           {QStringLiteral("group"), s.group}, {QStringLiteral("pid"), s.pid},
           {QStringLiteral("step"), s.step}, {QStringLiteral("sampleCount"), s.samples.size()},
-          {QStringLiteral("samplesInWindow"), samplesInWindow}, {QStringLiteral("min"), s.MinValue()},
-          {QStringLiteral("max"), s.MaxValue()}};
+          {QStringLiteral("samplesInWindow"), samplesInWindow}, {QStringLiteral("min"), windowStats.value(QStringLiteral("min"))},
+          {QStringLiteral("max"), windowStats.value(QStringLiteral("max"))},
+          {QStringLiteral("stats"), windowStats},
+          {QStringLiteral("statisticsScope"), QStringLiteral("requested window")}};
 
       if(includeSamples)
       {
@@ -552,7 +586,7 @@ public:
 
     for(const QString &warning : trace.warnings) warnings.append(warning);
 
-    const QVector<TraceThreadTime> times = trace.ThreadTimes();
+    const QVector<TraceThreadTime> times = trace.ThreadTimes(begin, end);
     QJsonArray threadTimes;
     for(const TraceThreadTime &row : times)
       threadTimes.append(QJsonObject{{QStringLiteral("name"), row.name}, {QStringLiteral("process"), row.process},
@@ -564,14 +598,17 @@ public:
     int framesMeasured = 0;
     for(const TraceFrameBoundary &b : trace.frameBoundaries)
     {
+      if(b.timeSec < begin || b.timeSec > end) continue;
       // Null rather than 0 when the GPU counters could not measure the frame: a frame the GPU never
       // touched and a frame whose GPU time is unknown are different answers.
       const QJsonValue gpuBusy = b.gpuBusySec < 0.0 ? QJsonValue() : QJsonValue(b.gpuBusySec);
       if(b.gpuBusySec >= 0.0)
         framesMeasured++;
-      frames.append(QJsonObject{{QStringLiteral("frame"), int(b.frameNumber)},
+      frames.append(QJsonObject{{QStringLiteral("frame"), b.source.isEmpty() ? QJsonValue(double(b.frameNumber)) : QJsonValue()},
+          {QStringLiteral("frameNumberKnown"), b.source.isEmpty()},
           {QStringLiteral("timeSec"), b.timeSec}, {QStringLiteral("source"), b.source},
-          {QStringLiteral("gpuBusySec"), gpuBusy}});
+          {QStringLiteral("gpuBusySec"), gpuBusy},
+          {QStringLiteral("gpuBusyScope"), QStringLiteral("complete frame interval, not clipped to query window")}});
     }
 
     // The GPU accounting, stated rather than left implicit in the frame table's dashes: whether the
@@ -589,20 +626,25 @@ public:
         {QStringLiteral("bandwidthOtherDevices"), gpu.bandwidthOtherDevices},
         {QStringLiteral("tickHz"), gpu.tickHz},
         {QStringLiteral("executionWindowsKnown"), gpu.HasExecutionWindows()},
-        {QStringLiteral("framesWithGpuBusy"), framesMeasured}};
+        {QStringLiteral("framesWithGpuBusy"), framesMeasured},
+        {QStringLiteral("accountingScope"), QStringLiteral("trace-wide except framesWithGpuBusy")},
+        {QStringLiteral("framesWithGpuBusyScope"), QStringLiteral("frame boundaries in requested window")}};
 
-    // Says why every gpuBusySec is null, when it is. The per-frame GPU time needs the command
-    // batches' own counters, which are recorded only at the highest detail level, so a trace taken
-    // at `metrics` reports no GPU time at all - a fact about the capture request, not about the
-    // device, and one the reader cannot recover from the numbers alone.
     QString gpuBusyHint;
-    if(!trace.frameBoundaries.isEmpty() && framesMeasured == 0)
+    if(framesMeasured == 0)
     {
-      gpuBusyHint = QObject::tr(
-          "No frame carries a gpuBusySec: this trace was recorded without the GPU command batches "
-          "(adreno_cmdbatch_submitted/_retired), whose own counters are what the per-frame GPU time "
-          "is computed from. Re-capture with gpuDetail 'commands' to get it. The GPU counters in "
-          "'series' are unaffected by that choice.");
+      if(frames.isEmpty())
+        gpuBusyHint = QStringLiteral("No frame boundaries in the requested window; per-frame GPU busy is unavailable even if GPU execution windows exist.");
+      else if(gpu.commandBatches == 0 && gpu.unterminatedBatches == 0)
+        gpuBusyHint = QStringLiteral("No GPU command batches observed; capture with gpuDetail commands. Event enablement alone does not guarantee events.");
+      else if(gpu.rejectedBatches > 0)
+        gpuBusyHint = QStringLiteral("GPU counter anchors were rejected; inspect tick clock and trace warnings.");
+      else if(!gpu.HasExecutionWindows() && gpu.unterminatedBatches > 0)
+        gpuBusyHint = QStringLiteral("No usable GPU execution windows; some command batches have no retirement. Inspect incomplete batches and counter availability.");
+      else if(!gpu.HasExecutionWindows())
+        gpuBusyHint = QStringLiteral("Observed batches have no usable GPU counter windows; inspect batchesWithoutCounters and trace warnings.");
+      else
+        gpuBusyHint = QStringLiteral("No measurable closed frame in this window; inspect frame boundaries and time range.");
     }
 
     QJsonArray unmodelled;
@@ -617,10 +659,16 @@ public:
         {QStringLiteral("startSec"), begin}, {QStringLiteral("endSec"), end},
         {QStringLiteral("traceExtentSec"), QJsonArray{extentBegin, extentEnd}},
         {QStringLiteral("windowed"), begin > extentBegin || end < extentEnd},
-        {QStringLiteral("durationSec"), trace.SpanSec()}, {QStringLiteral("seriesCount"), trace.series.size()},
+        {QStringLiteral("durationSec"), trace.SpanSec()},
+        {QStringLiteral("durationScope"), QStringLiteral("whole trace; retained for compatibility")},
+        {QStringLiteral("windowDurationSec"), end - begin},
+        {QStringLiteral("threadTimesScope"), QStringLiteral("requested window")},
+        {QStringLiteral("seriesCount"), trace.series.size()},
         {QStringLiteral("trackCount"), trace.tracks.size()}, {QStringLiteral("spanCount"), trace.SpanCount()},
         {QStringLiteral("frameBoundaryCount"), trace.frameBoundaries.size()},
         {QStringLiteral("gpu"), gpuSummary},
+        {QStringLiteral("windowGpu"), TraceAnalysis::Gpu(trace, begin, end)},
+        {QStringLiteral("gpuAccountingScope"), QStringLiteral("trace-wide batch counts; framesWithGpuBusy is windowed")},
         {QStringLiteral("gpuBusyHint"), gpuBusyHint},
         {QStringLiteral("series"), series}, {QStringLiteral("tracks"), tracks},
         {QStringLiteral("frames"), frames},
@@ -827,7 +875,7 @@ ToolResult QueryAdapter::SessionTool(const QString &name, const QJsonObject &arg
   }
   const QSharedPointer<QAtomicInt> abandoned(new QAtomicInt(0));
   NativeCaptureSession *owner = session.get();
-  auto job = session->Submit([owner, name, args]() {
+  auto job = session->Submit([owner, name, args, call]() mutable {
     if(name == QStringLiteral("renderdoc_listCaptureTargets")) return ToolResult::Success(QJsonObject{{QStringLiteral("targets"), Targets()}});
     if(name == QStringLiteral("renderdoc_checkAndroidLaunchReadiness"))
     {
@@ -842,8 +890,8 @@ ToolResult QueryAdapter::SessionTool(const QString &name, const QJsonObject &arg
       return owner->Trigger(args, name == QStringLiteral("renderdoc_triggerRemoteCapture"));
     if(name == QStringLiteral("renderdoc_captureSystemTrace"))
       return owner->SystemTraceCapture(args);
-    if(name == QStringLiteral("renderdoc_analyzeSystemTrace"))
-      return owner->AnalyzeSystemTrace(args);
+    if(name == QStringLiteral("renderdoc_analyzeSystemTrace") || name.contains(QStringLiteral("SystemTrace")))
+      return owner->AnalyzeSystemTrace(args, name, call);
     return Fail(ErrorCode::InvalidParams, "Unknown native session tool");
   }, abandoned, call);
   ToolResult result = Await(job, call, abandoned);
@@ -945,6 +993,39 @@ void RegisterSessionTools(ToolRegistry &registry, QueryAdapter &adapter)
       {QStringLiteral("maxSpansPerTrack"), integer(1, 5000)},
       {QStringLiteral("maxSamplesPerSeries"), integer(2, 5000)}};
   add("renderdoc_analyzeSystemTrace", "Import a local System Trace and return counters, tracks, scheduler thread time, frame GPU time, GPU counter accounting, unmodelled event types, warnings and the supported ftrace event inventory. Span and counter contents are omitted by default; set includeSpans/includeSamples, and narrow with beginSec/endSec or the name filters.", traceAnalyze, QJsonArray{QStringLiteral("filePath")}, true);
+  QJsonObject query = traceAnalyze;
+  for(const char *key : {"pid", "tid", "cpu", "offset", "limit", "frameIndex", "buckets"})
+    query[QString::fromLatin1(key)] = integer(0, QString::fromLatin1(key) == QStringLiteral("limit") ? 5000 : INT_MAX);
+  for(const char *key : {"compareBeginSec", "compareEndSec", "minDurationSec", "frameNumber", "frameBudgetMs"})
+    query[QString::fromLatin1(key)] = QJsonObject{{QStringLiteral("type"), QStringLiteral("number")}};
+  for(const char *key : {"threadFilter", "groupFilter", "sortBy"})
+    query[QString::fromLatin1(key)] = string();
+  add("renderdoc_getSystemTraceCapabilities", "Observed CPU/GPU capabilities and data gaps; supported events are not proof of occurrence.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_querySystemTraceSeries", "Paged metric queries with window statistics, step residency and optional bounded min/max envelopes.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_querySystemTraceTracks", "Paged span queries, clipped overlap duration, original timestamps and source fields.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_getSystemTraceEventInventory", "Supported ftrace schemas, observed trace-wide event counts and unmodelled event counts.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceCpu", "CPU scheduler coverage, per-core busy/idle and ranked thread costs.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_getSystemTraceCpuUtilization", "Per-core observed scheduler utilization and per-thread one-core window utilization.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_getSystemTraceThreadTimes", "Window-clipped running, runnable and sleeping times per thread.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceScheduling", "Scheduler intervals and runnable waiting; missing causal provenance is explicitly reported.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceWakeups", "Observed waking/wakeup to schedule-in latency, unmatched endpoints and runnable interval distributions.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceCpuFrequency", "CPU frequency sample and time-weighted residency statistics.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceCpuIdle", "Observed CPU idle series and state residency.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceGpu", "Validated GPU execution union and accounting, without inventing idle from missing events.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_getSystemTraceGpuUtilization", "GPU known busy lower bound; uncovered time is not asserted idle.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_getSystemTraceGpuBatches", "Paged GPU command batch spans with source evidence fields.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceGpuQueue", "Inflight queue samples and typed anchored per-batch submit-to-start latency; missing anchors remain unknown.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceGpuWaits", "Paged GPU fence waits and window overlap durations.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceGpuFrequency", "GPU frequency and clock level statistics and residency.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceBandwidth", "Bandwidth statistics grouped by source device; CPU and GPU masters remain distinct.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTracePower", "Power sample statistics; no energy extrapolation over unknown sampling gaps.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceThermal", "Temperature samples and thermal trip events; correlations are not causal throttling proof.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTracePowerStates", "Observed GPU power state intervals and state residency.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_getSystemTraceFrames", "Frame marker intervals, declared frame identity and measured GPU busy.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceFrame", "Select frameIndex or declared frameNumber and inspect CPU/GPU within that interval.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_analyzeSystemTraceJank", "Over-budget marker intervals; marker spacing is not presentation timing.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_compareSystemTraceWindows", "Compare CPU and GPU statistics for two explicit windows in one trace.", query, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_buildSystemTraceReport", "Window CPU/GPU, metrics and frame evidence with limitations, not speculative causal diagnoses.", query, QJsonArray{QStringLiteral("filePath")}, true);
   const QJsonObject wait{{QStringLiteral("timeoutMs"), integer(100, 60000)}, {QStringLiteral("pollMs"), integer(50, 2000)}};
   add("renderdoc_waitForLiveTarget", "Wait for the current application session target; defaults timeoutMs=10000 and pollMs=250. Does not launch or attach.", wait, QJsonArray(), true);
   add("renderdoc_waitForCapture", "Wait for a completed saved capture in the current application session; defaults timeoutMs=10000 and pollMs=250.", wait, QJsonArray(), true);
