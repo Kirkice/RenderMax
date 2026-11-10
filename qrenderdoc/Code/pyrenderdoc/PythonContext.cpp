@@ -1156,7 +1156,9 @@ void PythonContext::Finish()
 
 void *PythonContext::PausePythonThreading()
 {
-  return PyGILState_Check() == 0 ? NULL : PyEval_SaveThread();
+  // The native CLI owns replay without initialising the Python interpreter.
+  // PyGILState_Check alone is not a safe initialisation test (it can return 1).
+  return !Py_IsInitialized() || PyGILState_Check() == 0 ? NULL : PyEval_SaveThread();
 }
 
 void PythonContext::ResumePythonThreading(void *ctx)

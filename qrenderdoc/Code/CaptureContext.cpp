@@ -69,7 +69,7 @@
 
 #include "pipestate.inl"
 
-CaptureContext::CaptureContext(PersistentConfig &cfg) : m_Config(cfg)
+CaptureContext::CaptureContext(PersistentConfig &cfg, bool headless) : m_Config(cfg), m_Headless(headless)
 {
   RENDERDOC_PROFILEFUNCTION();
 
@@ -89,6 +89,11 @@ CaptureContext::CaptureContext(PersistentConfig &cfg) : m_Config(cfg)
   m_Actions = &m_EmptyActions;
 
   m_StructuredFile = &m_DummySDFile;
+
+  // Headless callers own replay and data, but never construct windows, load extensions,
+  // initialise Python, or consult/save the interactive user's settings.
+  if(m_Headless)
+    return;
 
   m_QtHelper = new MiniQtHelper(*this);
 
@@ -939,6 +944,18 @@ void CaptureContext::LoadCapture(const rdcstr &captureFile, const ReplayOptions 
 
   CloseCapture();
 
+  if(m_Headless)
+  {
+    LoadCaptureThreaded(captureFile, opts, origFilename, temporary, local);
+    if(m_CaptureLoaded)
+    {
+      m_CaptureTemporary = temporary;
+      if(m_LastAction)
+        SetEventID({}, m_LastAction->eventId, m_LastAction->eventId, true);
+    }
+    return;
+  }
+
   PointerTypeRegistry::Init();
 
   BufferInterpreter::context = this;
@@ -1060,7 +1077,8 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
 
   m_CaptureLocal = local;
 
-  Config().Save();
+  if(!m_Headless)
+    Config().Save();
 
   m_LoadProgress = 0.0f;
   m_PostloadProgress = 0.0f;
@@ -1073,6 +1091,12 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
   // if the renderer isn't running, we hit a failure case so display an error message
   if(!m_Replay.IsRunning())
   {
+    if(m_Headless)
+    {
+      qCritical() << "Failed to open capture:" << QString(m_Replay.GetCreateStatus().Message());
+      m_LoadInProgress = false;
+      return;
+    }
     RDDialog::critical(NULL, tr("Error opening capture"),
                        tr("Failed to open '%1' for replay\n\n%2")
                            .arg(filename)
@@ -1082,7 +1106,7 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
     return;
   }
 
-  if(!temporary)
+  if(!temporary && !m_Headless)
   {
     AddRecentFile(Config().RecentCaptureFiles, origFilename);
 
@@ -1110,6 +1134,8 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
 
     m_Actions = &r->GetRootActions();
 
+    if(!m_Actions->empty())
+    {
     m_FirstAction = &m_Actions->at(0);
     while(!m_FirstAction->children.empty())
       m_FirstAction = &m_FirstAction->children[0];
@@ -1120,6 +1146,7 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
 
     m_PostloadProgress = 0.4f;
 
+    }
     m_WinSystems = r->GetSupportedWindowSystems();
 
 #if defined(RENDERDOC_PLATFORM_WIN32)
@@ -1127,7 +1154,7 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
 #elif defined(RENDERDOC_PLATFORM_LINUX)
     m_CurWinSystem = WindowingSystem::Unknown;
 
-    if(QGuiApplication::platformName() == lit("wayland"))
+    if(!m_Headless && QGuiApplication::platformName() == lit("wayland"))
     {
       // if we're using Wayland we must use wayland since we can't get any other surface type
       for(WindowingSystem sys : m_WinSystems)
@@ -1147,7 +1174,7 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
                               "build of RenderDoc with Wayland support enabled."));
       }
     }
-    else
+    else if(!m_Headless)
     {
       m_CurWinSystem = WindowingSystem::Xlib;
 
@@ -1213,7 +1240,7 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
   QDateTime today = QDateTime::currentDateTimeUtc();
   QDateTime compare = today.addDays(-21);
 
-  if(compare > Config().DegradedCapture_LastUpdate && m_APIProps.degraded)
+  if(!m_Headless && compare > Config().DegradedCapture_LastUpdate && m_APIProps.degraded)
   {
     Config().DegradedCapture_LastUpdate = today;
 
@@ -1252,7 +1279,7 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
     }
 
     idx = access->FindSectionByType(SectionType::EditedShaders);
-    if(idx >= 0)
+    if(idx >= 0 && !m_Headless)
     {
       bytebuf buf = access->GetSectionContents(idx);
       GUIInvoke::call(m_MainWindow, [this, buf]() {
@@ -1717,7 +1744,7 @@ void CaptureContext::SetEventID(const rdcarray<ICaptureViewer *> &exclude, uint3
   if(!IsCaptureLoaded())
     return;
 
-  if(eventId > m_LastAction->eventId)
+  if(!m_LastAction || eventId > m_LastAction->eventId)
   {
     qCritical() << "Invalid EID being selected " << eventId;
     return;
@@ -1727,6 +1754,19 @@ void CaptureContext::SetEventID(const rdcarray<ICaptureViewer *> &exclude, uint3
   m_SelectedEventID = selectedEventID;
   uint32_t prevEventID = m_EventID;
   m_EventID = eventId;
+
+  if(m_Headless)
+  {
+    m_Replay.BlockInvoke([this, eventId, force](IReplayController *r) {
+      r->SetFrameEvent(eventId, force);
+      m_CurD3D11PipelineState = r->GetD3D11PipelineState();
+      m_CurD3D12PipelineState = r->GetD3D12PipelineState();
+      m_CurGLPipelineState = r->GetGLPipelineState();
+      m_CurVulkanPipelineState = r->GetVulkanPipelineState();
+      m_CurPipelineState = &r->GetPipelineState();
+    });
+    return;
+  }
 
   bool done = false;
 
@@ -1854,7 +1894,7 @@ void CaptureContext::RefreshUIStatus(const rdcarray<ICaptureViewer *> &exclude,
 
 void CaptureContext::InvokeOntoUIThread(std::function<void()> callback)
 {
-  GUIInvoke::call(GetMainWindow()->Widget(), callback);
+  GUIInvoke::call(QCoreApplication::instance(), callback);
 }
 
 void CaptureContext::AddMessages(const rdcarray<DebugMessage> &msgs)
@@ -1933,7 +1973,8 @@ void CaptureContext::DelayedCallback(uint32_t milliseconds, std::function<void()
 void CaptureContext::SetModification(CaptureModifications mod)
 {
   m_CaptureMods |= mod;
-  m_MainWindow->captureModified();
+  if(m_MainWindow)
+    m_MainWindow->captureModified();
 }
 
 void CaptureContext::SaveChanges()
@@ -1961,6 +2002,11 @@ void CaptureContext::SaveChanges()
 
   if(!success)
   {
+    if(m_Headless)
+    {
+      qCritical() << "Error saving capture changes";
+      return;
+    }
     RDDialog::critical(m_MainWindow, tr("Can't save file"),
                        tr("Error saving file.\n"
                           "Check for permissions and that it's not open elsewhere"));

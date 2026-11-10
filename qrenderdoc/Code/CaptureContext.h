@@ -63,7 +63,7 @@ class CaptureContext : public ICaptureContext, IExtensionManager
   Q_DECLARE_TR_FUNCTIONS(CaptureContext);
 
 public:
-  CaptureContext(PersistentConfig &cfg);
+  CaptureContext(PersistentConfig &cfg, bool headless = false);
   ~CaptureContext();
 
   void Begin(QString paramFilename, QString remoteHost, uint32_t remoteIdent, bool temp,
@@ -451,6 +451,7 @@ private:
   QFileSystemWatcher *m_ExtensionWatcher = NULL;
 
   // Windows
+  bool m_Headless = false;
   MainWindow *m_MainWindow = NULL;
   EventBrowser *m_EventBrowser = NULL;
   APIInspector *m_APIInspector = NULL;

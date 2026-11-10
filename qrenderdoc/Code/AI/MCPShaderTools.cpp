@@ -624,6 +624,11 @@ ToolResult QueryAdapter::ShaderTool(const QString &name, const QJsonObject &args
       if(shader.isEmpty())
         return Fail(ErrorCode::InvalidParams, "shader must be a nonempty Unity ShaderLab/HLSL string");
       const QString title = args.value(QStringLiteral("title")).toString();
+      if(!ctx.GetMainWindow())
+        return ToolResult::Success(QJsonObject{
+            {QStringLiteral("available"), true}, {QStringLiteral("displayed"), false},
+            {QStringLiteral("shader"), shader}, {QStringLiteral("title"), title},
+            {QStringLiteral("note"), QStringLiteral("Headless mode returns the read-only shader panel content instead of opening a window.")}});
       QList<ShaderViewer *> viewers = ctx.GetMainWindow()->Widget()->findChildren<ShaderViewer *>();
       if(viewers.isEmpty())
         return Fail(ErrorCode::Unsupported, "No Shader Viewer is currently open");

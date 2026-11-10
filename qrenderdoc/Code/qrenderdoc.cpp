@@ -180,8 +180,14 @@ void hideOption(QCommandLineOption &opt)
 #endif
 }
 
+#include "Code/AI/CLIHeadlessRuntime.h"
+
 int main(int argc, char *argv[])
 {
+  // This path uses QCoreApplication and never constructs MainWindow or the MCP server.
+  if(argc > 1 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--cli-headless"))
+    return RunHeadlessCLI(argc, argv);
+
   // call this as the very first thing - no-op on other platforms, but on linux it means
   // XInitThreads will be called allowing driver access to xlib on multiple threads.
   QCoreApplication::setAttribute(Qt::AA_X11InitThreads);
