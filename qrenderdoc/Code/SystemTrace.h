@@ -371,6 +371,9 @@ SystemTrace ImportSystraceText(const QString &path);
 // caller does not have to know which one it asked for.
 SystemTrace ImportSystemTraceFile(const QString &path);
 
+// Atomic versioned RDT save, preserving importable source and optional original Perfetto.
+bool SaveSystemTraceArchive(const QString &sourcePath, const QString &destination, QString &error);
+
 // The ftrace events the systrace importer understands, one line per event:
 // `"sched_switch (thread slice) - scheduled interval, per CPU"`. The importer consults a single table
 // of these, so this is the authoritative answer to "would this trace's events be drawn", and the

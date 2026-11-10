@@ -288,11 +288,26 @@ public:
     if(!launched.result.OK() || !launched.ident)
     { Close(); Set(QStringLiteral("phase"), QStringLiteral("error")); return Status(false, "LAUNCH_FAILED", Str(launched.result.Message())); }
     m_Target = RENDERDOC_CreateTargetControl(Rdc(url), launched.ident, "qrenderdoc MCP", false);
-    if(!m_Target || !m_Target->Connected() || !m_Target->GetBusyClient().empty())
+    if(m_Target && (!m_Target->Connected() || !m_Target->GetBusyClient().empty()))
+    {
+      m_Target->Shutdown();
+      m_Target = NULL;
+    }
+    // An Android application reports to whichever device remote server is already running, and that
+    // server hands the connection to the session that started it. A server left over from an earlier
+    // replay therefore takes the application's connection, and no direct control connection to the
+    // application can be made here - the launch still succeeded, though, and the device is what a
+    // system trace needs. The session stays open and says the control channel is unavailable instead
+    // of discarding a running application and losing the trace as well.
+    const bool controlled = m_Target != NULL;
+    if(!controlled && (platform != QStringLiteral("android") || m_Remote == NULL))
     { Close(); Set(QStringLiteral("phase"), QStringLiteral("error")); return Fail(ErrorCode::ReplayUnavailable, "Application launched but target control is unavailable (application was not terminated)"); }
     QJsonObject target{{QStringLiteral("url"), url}, {QStringLiteral("ident"), double(launched.ident)},
-        {QStringLiteral("pid"), double(m_Target->GetPID())}, {QStringLiteral("target"), Str(m_Target->GetTarget())},
-        {QStringLiteral("api"), Str(m_Target->GetAPI())}, {QStringLiteral("local"), url.isEmpty()}};
+        {QStringLiteral("pid"), controlled ? QJsonValue(double(m_Target->GetPID())) : QJsonValue()},
+        {QStringLiteral("target"), controlled ? QJsonValue(Str(m_Target->GetTarget())) : QJsonValue()},
+        {QStringLiteral("api"), controlled ? QJsonValue(Str(m_Target->GetAPI())) : QJsonValue()},
+        {QStringLiteral("local"), url.isEmpty()},
+        {QStringLiteral("targetControl"), controlled}};
     Set(QStringLiteral("target"), target);
     Set(QStringLiteral("phase"), QStringLiteral("ready"));
     QJsonObject out = target;
@@ -301,6 +316,8 @@ public:
     out[QStringLiteral("selectedTarget")] = selected;
     if(platform == QStringLiteral("android"))
       out[QStringLiteral("serverSetupEffects")] = QStringLiteral("Native RenderMax server setup may install/update its server APKs, forward ports and configure device capture settings; the requested application APK is not installed by this tool.");
+    if(!controlled)
+      out[QStringLiteral("targetControlHint")] = QStringLiteral("The application reports to the device remote server this session holds, so there is no separate target control channel: frame capture and live sub-resource inspection are unavailable, while device-wide tools such as renderdoc_captureSystemTrace work.");
     out[QStringLiteral("state")] = State();
     return ToolResult::Success(out);
   }
@@ -679,7 +696,10 @@ public:
 
   ToolResult Trigger(const QJsonObject &args, bool remoteOnly)
   {
-    if(!m_Target || !m_Target->Connected()) return Fail(ErrorCode::ReplayUnavailable, "Launch an application capture session first");
+    if(!m_Target || !m_Target->Connected())
+      return Fail(ErrorCode::ReplayUnavailable, m_URL.isEmpty() ?
+          "Launch an application capture session first" :
+          "This session has no target control channel: the application reports to the device remote server, so frame capture is unavailable here. Device-wide tools such as renderdoc_captureSystemTrace still work.");
     if(remoteOnly && m_URL.isEmpty()) return Fail(ErrorCode::InvalidParams, "triggerRemoteCapture requires an Android session; use captureFrame for Windows");
     if(State().value(QStringLiteral("phase")) == QStringLiteral("capturing"))
       return Fail(ErrorCode::CaptureBusy, "A capture is already pending");
@@ -865,8 +885,12 @@ ToolResult QueryAdapter::SessionTool(const QString &name, const QJsonObject &arg
       if(!sessionId.isEmpty() && currentId != sessionId)
         return Fail(ErrorCode::CaptureBusy, "Application session changed while waiting");
       const QString phase = state.value(QStringLiteral("phase")).toString();
+      // A target without a control channel is not a live target to wait for: the session can record a
+      // system trace, but it cannot drive or inspect frames, which is what this wait is for.
+      const bool controlled =
+          state.value(QStringLiteral("target")).toObject().value(QStringLiteral("targetControl")).toBool(true);
       const bool done = capture ? phase == QStringLiteral("completed") && state.value(QStringLiteral("lastCapture")).isObject() :
-          state.value(QStringLiteral("target")).isObject() && (phase == QStringLiteral("ready") || phase == QStringLiteral("running") || phase == QStringLiteral("capturing") || phase == QStringLiteral("completed"));
+          controlled && state.value(QStringLiteral("target")).isObject() && (phase == QStringLiteral("ready") || phase == QStringLiteral("running") || phase == QStringLiteral("capturing") || phase == QStringLiteral("completed"));
       if(done || timer.elapsed() >= timeout)
         return ToolResult::Success(QJsonObject{{QStringLiteral("ok"), done}, {QStringLiteral("timedOut"), !done}, {QStringLiteral("timeoutMs"), timeout}, {QStringLiteral("state"), state}});
       if(call.IsCancelled() || call.IsExpired()) return Interrupted(call);
@@ -890,6 +914,17 @@ ToolResult QueryAdapter::SessionTool(const QString &name, const QJsonObject &arg
       return owner->Trigger(args, name == QStringLiteral("renderdoc_triggerRemoteCapture"));
     if(name == QStringLiteral("renderdoc_captureSystemTrace"))
       return owner->SystemTraceCapture(args);
+    if(name == QStringLiteral("renderdoc_saveSystemTrace"))
+    {
+      QString error;
+      if(!Arg(args, "destinationPath").endsWith(QStringLiteral(".rdt"), Qt::CaseInsensitive))
+        return Fail(ErrorCode::InvalidParams, "destinationPath must end in .rdt");
+      if(QFileInfo::exists(Arg(args, "destinationPath")) && !args.value(QStringLiteral("overwrite")).toBool(false))
+        return Fail(ErrorCode::InvalidParams, "Destination exists; explicitly set overwrite true");
+      if(!SaveSystemTraceArchive(Arg(args, "filePath"), Arg(args, "destinationPath"), error))
+        return ToolResult::Failure(Error(ErrorCode::InvalidParams, Rdc(error)));
+      return ToolResult::Success(QJsonObject{{QStringLiteral("filePath"), Arg(args, "destinationPath")}, {QStringLiteral("ok"), true}});
+    }
     if(name == QStringLiteral("renderdoc_analyzeSystemTrace") || name.contains(QStringLiteral("SystemTrace")))
       return owner->AnalyzeSystemTrace(args, name, call);
     return Fail(ErrorCode::InvalidParams, "Unknown native session tool");
@@ -993,6 +1028,10 @@ void RegisterSessionTools(ToolRegistry &registry, QueryAdapter &adapter)
       {QStringLiteral("maxSpansPerTrack"), integer(1, 5000)},
       {QStringLiteral("maxSamplesPerSeries"), integer(2, 5000)}};
   add("renderdoc_analyzeSystemTrace", "Import a local System Trace and return counters, tracks, scheduler thread time, frame GPU time, GPU counter accounting, unmodelled event types, warnings and the supported ftrace event inventory. Span and counter contents are omitted by default; set includeSpans/includeSamples, and narrow with beginSec/endSec or the name filters.", traceAnalyze, QJsonArray{QStringLiteral("filePath")}, true);
+  add("renderdoc_saveSystemTrace", "Atomically save a self-contained versioned .rdt archive from an existing importable trace or .rdt. Existing destinations require overwrite true.",
+      QJsonObject{{QStringLiteral("filePath"), string(true)}, {QStringLiteral("destinationPath"), string(true)},
+        {QStringLiteral("overwrite"), QJsonObject{{QStringLiteral("type"), QStringLiteral("boolean")}}}},
+      QJsonArray{QStringLiteral("filePath"), QStringLiteral("destinationPath")}, false);
   QJsonObject query = traceAnalyze;
   for(const char *key : {"pid", "tid", "cpu", "offset", "limit", "frameIndex", "buckets"})
     query[QString::fromLatin1(key)] = integer(0, QString::fromLatin1(key) == QStringLiteral("limit") ? 5000 : INT_MAX);

@@ -28,6 +28,13 @@
 #include <cstring>
 
 #include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QSaveFile>
+#include <QTemporaryFile>
+#include <QCryptographicHash>
+#include <QDataStream>
+#include <QDateTime>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -3977,6 +3984,8 @@ QStringList FtraceEventNames()
   return names;
 }
 
+#include "SystemTraceArchive.h"
+
 SystemTrace ImportSystemTraceFile(const QString &path)
 {
   QFile file(path);
@@ -3988,6 +3997,17 @@ SystemTrace ImportSystemTraceFile(const QString &path)
     return trace;
   }
 
+  if(file.peek(RdtMagic.size()) == RdtMagic || QFileInfo(path).suffix().compare(QStringLiteral("rdt"), Qt::CaseInsensitive)==0)
+  {
+    file.close();QByteArray timeline,raw;QString error;
+    SystemTrace trace;
+    if(!ReadRdt(path,timeline,raw,error)){trace.source=path;trace.warnings << error;return trace;}
+    QTemporaryFile unpacked;
+    if(!unpacked.open() || unpacked.write(timeline)!=timeline.size() || !unpacked.flush())
+    {trace.source=path;trace.warnings << QObject::tr("Could not unpack RDT timeline");return trace;}
+    trace=ImportSystemTraceFile(unpacked.fileName());trace.source=path;
+    return trace;
+  }
   const QByteArray head = file.read(4096);
   file.close();
 
@@ -3995,7 +4015,11 @@ SystemTrace ImportSystemTraceFile(const QString &path)
   // export starts with '{' or '['.
   const QByteArray trimmed = head.trimmed();
   if(trimmed.startsWith('{') || trimmed.startsWith('['))
-    return ImportChromeTraceEventFormat(path);
+  {
+    SystemTrace trace=ImportChromeTraceEventFormat(path);
+    if(!trace.valid) trace=ImportSystemTraceJsonLines(path);
+    return trace;
+  }
 
   return ImportSystraceText(path);
 }

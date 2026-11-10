@@ -489,4 +489,20 @@ TEST_CASE("System Trace MCP window statistics preserve evidence", "[mcp][systemt
   CHECK(frames[0].toObject().value(QStringLiteral("frameNumber")).isNull());
   CHECK(frames[1].toObject().value(QStringLiteral("endSec")).isNull());
 }
+TEST_CASE("RDT archives survive source removal and reject corruption", "[mcp][systemtrace][rdt]")
+{
+  QTemporaryDir directory; REQUIRE(directory.isValid());
+  const QString source=directory.path()+QStringLiteral("/source.json");
+  const QString archive=directory.path()+QStringLiteral("/saved.rdt");
+  QFile file(source);REQUIRE(file.open(QIODevice::WriteOnly));
+  file.write("{\"traceEvents\":[{\"ph\":\"C\",\"name\":\"cpu\",\"pid\":1,\"ts\":1000,\"args\":{\"value\":42}}]}");
+  file.close();
+  QString error;REQUIRE(SaveSystemTraceArchive(source,archive,error));
+  REQUIRE(QFile::remove(source));
+  const auto trace=ImportSystemTraceFile(archive);CHECK(trace.valid);CHECK(bool(trace.source==archive));
+  CHECK_FALSE(SaveSystemTraceArchive(archive,archive,error));
+  QFile corrupt(archive);REQUIRE(corrupt.open(QIODevice::ReadWrite));
+  REQUIRE(corrupt.seek(corrupt.size()-1));corrupt.write("X",1);corrupt.close();
+  CHECK_FALSE(ImportSystemTraceFile(archive).valid);
+}
 #endif

@@ -2718,6 +2718,20 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
 
   QPushButton *browse = new QPushButton(tr("Open Trace..."), this);
   QPushButton *reload = new QPushButton(tr("Reload"), this);
+  QPushButton *saveTrace = new QPushButton(tr("Save Trace As..."), this);
+  connect(saveTrace, &QPushButton::clicked, this, [this]() {
+    if(m_Importing || m_TracePath->text().isEmpty())
+    { RDDialog::critical(this, tr("Save System Trace"), tr("Open or finish recording a trace first.")); return; }
+    QString path = RDDialog::getSaveFileName(this, tr("Save System Trace"),
+        QFileInfo(m_TracePath->text()).absolutePath() + QStringLiteral("/capture.rdt"),
+        tr("RenderMax System Trace (*.rdt)"));
+    if(path.isEmpty()) return;
+    if(!path.endsWith(QStringLiteral(".rdt"), Qt::CaseInsensitive)) path += QStringLiteral(".rdt");
+    QString error;
+    if(!SaveSystemTraceArchive(m_TracePath->text(), path, error))
+    { RDDialog::critical(this, tr("Save System Trace failed"), error); return; }
+    loadTraceFrom(path);
+  });
 
   // Recording controls. The duration is chosen before starting because a device protocol
   // serialises its commands onto one thread: a running `perfetto` cannot be interrupted, so the
@@ -2761,6 +2775,7 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   fileRow->addWidget(m_TracePath, 1);
   fileRow->addWidget(browse);
   fileRow->addWidget(reload);
+  fileRow->addWidget(saveTrace);
   fileRow->addWidget(new QLabel(tr("Record:"), this));
   fileRow->addWidget(m_CaptureSeconds);
   fileRow->addWidget(m_CaptureDetail);
@@ -3096,7 +3111,7 @@ void SystemTraceViewer::browseForTrace()
 {
   const QString path = RDDialog::getOpenFileName(
       this, tr("Select a system trace to correlate"), m_Ctx.Config().LastCaptureFilePath,
-      tr("Trace files (*.jsonl *.json *.txt);;All Files (*)"));
+      tr("RenderMax System Trace (*.rdt);;Trace files (*.jsonl *.json *.txt);;All Files (*)"));
 
   if(path.isEmpty())
     return;
@@ -3124,6 +3139,8 @@ SystemTrace ImportTraceFile(const QString &path)
   // interchange, and a raw systrace/kernel trace text file - and the file's own content decides
   // which importer runs. Selecting on the extension alone would mis-route a `traceconv json` output
   // named `.txt`, and `traceconv systrace` produces a file that starts with a kernel trace header.
+  if(QFileInfo(path).suffix().compare(QStringLiteral("rdt"), Qt::CaseInsensitive) == 0)
+    return ImportSystemTraceFile(path);
   switch(ClassifyTraceFile(path))
   {
     case TraceFileKind::ChromeJson: return ImportChromeTraceEventFormat(path);

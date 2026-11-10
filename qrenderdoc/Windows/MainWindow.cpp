@@ -751,16 +751,16 @@ void MainWindow::on_action_Exit_triggered()
 
 void MainWindow::on_action_Open_Capture_triggered()
 {
-  if(!PromptCloseCapture())
-    return;
-
   QString filename = RDDialog::getOpenFileName(
       this, tr("Select file to open"), m_Ctx.Config().LastCaptureFilePath,
-      tr("Capture Files (*.rdc);;Image Files (*.dds *.hdr *.exr *.bmp *.jpg "
+      tr("Capture Files (*.rdc);;RenderMax System Trace (*.rdt);;Image Files (*.dds *.hdr *.exr *.bmp *.jpg "
          "*.jpeg *.png *.tga *.gif *.psd);;All Files (*)"));
 
-  if(!filename.isEmpty())
-    LoadFromFilename(filename, false);
+  if(filename.isEmpty()) return;
+  // Opening a system trace is independent of replay and must not close an active RDC.
+  if(QFileInfo(filename).suffix().compare(lit("rdt"), Qt::CaseInsensitive) != 0 && !PromptCloseCapture())
+    return;
+  LoadFromFilename(filename, false);
 }
 
 void MainWindow::on_action_Open_Capture_with_Options_triggered()
@@ -846,7 +846,12 @@ void MainWindow::LoadFromFilename(const QString &filename, bool temporary)
   QFileInfo path(filename);
   QString ext = path.suffix().toLower();
 
-  if(ext == lit("rdc"))
+  if(ext == lit("rdt"))
+  {
+    dockSystemTraceViewer(true);
+    ensureSystemTraceViewer()->OpenTrace(filename);
+  }
+  else if(ext == lit("rdc"))
   {
     LoadCapture(filename, m_Ctx.Config().DefaultReplayOptions, temporary, true);
   }

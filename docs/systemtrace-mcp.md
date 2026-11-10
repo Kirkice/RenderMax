@@ -59,6 +59,20 @@ Power is a kernel estimate where indicated, not a physical power measurement. Th
 
 Use with `renderdoc_analyzeSystemTraceCpu`, `renderdoc_analyzeSystemTraceGpu`, or `renderdoc_buildSystemTraceReport`. Query capabilities first; missing events are not zero activity.
 
+## Capturing a trace
+
+`renderdoc_captureSystemTrace` records on the device, pulls the perfetto trace, converts it with
+traceconv and returns `localTracePath` (perfetto) and `localTimelinePath` (importable systrace text).
+It needs a running application session, because a device session is what identifies the device; it
+does not need the target's frame-capture channel.
+
+An Android application reports to whichever device remote server is already running. If one is left
+over from an earlier replay, it keeps the application's connection, the direct control channel is
+not available, and the launch response reports `targetControl: false` with a `targetControlHint`.
+Frame capture and live inspection are then unavailable, while `renderdoc_captureSystemTrace` and
+every analysis tool work on the recorded file. Stopping the stale server before launching restores
+the direct channel, which reports `targetControl: true`.
+
 ## Implementation limitations
 
 Import is synchronous; cancellation is checked before/after import and analysis, not inside the importer. A single trace up to 16 MiB source size is cached on the serialized session worker, keyed by path/size/mtime; this is not a parsed-memory hard cap. Basic reports provide measured evidence, not an automated causal bottleneck classifier.

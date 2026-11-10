@@ -84,6 +84,7 @@ class SystemTraceTimeline;
 class SystemTraceViewer : public QFrame, public ICaptureViewer
 {
 public:
+  void OpenTrace(const QString &path) { loadTraceFrom(path); }
   explicit SystemTraceViewer(ICaptureContext &ctx, QWidget *parent = 0);
   ~SystemTraceViewer();
 

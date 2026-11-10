@@ -1431,6 +1431,13 @@ ToolResult QueryAdapter::DispatchBlock(const char *toolName, CallContext &call,
       return ToolResult::Failure(Error(ErrorCode::NoCaptureLoaded, "no capture is loaded"));
     if(m_Ctx->IsCaptureLoading())
       return ToolResult::Failure(Error(ErrorCode::CaptureBusy, "capture is still loading"));
+    // A capture whose replay already failed answers nothing meaningful, and one way it fails here is
+    // a dropped device connection. Say so instead of letting a counter query come back with every
+    // sample missing, which reads like a driver that measured zero.
+    const ResultDetails fatalError = m_Ctx->GetFatalError();
+    if(!fatalError.OK())
+      return ToolResult::Failure(Error(ErrorCode::ReplayUnavailable,
+          QStringLiteral("the capture's replay failed: %1").arg(FromRdcStr(fatalError.Message()))));
     replayManager = &m_Ctx->Replay();
     return ToolResult::Success(QJsonObject());
   });
@@ -2195,7 +2202,10 @@ ToolResult QueryAdapter::FetchCounters(const QStringList &names, const QVector<u
           {QStringLiteral("message"), QStringLiteral(
                                          "None of the requested counters exist for this capture. "
                                          "The list above is everything the replay driver reports, "
-                                         "which is what can be fetched.")}});
+                                         "which is what can be fetched. An empty list is not a "
+                                         "measurement: it means no counter is reachable at all, which "
+                                         "for a device replay also happens when the connection to the "
+                                         "remote server drops - renderdoc_getReplayStatus says which.")}});
     }
 
     rdcarray<GPUCounter> fetchArray;
