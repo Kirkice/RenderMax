@@ -1294,9 +1294,8 @@ See FAQ on &quot;Gamma display of linear data&quot;</string>
         <property name="toolTip">
          <string>Select visible columns</string>
         </property>
-        <property name="icon">
-         <iconset resource="../Resources/resources.qrc">
-          <normaloff>:/timeline_marker.png</normaloff>:/timeline_marker.png</iconset>
+        <property name="rdIcon" stdset="0">
+         <string>columns</string>
         </property>
         <property name="autoRaise">
          <bool>true</bool>

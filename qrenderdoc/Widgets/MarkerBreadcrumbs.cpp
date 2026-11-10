@@ -25,10 +25,16 @@
 #include "MarkerBreadcrumbs.h"
 #include <QAction>
 #include <QMenu>
+#include <QStyle>
 #include "Code/QRDUtils.h"
 #include "Code/Resources.h"
 #include "Widgets/Extended/RDLabel.h"
 #include "Widgets/Extended/RDToolButton.h"
+
+// Width of the stylesheet's `QToolButton::menu-indicator` image, from the theme's QSS. The style
+// hands the arrow to the stylesheet and then reports PM_MenuButtonIndicator as 0, so this is the
+// only value that says how much room the arrow takes.
+static const int kStyledMenuArrowWidth = 12;
 
 BreadcrumbsLayout::BreadcrumbsLayout(QWidget *parent, RDToolButton *elidedItems) : QLayout(parent)
 {
@@ -344,6 +350,15 @@ void MarkerBreadcrumbs::AddPathButton(const ActionDescription *action)
 
     b->setPopupMode(QToolButton::MenuButtonPopup);
     b->setMenu(menu);
+
+    // A button that carries only an icon is sized for that icon, and the dropdown arrow is then
+    // drawn inside the same width. The style is supposed to include PM_MenuButtonIndicator in the
+    // size for exactly this reason, but the stylesheet takes the arrow over and reports that metric
+    // as 0 while drawing `QToolButton::menu-indicator` from the sheet, so the record has to make
+    // the room itself - otherwise the arrow lands on the right-hand side of the icon.
+    const int arrow = b->style()->pixelMetric(QStyle::PM_MenuButtonIndicator, NULL, b);
+    if(arrow == 0 && b->toolButtonStyle() == Qt::ToolButtonIconOnly)
+      b->setMinimumWidth(b->sizeHint().width() + kStyledMenuArrowWidth);
 
     QObject::connect(menu, &QMenu::aboutToShow,
                      [this, menu, action]() { ConfigurePathMenu(menu, action); });

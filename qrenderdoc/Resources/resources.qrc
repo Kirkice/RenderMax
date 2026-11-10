@@ -39,9 +39,11 @@
         <file>Line/arrow_refresh.svg</file>
         <file>Line/arrow_right.svg</file>
         <file>Line/arrow_undo.svg</file>
+        <file>Line/bookmark.svg</file>
         <file>Line/bug.svg</file>
         <file>Line/chart_curve.svg</file>
         <file>Line/cog.svg</file>
+        <file>Line/columns.svg</file>
         <file>Line/color_wheel.svg</file>
         <file>Line/connect.svg</file>
         <file>Line/copy.svg</file>
@@ -107,8 +109,6 @@
         <file>control_start_blue@2x.png</file>
         <file>flag_green.png</file>
         <file>flag_green@2x.png</file>
-        <file>timeline_marker.png</file>
-        <file>timeline_marker@2x.png</file>
         <file>wireframe_mesh.png</file>
         <file>wireframe_mesh@2x.png</file>
         <file>bookmark_blue.png</file>

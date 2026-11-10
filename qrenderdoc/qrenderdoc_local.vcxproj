@@ -2145,8 +2145,6 @@
     <Image Include="Resources\flag_green%402x.png" />
     <Image Include="Resources\flag_green.png" />
     <Image Include="Resources\icon.ico" />
-    <Image Include="Resources\timeline_marker%402x.png" />
-    <Image Include="Resources\timeline_marker.png" />
     <Image Include="Resources\wireframe_mesh%402x.png" />
     <Image Include="Resources\wireframe_mesh.png" />
   </ItemGroup>

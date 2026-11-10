@@ -5649,8 +5649,8 @@ void EventBrowser::events_contextMenu(const QPoint &pos)
 
   expandAll.setIcon(Icons::arrow_out());
   collapseAll.setIcon(Icons::arrow_in());
-  toggleBookmark.setIcon(Icons::asterisk_orange());
-  selectCols.setIcon(Icons::timeline_marker());
+  toggleBookmark.setIcon(Icons::bookmark());
+  selectCols.setIcon(Icons::columns());
 
   expandAll.setEnabled(index.isValid() && ui->events->model()->rowCount(index) > 0);
   collapseAll.setEnabled(expandAll.isEnabled());
