@@ -48,9 +48,8 @@
        <property name="text">
         <string>Export</string>
        </property>
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/save.png</normaloff>:/save.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>save</string>
        </property>
        <property name="popupMode">
         <enum>QToolButton::MenuButtonPopup</enum>

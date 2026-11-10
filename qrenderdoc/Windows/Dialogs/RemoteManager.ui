@@ -47,8 +47,8 @@
    <property name="text">
     <string/>
    </property>
-   <property name="pixmap">
-    <pixmap resource="../../Resources/resources.qrc">:/hourglass.png</pixmap>
+   <property name="rdIcon" stdset="0">
+    <string>hourglass</string>
    </property>
   </widget>
   <widget class="QLabel" name="progressText">

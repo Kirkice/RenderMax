@@ -89,9 +89,8 @@
           <property name="text">
            <string>Sync with Event Browser</string>
           </property>
-          <property name="icon">
-           <iconset resource="../Resources/resources.qrc">
-            <normaloff>:/arrow_join.png</normaloff>:/arrow_join.png</iconset>
+          <property name="rdIcon" stdset="0">
+           <string>arrow_join</string>
           </property>
           <property name="checkable">
            <bool>true</bool>
@@ -119,9 +118,8 @@
           <property name="toolTip">
            <string>Export to CSV</string>
           </property>
-          <property name="icon">
-           <iconset resource="../Resources/resources.qrc">
-            <normaloff>:/save.png</normaloff>:/save.png</iconset>
+          <property name="rdIcon" stdset="0">
+           <string>save</string>
           </property>
           <property name="autoRaise">
            <bool>true</bool>

@@ -178,9 +178,8 @@
       <property name="text">
        <string>New</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>page_white_edit</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -198,9 +197,8 @@
       <property name="text">
        <string>Open</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/folder_page_white.png</normaloff>:/folder_page_white.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>folder_page_white</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -218,9 +216,8 @@
       <property name="text">
        <string>Save</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/save.png</normaloff>:/save.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>save</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -238,9 +235,8 @@
       <property name="text">
        <string>Save As</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/save.png</normaloff>:/save.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>save</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -265,9 +261,8 @@
       <property name="text">
        <string>Find</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/find.png</normaloff>:/find.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>find</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -292,9 +287,8 @@
       <property name="text">
        <string>Run</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/arrow_right.png</normaloff>:/arrow_right.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>arrow_right</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -309,9 +303,8 @@
       <property name="text">
        <string>Attach External Debugger</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/wrench.png</normaloff>:/wrench.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>wrench</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -329,9 +322,8 @@
       <property name="text">
        <string>Abort</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/del.png</normaloff>:/del.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>del</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>

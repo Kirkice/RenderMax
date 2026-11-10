@@ -101,9 +101,8 @@
        <property name="text">
         <string>Debug</string>
        </property>
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/wrench.png</normaloff>:/wrench.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>wrench</string>
        </property>
       </widget>
      </item>

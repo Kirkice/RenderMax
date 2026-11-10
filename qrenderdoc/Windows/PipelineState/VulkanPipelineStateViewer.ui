@@ -75,9 +75,8 @@
         <property name="text">
          <string>Show Unused Items</string>
         </property>
-        <property name="icon">
-         <iconset resource="../../Resources/resources.qrc">
-          <normaloff>:/page_white_delete.png</normaloff>:/page_white_delete.png</iconset>
+        <property name="rdIcon" stdset="0">
+         <string>page_white_delete</string>
         </property>
         <property name="checkable">
          <bool>true</bool>
@@ -98,9 +97,8 @@
         <property name="text">
          <string>Show Empty Items</string>
         </property>
-        <property name="icon">
-         <iconset resource="../../Resources/resources.qrc">
-          <normaloff>:/page_white_database.png</normaloff>:/page_white_database.png</iconset>
+        <property name="rdIcon" stdset="0">
+         <string>page_white_database</string>
         </property>
         <property name="checkable">
          <bool>true</bool>
@@ -121,9 +119,8 @@
         <property name="text">
          <string>Export</string>
         </property>
-        <property name="icon">
-         <iconset resource="../../Resources/resources.qrc">
-          <normaloff>:/save.png</normaloff>:/save.png</iconset>
+        <property name="rdIcon" stdset="0">
+         <string>save</string>
         </property>
         <property name="checkable">
          <bool>false</bool>
@@ -144,9 +141,8 @@
         <property name="text">
          <string>Extensions</string>
         </property>
-        <property name="icon">
-         <iconset resource="../../Resources/resources.qrc">
-          <normaloff>:/plugin.png</normaloff>:/plugin.png</iconset>
+        <property name="rdIcon" stdset="0">
+         <string>plugin</string>
         </property>
         <property name="toolButtonStyle">
          <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -600,9 +596,8 @@
             <property name="text">
              <string>Edit</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>page_white_edit</string>
             </property>
             <property name="popupMode">
              <enum>QToolButton::MenuButtonPopup</enum>
@@ -623,9 +618,8 @@
             <property name="text">
              <string>Save</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/save.png</normaloff>:/save.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>save</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -643,9 +637,8 @@
             <property name="text">
              <string>Messages</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/text_add.png</normaloff>:/text_add.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>text_add</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -1027,9 +1020,8 @@
             <property name="text">
              <string>Edit</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>page_white_edit</string>
             </property>
             <property name="popupMode">
              <enum>QToolButton::MenuButtonPopup</enum>
@@ -1050,9 +1042,8 @@
             <property name="text">
              <string>Save</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/save.png</normaloff>:/save.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>save</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -1070,9 +1061,8 @@
             <property name="text">
              <string>Messages</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/text_add.png</normaloff>:/text_add.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>text_add</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -1454,9 +1444,8 @@
             <property name="text">
              <string>Edit</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>page_white_edit</string>
             </property>
             <property name="popupMode">
              <enum>QToolButton::MenuButtonPopup</enum>
@@ -1477,9 +1466,8 @@
             <property name="text">
              <string>Save</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/save.png</normaloff>:/save.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>save</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -1497,9 +1485,8 @@
             <property name="text">
              <string>Messages</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/text_add.png</normaloff>:/text_add.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>text_add</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -1881,9 +1868,8 @@
             <property name="text">
              <string>Edit</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>page_white_edit</string>
             </property>
             <property name="popupMode">
              <enum>QToolButton::MenuButtonPopup</enum>
@@ -1904,9 +1890,8 @@
             <property name="text">
              <string>Save</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/save.png</normaloff>:/save.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>save</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -1924,9 +1909,8 @@
             <property name="text">
              <string>Messages</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/text_add.png</normaloff>:/text_add.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>text_add</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -2366,8 +2350,8 @@
               <property name="text">
                <string/>
               </property>
-              <property name="pixmap">
-               <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+              <property name="rdIcon" stdset="0">
+               <string>cross</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -2566,8 +2550,8 @@
               <property name="text">
                <string/>
               </property>
-              <property name="pixmap">
-               <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+              <property name="rdIcon" stdset="0">
+               <string>cross</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -2592,8 +2576,8 @@
             </item>
             <item row="2" column="3">
              <widget class="QLabel" name="depthClip">
-              <property name="pixmap">
-               <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+              <property name="rdIcon" stdset="0">
+               <string>cross</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -2685,8 +2669,8 @@
                 <pointsize>12</pointsize>
                </font>
               </property>
-              <property name="pixmap">
-               <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+              <property name="rdIcon" stdset="0">
+               <string>cross</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -2716,8 +2700,8 @@
                 <pointsize>12</pointsize>
                </font>
               </property>
-              <property name="pixmap">
-               <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+              <property name="rdIcon" stdset="0">
+               <string>cross</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -2745,8 +2729,8 @@
               <property name="text">
                <string/>
               </property>
-              <property name="pixmap">
-               <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+              <property name="rdIcon" stdset="0">
+               <string>cross</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -2907,8 +2891,8 @@
               <property name="text">
                <string/>
               </property>
-              <property name="pixmap">
-               <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+              <property name="rdIcon" stdset="0">
+               <string>cross</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -3011,8 +2995,8 @@
             </item>
             <item row="2" column="1">
              <widget class="QLabel" name="alphaToOne">
-              <property name="pixmap">
-               <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+              <property name="rdIcon" stdset="0">
+               <string>cross</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -3037,8 +3021,8 @@
             </item>
             <item row="2" column="3">
              <widget class="QLabel" name="alphaToCoverage">
-              <property name="pixmap">
-               <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+              <property name="rdIcon" stdset="0">
+               <string>cross</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -3431,9 +3415,8 @@
             <property name="text">
              <string>Edit</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>page_white_edit</string>
             </property>
             <property name="popupMode">
              <enum>QToolButton::MenuButtonPopup</enum>
@@ -3454,9 +3437,8 @@
             <property name="text">
              <string>Save</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/save.png</normaloff>:/save.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>save</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -3474,9 +3456,8 @@
             <property name="text">
              <string>Messages</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/text_add.png</normaloff>:/text_add.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>text_add</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -4084,8 +4065,8 @@
                 <property name="text">
                  <string/>
                 </property>
-                <property name="pixmap">
-                 <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+                <property name="rdIcon" stdset="0">
+                 <string>cross</string>
                 </property>
                 <property name="alignment">
                  <set>Qt::AlignCenter</set>
@@ -4143,8 +4124,8 @@
                 <property name="text">
                  <string/>
                 </property>
-                <property name="pixmap">
-                 <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+                <property name="rdIcon" stdset="0">
+                 <string>cross</string>
                 </property>
                 <property name="alignment">
                  <set>Qt::AlignCenter</set>
@@ -4174,8 +4155,8 @@
                 <property name="text">
                  <string/>
                 </property>
-                <property name="pixmap">
-                 <pixmap resource="../../Resources/resources.qrc">:/cross.png</pixmap>
+                <property name="rdIcon" stdset="0">
+                 <string>cross</string>
                 </property>
                 <property name="alignment">
                  <set>Qt::AlignCenter</set>
@@ -4387,9 +4368,8 @@
             <property name="text">
              <string>Edit</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>page_white_edit</string>
             </property>
             <property name="popupMode">
              <enum>QToolButton::MenuButtonPopup</enum>
@@ -4410,9 +4390,8 @@
             <property name="text">
              <string>Save</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/save.png</normaloff>:/save.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>save</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -4430,9 +4409,8 @@
             <property name="text">
              <string>Messages</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/text_add.png</normaloff>:/text_add.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>text_add</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -4447,9 +4425,8 @@
             <property name="text">
              <string>Debug</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/wrench.png</normaloff>:/wrench.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>wrench</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -4906,9 +4883,8 @@
             <property name="text">
              <string>Edit</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>page_white_edit</string>
             </property>
             <property name="popupMode">
              <enum>QToolButton::MenuButtonPopup</enum>
@@ -4929,9 +4905,8 @@
             <property name="text">
              <string>Save</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/save.png</normaloff>:/save.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>save</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -4949,9 +4924,8 @@
             <property name="text">
              <string>Messages</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/text_add.png</normaloff>:/text_add.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>text_add</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -5333,9 +5307,8 @@
             <property name="text">
              <string>Edit</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>page_white_edit</string>
             </property>
             <property name="popupMode">
              <enum>QToolButton::MenuButtonPopup</enum>
@@ -5356,9 +5329,8 @@
             <property name="text">
              <string>Save</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/save.png</normaloff>:/save.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>save</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -5376,9 +5348,8 @@
             <property name="text">
              <string>Messages</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/text_add.png</normaloff>:/text_add.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>text_add</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -5396,9 +5367,8 @@
             <property name="text">
              <string>View Mesh</string>
             </property>
-            <property name="icon">
-             <iconset resource="../../Resources/resources.qrc">
-              <normaloff>:/draw_vertex.png</normaloff>:/draw_vertex.png</iconset>
+            <property name="rdIcon" stdset="0">
+             <string>draw_vertex</string>
             </property>
             <property name="toolButtonStyle">
              <enum>Qt::ToolButtonTextBesideIcon</enum>

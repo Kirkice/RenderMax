@@ -206,9 +206,8 @@
              <property name="toolTip">
               <string>Configure Camera</string>
              </property>
-             <property name="icon">
-              <iconset resource="../Resources/resources.qrc">
-               <normaloff>:/cog.png</normaloff>:/cog.png</iconset>
+             <property name="rdIcon" stdset="0">
+              <string>cog</string>
              </property>
              <property name="checkable">
               <bool>true</bool>
@@ -232,9 +231,8 @@
              <property name="text">
               <string/>
              </property>
-             <property name="icon">
-              <iconset resource="../Resources/resources.qrc">
-               <normaloff>:/arrow_undo.png</normaloff>:/arrow_undo.png</iconset>
+             <property name="rdIcon" stdset="0">
+              <string>arrow_undo</string>
              </property>
              <property name="autoRaise">
               <bool>true</bool>
@@ -252,9 +250,8 @@
              <property name="text">
               <string/>
              </property>
-             <property name="icon">
-              <iconset resource="../Resources/resources.qrc">
-               <normaloff>:/wand.png</normaloff>:/wand.png</iconset>
+             <property name="rdIcon" stdset="0">
+              <string>wand</string>
              </property>
              <property name="autoRaise">
               <bool>true</bool>
@@ -860,9 +857,8 @@
       <property name="toolTip">
        <string>Export to CSV or raw bytes</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/save.png</normaloff>:/save.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>save</string>
       </property>
       <property name="checkable">
        <bool>false</bool>
@@ -886,9 +882,8 @@
       <property name="toolTip">
        <string>Show visible padding</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/align.png</normaloff>:/align.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>align</string>
       </property>
       <property name="checkable">
        <bool>true</bool>
@@ -912,9 +907,8 @@
       <property name="text">
        <string>Sync Views</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/arrow_join.png</normaloff>:/arrow_join.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>arrow_join</string>
       </property>
       <property name="checkable">
        <bool>true</bool>
@@ -951,9 +945,8 @@
       <property name="toolTip">
        <string>Open the currently visible buffer's resource details in the resource inspector</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/link.png</normaloff>:/link.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>link</string>
       </property>
       <property name="autoRaise">
        <bool>true</bool>
@@ -962,9 +955,8 @@
     </item>
     <item>
      <widget class="QToolButton" name="extensions">
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/plugin.png</normaloff>:/plugin.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>plugin</string>
       </property>
       <property name="autoRaise">
        <bool>true</bool>
@@ -1032,9 +1024,8 @@
       <property name="toolTip">
        <string>Reset the filter showing only a subset of meshlets</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/arrow_undo.png</normaloff>:/arrow_undo.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>arrow_undo</string>
       </property>
       <property name="autoRaise">
        <bool>true</bool>

@@ -310,9 +310,8 @@
       <property name="text">
        <string>Debug Info</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/information.png</normaloff>:/information.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>information</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -330,9 +329,8 @@
       <property name="text">
        <string>Find</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/find.png</normaloff>:/find.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>find</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -373,9 +371,8 @@
       <property name="text">
        <string>Mali Analysis</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/information.png</normaloff>:/information.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>information</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -400,9 +397,8 @@
       <property name="text">
        <string>Reset</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/del.png</normaloff>:/del.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>del</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -420,9 +416,8 @@
       <property name="text">
        <string>Apply changes</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/arrow_refresh.png</normaloff>:/arrow_refresh.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>arrow_refresh</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -440,9 +435,8 @@
       <property name="text">
        <string>Remove changes</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/arrow_undo.png</normaloff>:/arrow_undo.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>arrow_undo</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -470,9 +464,8 @@
       <property name="text">
        <string>Insert...</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/plugin_add.png</normaloff>:/plugin_add.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>plugin_add</string>
       </property>
       <property name="popupMode">
        <enum>QToolButton::InstantPopup</enum>

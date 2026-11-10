@@ -68,9 +68,8 @@
        <property name="toolTip">
         <string>Go to Previous Action</string>
        </property>
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/arrow_left.png</normaloff>:/arrow_left.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>arrow_left</string>
        </property>
        <property name="autoRaise">
         <bool>true</bool>
@@ -82,9 +81,8 @@
        <property name="toolTip">
         <string>Go to Next Action</string>
        </property>
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/arrow_right.png</normaloff>:/arrow_right.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>arrow_right</string>
        </property>
        <property name="autoRaise">
         <bool>true</bool>
@@ -103,9 +101,8 @@
        <property name="toolTip">
         <string>Find event by string</string>
        </property>
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/find.png</normaloff>:/find.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>find</string>
        </property>
        <property name="checkable">
         <bool>true</bool>
@@ -126,9 +123,8 @@
        <property name="text">
         <string/>
        </property>
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/time.png</normaloff>:/time.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>time</string>
        </property>
        <property name="autoRaise">
         <bool>true</bool>
@@ -171,9 +167,8 @@
        <property name="toolTip">
         <string>Export the list of events to disk</string>
        </property>
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/save.png</normaloff>:/save.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>save</string>
        </property>
        <property name="autoRaise">
         <bool>true</bool>
@@ -182,9 +177,8 @@
      </item>
      <item>
       <widget class="QToolButton" name="extensions">
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/plugin.png</normaloff>:/plugin.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>plugin</string>
        </property>
        <property name="autoRaise">
         <bool>true</bool>
@@ -229,8 +223,8 @@
         <property name="text">
          <string/>
         </property>
-        <property name="pixmap">
-         <pixmap resource="../Resources/resources.qrc">:/find.png</pixmap>
+        <property name="rdIcon" stdset="0">
+         <string>find</string>
         </property>
        </widget>
       </item>
@@ -271,9 +265,8 @@
         <property name="text">
          <string/>
         </property>
-        <property name="icon">
-         <iconset resource="../Resources/resources.qrc">
-          <normaloff>:/arrow_left.png</normaloff>:/arrow_left.png</iconset>
+        <property name="rdIcon" stdset="0">
+         <string>arrow_left</string>
         </property>
         <property name="autoRaise">
          <bool>true</bool>
@@ -285,9 +278,8 @@
         <property name="text">
          <string/>
         </property>
-        <property name="icon">
-         <iconset resource="../Resources/resources.qrc">
-          <normaloff>:/arrow_right.png</normaloff>:/arrow_right.png</iconset>
+        <property name="rdIcon" stdset="0">
+         <string>arrow_right</string>
         </property>
         <property name="autoRaise">
          <bool>true</bool>
@@ -320,8 +312,8 @@
         <property name="text">
          <string/>
         </property>
-        <property name="pixmap">
-         <pixmap resource="../Resources/resources.qrc">:/filter.png</pixmap>
+        <property name="rdIcon" stdset="0">
+         <string>filter</string>
         </property>
        </widget>
       </item>
@@ -359,9 +351,8 @@
         <property name="text">
          <string>Settings &amp;&amp; Help</string>
         </property>
-        <property name="icon">
-         <iconset resource="../Resources/resources.qrc">
-          <normaloff>:/cog.png</normaloff>:/cog.png</iconset>
+        <property name="rdIcon" stdset="0">
+         <string>cog</string>
         </property>
         <property name="toolButtonStyle">
          <enum>Qt::ToolButtonTextBesideIcon</enum>

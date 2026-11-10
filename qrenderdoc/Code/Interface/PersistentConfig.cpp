@@ -28,6 +28,7 @@
 #include <QMutexLocker>
 #include <QStandardPaths>
 #include "Code/QRDUtils.h"
+#include "Code/Resources.h"
 #include "Styles/StyleData.h"
 #include "QRDInterface.h"
 
@@ -453,6 +454,9 @@ bool PersistentConfig::SetStyle()
       qApp->setStyleSheet(QString());
       Formatter::setPalette(style->standardPalette());
       QApplication::setStyle(style);
+      // The line-art icons are the theme's text colour, so the copies rendered for the previous
+      // theme are now the wrong colour. Drop them; every icon re-renders on next use.
+      Resources::RefreshIcons();
       return true;
     }
   }

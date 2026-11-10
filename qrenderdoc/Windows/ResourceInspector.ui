@@ -64,9 +64,8 @@
         <property name="text">
          <string/>
         </property>
-        <property name="icon">
-         <iconset resource="../Resources/resources.qrc">
-          <normaloff>:/cross.png</normaloff>:/cross.png</iconset>
+        <property name="rdIcon" stdset="0">
+         <string>cross</string>
         </property>
         <property name="autoRaise">
          <bool>true</bool>
@@ -187,9 +186,8 @@
       <property name="text">
        <string>Rename resource</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/page_white_edit.png</normaloff>:/page_white_edit.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>page_white_edit</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>
@@ -204,9 +202,8 @@
       <property name="text">
        <string>Reset name</string>
       </property>
-      <property name="icon">
-       <iconset resource="../Resources/resources.qrc">
-        <normaloff>:/arrow_undo.png</normaloff>:/arrow_undo.png</iconset>
+      <property name="rdIcon" stdset="0">
+       <string>arrow_undo</string>
       </property>
       <property name="toolButtonStyle">
        <enum>Qt::ToolButtonTextBesideIcon</enum>

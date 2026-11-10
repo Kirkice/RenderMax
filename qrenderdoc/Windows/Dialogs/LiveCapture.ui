@@ -91,8 +91,8 @@
            <property name="text">
             <string/>
            </property>
-           <property name="pixmap">
-            <pixmap resource="../../Resources/resources.qrc">:/hourglass.png</pixmap>
+           <property name="rdIcon" stdset="0">
+            <string>hourglass</string>
            </property>
           </widget>
          </item>
@@ -133,8 +133,8 @@
 
 &lt;p&gt;Click on the icon for more information about this API.&lt;/p&gt;</string>
            </property>
-           <property name="pixmap">
-            <pixmap resource="../../Resources/resources.qrc">:/information.png</pixmap>
+           <property name="rdIcon" stdset="0">
+            <string>information</string>
            </property>
           </widget>
          </item>

@@ -147,9 +147,8 @@ p, li { white-space: pre-wrap; }
              <property name="toolTip">
               <string>Show buffer definition help</string>
              </property>
-             <property name="icon">
-              <iconset resource="../Resources/resources.qrc">
-               <normaloff>:/help.png</normaloff>:/help.png</iconset>
+             <property name="rdIcon" stdset="0">
+              <string>help</string>
              </property>
              <property name="checkable">
               <bool>true</bool>
@@ -180,9 +179,8 @@ p, li { white-space: pre-wrap; }
              <property name="toolTip">
               <string>Delete selected structure definition</string>
              </property>
-             <property name="icon">
-              <iconset resource="../Resources/resources.qrc">
-               <normaloff>:/del.png</normaloff>:/del.png</iconset>
+             <property name="rdIcon" stdset="0">
+              <string>del</string>
              </property>
              <property name="autoRaise">
               <bool>true</bool>
@@ -194,9 +192,8 @@ p, li { white-space: pre-wrap; }
              <property name="toolTip">
               <string>Update selected with current structure definition</string>
              </property>
-             <property name="icon">
-              <iconset resource="../Resources/resources.qrc">
-               <normaloff>:/save.png</normaloff>:/save.png</iconset>
+             <property name="rdIcon" stdset="0">
+              <string>save</string>
              </property>
              <property name="autoRaise">
               <bool>true</bool>

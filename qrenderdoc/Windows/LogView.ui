@@ -51,9 +51,8 @@
        <property name="text">
         <string>Follow new messages</string>
        </property>
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/arrow_refresh.png</normaloff>:/arrow_refresh.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>arrow_refresh</string>
        </property>
        <property name="checkable">
         <bool>true</bool>
@@ -91,9 +90,8 @@
        <property name="text">
         <string>Save</string>
        </property>
-       <property name="icon">
-        <iconset resource="../Resources/resources.qrc">
-         <normaloff>:/save.png</normaloff>:/save.png</iconset>
+       <property name="rdIcon" stdset="0">
+        <string>save</string>
        </property>
        <property name="toolButtonStyle">
         <enum>Qt::ToolButtonTextBesideIcon</enum>
