@@ -644,15 +644,16 @@ rdcarray<CounterResult> GLReplay::FetchCountersQC(const rdcarray<GPUCounter> &co
     m_pQCCounters->EnableCounter(counters[i]);
   }
 
-  uint32_t passCount = m_pQCCounters->GetPassCount();
-
   uint32_t sampleIndex = 0;
 
   rdcarray<uint32_t> eventIDs;
 
   m_pDriver->ReplayMarkers(false);
 
-  for(uint32_t p = 0; p < passCount; p++)
+  // The pass count is re-read every iteration: a pass can discover that the driver will not select one
+  // of its counters together with the others, which appends a pass for that counter to measure it on
+  // its own. Existing indices never move, so the passes already sampled stay valid.
+  for(uint32_t p = 0; p < m_pQCCounters->GetPassCount(); p++)
   {
     m_pQCCounters->BeginPass(p);
 

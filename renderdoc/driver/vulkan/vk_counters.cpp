@@ -720,15 +720,16 @@ rdcarray<CounterResult> VulkanReplay::FetchCountersQC(const rdcarray<GPUCounter>
     m_pQCCounters->EnableCounter(counters[i]);
   }
 
-  uint32_t passCount = m_pQCCounters->GetPassCount();
-
   rdcarray<uint32_t> eventIDs;
 
   // Aliases are only reported by the callback, so they are collected on each pass and kept from
   // the last one - the set is the same for every pass.
   rdcarray<rdcpair<uint32_t, uint32_t>> aliasEvents;
 
-  for(uint32_t i = 0; i < passCount; i++)
+  // The pass count is re-read every iteration: a pass can discover that the driver will not select
+  // one of its counters together with the others, which appends a pass for that counter. Existing
+  // indices never move.
+  for(uint32_t i = 0; i < m_pQCCounters->GetPassCount(); i++)
   {
     m_pQCCounters->BeginPass(i);
 

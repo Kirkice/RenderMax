@@ -83,6 +83,12 @@ static const QCGGPMNeed kQCGGPMNeeds[] = {
     {"SP", 30},   {"SP", 31},  {"SP", 32},  {"SP", 35},   {"SP", 40},   {"SP", 41},
     {"SP", 51},   {"SP", 52},  {"SP", 63},  {"SP", 74},   {"SP", 76},   {"SP", 78},
     {"CMP", 7},   {"ALWAYSON", 0},
+    // Counters only the fragment, per-second and bus metrics read. The (block, id) pairs behind
+    // A6xCustomCountable's aggregates are not listed here: they depend on the part number, so
+    // they live in kQCGGPMScopedDeps further down instead.
+    {"PC", 20},   {"TSE", 14},  {"SP", 33},   {"SP", 34},   {"SP", 39},   {"SP", 42},
+    {"SP", 99},   {"SP", 101},  {"HLSQ", 8},  {"HLSQ", 19}, {"GBIF", 34}, {"GBIF", 35},
+    {"GBIF", 46}, {"GBIF", 47},
 };
 
 static const uint32_t kQCGGPMNeedCount = sizeof(kQCGGPMNeeds) / sizeof(kQCGGPMNeeds[0]);
@@ -231,6 +237,71 @@ static const QCGGPMMetric kQCGGPMMetrics[] = {
      "RBBM timebase minus shader pipe busy, over the command processor always-on count."},
     {"stalled_on_system_memory", "% Stalled On System Memory", "%", kQCGGPMCatStalls,
      "UCHE stall cycles per texture pipe, over the RBBM timebase."},
+    // The set below is the part of the profiler's metric list that was recovered on the second
+    // pass over libGGPM.so: the per-second workloads, the per-vertex and per-fragment ratios and
+    // the bus / memory totals. Everything they divide by is either the sample's wall duration or
+    // one of A6xCustomCountable's aggregates.
+    {"clocks_per_second", "Clocks / Second", "Hz", kQCGGPMCatGeneral,
+     "Command processor always-on cycles per second: the GPU clock the window actually ran at."},
+    {"gpu_bus_busy", "GPU % Bus Busy", "%", kQCGGPMCatGeneral,
+     "Read plus write beats on the GPU's bus to system memory, over the part's beat divisor and "
+     "the RBBM timebase, clamped at 100%."},
+    {"preclipped_polygons_per_second", "Pre-clipped Polygons/Second", "/s",
+     kQCGGPMCatPrimitive,
+     "Primitives entering the triangle setup engine per second, before clipping and culling."},
+    {"average_vertices_per_polygon", "Average Vertices / Polygon", "vtx/poly",
+     kQCGGPMCatPrimitive,
+     "Vertex shader invocations over primitives entering the triangle setup engine. Near 3 for "
+     "triangle lists and near 1 for strips."},
+    {"reused_vertices_per_second", "Reused Vertices / Second", "/s", kQCGGPMCatPrimitive,
+     "Post-transform cache vertex hits per second."},
+    {"vertices_shaded_per_second", "Vertices Shaded / Second", "/s", kQCGGPMCatPrimitive,
+     "Vertex shader invocations per second."},
+    {"average_polygon_area", "Average Polygon Area", "px/poly", kQCGGPMCatPrimitive,
+     "Fragments per visible primitive. The binning architecture counts a primitive once per bin "
+     "it covers, so this is not the geometric area of the triangle."},
+    {"fragments_shaded_per_second", "Fragments Shaded / Second", "/s", kQCGGPMCatPrimitive,
+     "Fragments submitted to the shader engine per second."},
+    {"vertex_instructions_per_second", "Vertex Instructions / Second", "/s",
+     kQCGGPMCatShader,
+     "Full precision ALU plus EFU vertex shader instructions per second, four per wave."},
+    {"fragment_instructions_per_second", "Fragment Instructions / Second", "/s",
+     kQCGGPMCatShader,
+     "All fragment shader instructions per second: EFU and full precision ALU at four per wave, "
+     "half precision ALU at two."},
+    {"fragment_alu_full_per_second", "Fragment ALU Instructions / Sec (Full)", "/s",
+     kQCGGPMCatShader,
+     "Full precision fragment shader ALU instructions per second, four per wave."},
+    {"fragment_alu_half_per_second", "Fragment ALU Instructions / Sec (Half)", "/s",
+     kQCGGPMCatShader,
+     "Half precision fragment shader ALU instructions per second, four per wave."},
+    {"fragment_interpolation_per_second", "Fragment Interpolation Instructions / Second", "/s",
+     kQCGGPMCatShader,
+     "Barycentric interpolation instructions per second, four per wave."},
+    {"fragment_efu_per_second", "Fragment EFU Instructions / Second", "/s", kQCGGPMCatShader,
+     "Fragment shader elementary function instructions (sin, cos, pow, ...) per second."},
+    {"textures_per_vertex", "Textures / Vertex", "tex/vtx", kQCGGPMCatShader,
+     "Vertex shader texture instructions over vertex shader invocations, four per wave."},
+    {"alu_per_vertex", "ALU / Vertex", "inst/vtx", kQCGGPMCatShader,
+     "Full precision vertex shader ALU instructions per shaded vertex."},
+    {"efu_per_vertex", "EFU / Vertex", "inst/vtx", kQCGGPMCatShader,
+     "Vertex shader EFU instructions per shaded vertex."},
+    {"textures_per_fragment", "Textures / Fragment", "tex/frag", kQCGGPMCatShader,
+     "Texture output pixels minus the vertex stage's texture instructions, over shaded quads."},
+    {"alu_per_fragment", "ALU / Fragment", "inst/frag", kQCGGPMCatShader,
+     "Full precision plus half of the half precision fragment ALU instructions, per shaded quad."},
+    {"efu_per_fragment", "EFU / Fragment", "inst/frag", kQCGGPMCatShader,
+     "Fragment shader EFU instructions per shaded quad."},
+    {"interpolation_per_fragment", "Interpolation Instructions / Fragment", "inst/frag",
+     kQCGGPMCatShader, "Barycentric interpolation instructions per shaded quad."},
+    {"l1_texture_cache_miss_per_pixel", "L1 Texture Cache Miss Per Pixel", "miss/px",
+     kQCGGPMCatMemory, "Texture L1 cache line misses over covered pixels."},
+    {"read_total_bw", "Read Total (Bytes/sec)", "B/s", kQCGGPMCatMemory,
+     "AXI0 plus AXI1 read data beats per second, 32 bytes per beat."},
+    {"write_total_bw", "Write Total (Bytes/sec)", "B/s", kQCGGPMCatMemory,
+     "AXI0 plus AXI1 write data beats per second, 32 bytes per beat."},
+    {"avg_bytes_per_fragment", "Avg Bytes / Fragment", "B/frag", kQCGGPMCatMemory,
+     "Texture read beats into UCHE, 32 bytes each, over covered pixels."},
 };
 
 static const uint32_t kQCGGPMMetricCount = sizeof(kQCGGPMMetrics) / sizeof(kQCGGPMMetrics[0]);
@@ -509,6 +580,119 @@ static inline bool QCGGPMDiv(double num, double den, double *out)
 
   *out = num / den;
   return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Aggregated countables, and the part-number switches behind them.
+//
+// Several formulas do not read one counter but call A6xMetric::readCountable(), which asks
+// A6xCustomCountableFactory for the countable of that type and sums every (block, id) pair the
+// instance declares for this part. Two of those declarations branch on core::DeviceID, so the
+// same formula reads different hardware on different parts:
+//
+//   quads  / pixels       SP[99] / SP[101] on 0x30, 0x39 and 0x3d; HLSQ[8] / HLSQ[19] elsewhere
+//   read / write beats    AXI0+AXI1 GBIF beats everywhere except 0x2f, which counts VBIF
+//
+// The A6x counter name tables recovered from the plugin have no VBIF block, so the 0x2f variant
+// cannot be selected here; those metrics report unavailable on that part rather than reading
+// counters whose ids would have to be guessed.
+// ---------------------------------------------------------------------------------------------
+
+struct QCGGPMCountable
+{
+  const char *block;
+  uint32_t id;
+};
+
+static inline bool QCGGPMCountableSum(const QCGGPMSample &s, const QCGGPMCountable *list,
+                                      uint32_t count, double *out)
+{
+  double total = 0.0;
+
+  for(uint32_t i = 0; i < count; i++)
+  {
+    const double v = s.Get(list[i].block, list[i].id);
+
+    // readCountable() sums whatever the instance declares. A counter that was not measured makes
+    // the aggregate unknown, never a partial sum.
+    if(v < 0.0)
+      return false;
+
+    total += v;
+  }
+
+  *out = total;
+  return true;
+}
+
+// A6xQuadsCountable: 2x2 fragment blocks the shader processed.
+static inline bool QCGGPMQuads(const QCGGPMSample &s, double *out)
+{
+  static const QCGGPMCountable kHlsq[] = {{"HLSQ", 8}};
+  static const QCGGPMCountable kSp[] = {{"SP", 99}};
+
+  if(s.deviceId == 0x30 || s.deviceId == 0x39 || s.deviceId == 0x3d)
+    return QCGGPMCountableSum(s, kSp, 1, out);
+
+  return QCGGPMCountableSum(s, kHlsq, 1, out);
+}
+
+// A6xPixelsCountable: covered fragments.
+static inline bool QCGGPMPixels(const QCGGPMSample &s, double *out)
+{
+  static const QCGGPMCountable kHlsq[] = {{"HLSQ", 19}};
+  static const QCGGPMCountable kSp[] = {{"SP", 101}};
+
+  if(s.deviceId == 0x30 || s.deviceId == 0x39 || s.deviceId == 0x3d)
+    return QCGGPMCountableSum(s, kSp, 1, out);
+
+  return QCGGPMCountableSum(s, kHlsq, 1, out);
+}
+
+// A6xReadBeatsTotalCountable / A6xWriteBeatsTotalCountable / A6xRWBeatsTotalCountable.
+static inline bool QCGGPMReadBeats(const QCGGPMSample &s, double *out)
+{
+  static const QCGGPMCountable kGbif[] = {{"GBIF", 34}, {"GBIF", 35}};
+
+  if(s.deviceId == 0x2f)
+    return false;
+
+  return QCGGPMCountableSum(s, kGbif, 2, out);
+}
+
+static inline bool QCGGPMWriteBeats(const QCGGPMSample &s, double *out)
+{
+  static const QCGGPMCountable kGbif[] = {{"GBIF", 46}, {"GBIF", 47}};
+
+  if(s.deviceId == 0x2f)
+    return false;
+
+  return QCGGPMCountableSum(s, kGbif, 2, out);
+}
+
+static inline bool QCGGPMRwBeats(const QCGGPMSample &s, double *out)
+{
+  static const QCGGPMCountable kGbif[] = {{"GBIF", 34}, {"GBIF", 35}, {"GBIF", 46}, {"GBIF", 47}};
+
+  if(s.deviceId == 0x2f)
+    return false;
+
+  return QCGGPMCountableSum(s, kGbif, 4, out);
+}
+
+// CSWTCH.249 in PercentGpuBusBusy::getComputedValue: the beats-per-cycle divisor for each
+// core::DeviceID in 0x21..0x3d. A part outside that range has no divisor, and the metric is
+// reported unavailable instead of following the library into a division by zero.
+static inline double QCGGPMBusBeatDivisor(uint32_t deviceId)
+{
+  static const double kDivisor[] = {
+      1, 2, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4,
+  };
+
+  if(deviceId < 0x21 || deviceId > 0x3d)
+    return 0.0;
+
+  return kDivisor[deviceId - 0x21];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1043,6 +1227,277 @@ static inline bool QCGGPMEvaluate(const char *key, const QCGGPMSample &s, double
     return true;
   }
 
+  // ---- per-second workloads ---------------------------------------------------------------
+
+  if(strcmp(key, "clocks_per_second") == 0)
+  {
+    // ClocksPerSecond: CP[0] always-on cycles over the sample duration.
+    const double cycles = s.Get("CP", 0);
+
+    if(cycles < 0.0 || !(dt > 0.0))
+      return false;
+
+    *out = cycles / dt;
+    return true;
+  }
+
+  if(strcmp(key, "preclipped_polygons_per_second") == 0)
+  {
+    const double prims = s.Get("TSE", 6);
+
+    if(prims < 0.0 || !(dt > 0.0))
+      return false;
+
+    *out = prims / dt;
+    return true;
+  }
+
+  if(strcmp(key, "reused_vertices_per_second") == 0)
+  {
+    const double hits = s.Get("PC", 20);
+
+    if(hits < 0.0 || !(dt > 0.0))
+      return false;
+
+    *out = hits / dt;
+    return true;
+  }
+
+  if(strcmp(key, "vertices_shaded_per_second") == 0)
+  {
+    const double verts = s.Get("PC", 26);
+
+    if(verts < 0.0 || !(dt > 0.0))
+      return false;
+
+    *out = verts / dt;
+    return true;
+  }
+
+  if(strcmp(key, "fragments_shaded_per_second") == 0)
+  {
+    double pixels;
+
+    if(!QCGGPMPixels(s, &pixels) || !(dt > 0.0))
+      return false;
+
+    *out = pixels / dt;
+    return true;
+  }
+
+  if(strcmp(key, "vertex_instructions_per_second") == 0 ||
+     strcmp(key, "fragment_instructions_per_second") == 0 ||
+     strcmp(key, "fragment_alu_full_per_second") == 0 ||
+     strcmp(key, "fragment_alu_half_per_second") == 0 ||
+     strcmp(key, "fragment_interpolation_per_second") == 0 ||
+     strcmp(key, "fragment_efu_per_second") == 0)
+  {
+    // Wave level instruction counts are multiplied by 4.0 per wave in the library; the half
+    // precision and barycentric counters are scalar, and half precision counts half an ALU.
+    double instructions;
+
+    if(strcmp(key, "vertex_instructions_per_second") == 0)
+    {
+      const double efu = s.Get("SP", 34);
+      const double alu = s.Get("SP", 35);
+
+      if(efu < 0.0 || alu < 0.0)
+        return false;
+
+      instructions = (efu + alu) * 4.0;
+    }
+    else if(strcmp(key, "fragment_instructions_per_second") == 0)
+    {
+      const double efu = s.Get("SP", 39);
+      const double aluFull = s.Get("SP", 40);
+      const double aluHalf = s.Get("SP", 41);
+
+      if(efu < 0.0 || aluFull < 0.0 || aluHalf < 0.0)
+        return false;
+
+      instructions = (aluFull + efu) * 4.0 + aluHalf * 2.0;
+    }
+    else
+    {
+      const uint32_t id = strcmp(key, "fragment_alu_full_per_second") == 0
+                              ? 40
+                              : (strcmp(key, "fragment_alu_half_per_second") == 0
+                                     ? 41
+                                     : (strcmp(key, "fragment_interpolation_per_second") == 0 ? 42
+                                                                                              : 39));
+      const double value = s.Get("SP", id);
+
+      if(value < 0.0)
+        return false;
+
+      instructions = value * 4.0;
+    }
+
+    if(!(dt > 0.0))
+      return false;
+
+    *out = instructions / dt;
+    return true;
+  }
+
+  // ---- per vertex / per fragment ratios ----------------------------------------------------
+
+  if(strcmp(key, "average_vertices_per_polygon") == 0)
+  {
+    // PC[26] vertex shader invocations over TSE[6] input primitives.
+    if(!QCGGPMDiv(s.Get("PC", 26), s.Get("TSE", 6), &a))
+      return false;
+
+    *out = a;
+    return true;
+  }
+
+  if(strcmp(key, "textures_per_vertex") == 0 || strcmp(key, "alu_per_vertex") == 0 ||
+     strcmp(key, "efu_per_vertex") == 0)
+  {
+    const uint32_t id = strcmp(key, "textures_per_vertex") == 0
+                            ? 33
+                            : (strcmp(key, "alu_per_vertex") == 0 ? 35 : 34);
+    const double instructions = s.Get("SP", id);
+    const double verts = s.Get("PC", 26);
+
+    if(instructions < 0.0 || !QCGGPMDiv(instructions * 4.0, verts, &a))
+      return false;
+
+    *out = a;
+    return true;
+  }
+
+  if(strcmp(key, "avg_bytes_per_fragment") == 0)
+  {
+    double pixels;
+    const double beats = s.Get("UCHE", 4);
+
+    if(beats < 0.0 || !QCGGPMPixels(s, &pixels) || !QCGGPMDiv(beats * 32.0, pixels, &a))
+      return false;
+
+    *out = a;
+    return true;
+  }
+
+  if(strcmp(key, "average_polygon_area") == 0)
+  {
+    double pixels;
+
+    if(!QCGGPMPixels(s, &pixels) || !QCGGPMDiv(pixels, s.Get("TSE", 14), &a))
+      return false;
+
+    *out = a;
+    return true;
+  }
+
+  if(strcmp(key, "l1_texture_cache_miss_per_pixel") == 0)
+  {
+    double pixels;
+    const double misses = s.Get("TP", 7);
+
+    if(misses < 0.0 || !QCGGPMPixels(s, &pixels) || !QCGGPMDiv(misses, pixels, &a))
+      return false;
+
+    *out = a;
+    return true;
+  }
+
+  if(strcmp(key, "alu_per_fragment") == 0 || strcmp(key, "efu_per_fragment") == 0 ||
+     strcmp(key, "interpolation_per_fragment") == 0)
+  {
+    double quads;
+
+    if(!QCGGPMQuads(s, &quads))
+      return false;
+
+    double instructions;
+
+    if(strcmp(key, "alu_per_fragment") == 0)
+    {
+      const double aluFull = s.Get("SP", 40);
+      const double aluHalf = s.Get("SP", 41);
+
+      if(aluFull < 0.0 || aluHalf < 0.0)
+        return false;
+
+      // Two medium precision instructions are counted as one full precision ALU.
+      instructions = aluFull + aluHalf * 0.5;
+    }
+    else
+    {
+      const double value = s.Get("SP", strcmp(key, "efu_per_fragment") == 0 ? 39 : 42);
+
+      if(value < 0.0)
+        return false;
+
+      instructions = value;
+    }
+
+    if(!QCGGPMDiv(instructions, quads, &a))
+      return false;
+
+    *out = a;
+    return true;
+  }
+
+  if(strcmp(key, "textures_per_fragment") == 0)
+  {
+    double pixels;
+    const double texPixels = s.Get("TP", 10);
+    const double vsTex = s.Get("SP", 33);
+
+    if(texPixels < 0.0 || vsTex < 0.0 || !QCGGPMPixels(s, &pixels) ||
+       !QCGGPMDiv(texPixels - vsTex * 4.0, pixels, &a))
+      return false;
+
+    *out = a;
+    return true;
+  }
+
+  // ---- bus and memory totals ---------------------------------------------------------------
+
+  if(strcmp(key, "read_total_bw") == 0 || strcmp(key, "write_total_bw") == 0)
+  {
+    double beats;
+
+    if(strcmp(key, "read_total_bw") == 0)
+    {
+      if(!QCGGPMReadBeats(s, &beats))
+        return false;
+    }
+    else
+    {
+      if(!QCGGPMWriteBeats(s, &beats))
+        return false;
+    }
+
+    // The library scales by the 32 byte bus beat on parts up to 0x3d and by zero above that;
+    // a part whose beat size is unknown gets no value rather than a hard zero.
+    if(!(dev >= 0x21 && dev <= 0x3d) || !(dt > 0.0))
+      return false;
+
+    *out = (beats * 32.0) / dt;
+    return true;
+  }
+
+  if(strcmp(key, "gpu_bus_busy") == 0)
+  {
+    double beats;
+    const double stallCycles = s.Get("UCHE", 1);
+    const double divisor = QCGGPMBusBeatDivisor(dev);
+
+    if(!QCGGPMRwBeats(s, &beats) || stallCycles < 0.0 || !(divisor > 0.0))
+      return false;
+
+    if(!QCGGPMDiv((beats + stallCycles) / divisor, timebase, &a))
+      return false;
+
+    // PercentGpuBusBusy returns a flat 100 above saturation instead of the percent() clamp.
+    *out = a > 1.0 ? 100.0 : QCGGPMPercent(a);
+    return true;
+  }
+
   return false;
 }
 
@@ -1171,6 +1626,124 @@ static const QCGGPMDependency kQCGGPMDeps[] = {
     {"compute_kernel_load_cycles", "RBBM", 6}, {"compute_kernel_load_cycles", "CP", 0}, {"compute_kernel_load_cycles", "SP", 0},
     // stalled_on_system_memory
     {"stalled_on_system_memory", "RBBM", 6}, {"stalled_on_system_memory", "UCHE", 1},
+    // clocks_per_second
+    {"clocks_per_second", "CP", 0},
+    // preclipped_polygons_per_second
+    {"preclipped_polygons_per_second", "TSE", 6},
+    // average_vertices_per_polygon
+    {"average_vertices_per_polygon", "PC", 26}, {"average_vertices_per_polygon", "TSE", 6},
+    // reused_vertices_per_second
+    {"reused_vertices_per_second", "PC", 20},
+    // vertices_shaded_per_second
+    {"vertices_shaded_per_second", "PC", 26},
+    // vertex_instructions_per_second
+    {"vertex_instructions_per_second", "SP", 34}, {"vertex_instructions_per_second", "SP", 35},
+    // fragment_instructions_per_second
+    {"fragment_instructions_per_second", "SP", 39}, {"fragment_instructions_per_second", "SP", 40},
+    {"fragment_instructions_per_second", "SP", 41},
+    // fragment_alu_full_per_second
+    {"fragment_alu_full_per_second", "SP", 40},
+    // fragment_alu_half_per_second
+    {"fragment_alu_half_per_second", "SP", 41},
+    // fragment_interpolation_per_second
+    {"fragment_interpolation_per_second", "SP", 42},
+    // fragment_efu_per_second
+    {"fragment_efu_per_second", "SP", 39},
+    // textures_per_vertex
+    {"textures_per_vertex", "SP", 33}, {"textures_per_vertex", "PC", 26},
+    // alu_per_vertex
+    {"alu_per_vertex", "SP", 35}, {"alu_per_vertex", "PC", 26},
+    // efu_per_vertex
+    {"efu_per_vertex", "SP", 34}, {"efu_per_vertex", "PC", 26},
+    // average_polygon_area
+    {"average_polygon_area", "TSE", 14},
+    // textures_per_fragment
+    {"textures_per_fragment", "TP", 10}, {"textures_per_fragment", "SP", 33},
+    // alu_per_fragment
+    {"alu_per_fragment", "SP", 40}, {"alu_per_fragment", "SP", 41},
+    // efu_per_fragment
+    {"efu_per_fragment", "SP", 39},
+    // interpolation_per_fragment
+    {"interpolation_per_fragment", "SP", 42},
+    // l1_texture_cache_miss_per_pixel
+    {"l1_texture_cache_miss_per_pixel", "TP", 7},
+    // avg_bytes_per_fragment
+    {"avg_bytes_per_fragment", "UCHE", 4},
+    // gpu_bus_busy
+    {"gpu_bus_busy", "RBBM", 6}, {"gpu_bus_busy", "UCHE", 1},
 };
+
+// The dependencies that only exist on some parts. A6xCustomCountable declares different
+// counters per core::DeviceID, so the counters behind quads / pixels / bus beats have to be
+// gated by part instead of listed in kQCGGPMDeps: advertising HLSQ[8] to a part that counts
+// quads in SP[99] would make the metric look unavailable when it is only measured elsewhere.
+
+enum QCGGPMDepScope
+{
+  kQCGGPMScopeSpCountables = 1,    // quads / pixels counted in the SP block
+  kQCGGPMScopeHlsqCountables,      // quads / pixels counted in the HLSQ block
+  kQCGGPMScopeGbifBeats,           // read / write beats counted in GBIF
+  kQCGGPMScopeVbifBeats,           // read / write beats counted in VBIF
+};
+
+static inline bool QCGGPMDepScopeApplies(uint32_t scope, uint32_t deviceId)
+{
+  const bool spCountables = deviceId == 0x30 || deviceId == 0x39 || deviceId == 0x3d;
+
+  switch(scope)
+  {
+    case kQCGGPMScopeSpCountables: return spCountables;
+    case kQCGGPMScopeHlsqCountables: return !spCountables;
+    case kQCGGPMScopeGbifBeats: return deviceId != 0x2f;
+    case kQCGGPMScopeVbifBeats: return deviceId == 0x2f;
+  }
+
+  return false;
+}
+
+struct QCGGPMScopedDep
+{
+  const char *metric;
+  const char *block;
+  uint32_t id;
+  uint32_t scope;
+};
+
+static const QCGGPMScopedDep kQCGGPMScopedDeps[] = {
+    // The aggregates the fragment ratios divide by.
+    {"average_polygon_area", "HLSQ", 19, kQCGGPMScopeHlsqCountables},
+    {"average_polygon_area", "SP", 101, kQCGGPMScopeSpCountables},
+    {"fragments_shaded_per_second", "HLSQ", 19, kQCGGPMScopeHlsqCountables},
+    {"fragments_shaded_per_second", "SP", 101, kQCGGPMScopeSpCountables},
+    {"textures_per_fragment", "HLSQ", 19, kQCGGPMScopeHlsqCountables},
+    {"textures_per_fragment", "SP", 101, kQCGGPMScopeSpCountables},
+    {"l1_texture_cache_miss_per_pixel", "HLSQ", 19, kQCGGPMScopeHlsqCountables},
+    {"l1_texture_cache_miss_per_pixel", "SP", 101, kQCGGPMScopeSpCountables},
+    {"avg_bytes_per_fragment", "HLSQ", 19, kQCGGPMScopeHlsqCountables},
+    {"avg_bytes_per_fragment", "SP", 101, kQCGGPMScopeSpCountables},
+    {"alu_per_fragment", "HLSQ", 8, kQCGGPMScopeHlsqCountables},
+    {"alu_per_fragment", "SP", 99, kQCGGPMScopeSpCountables},
+    {"efu_per_fragment", "HLSQ", 8, kQCGGPMScopeHlsqCountables},
+    {"efu_per_fragment", "SP", 99, kQCGGPMScopeSpCountables},
+    {"interpolation_per_fragment", "HLSQ", 8, kQCGGPMScopeHlsqCountables},
+    {"interpolation_per_fragment", "SP", 99, kQCGGPMScopeSpCountables},
+    // The bus beats. VBIF ids are listed so the 0x2f part reports these metrics unavailable
+    // instead of silently reading them out of GBIF; the A6x name table has no VBIF block, so
+    // nothing resolves for it today.
+    {"read_total_bw", "GBIF", 34, kQCGGPMScopeGbifBeats},
+    {"read_total_bw", "GBIF", 35, kQCGGPMScopeGbifBeats},
+    {"read_total_bw", "VBIF", 63, kQCGGPMScopeVbifBeats},
+    {"write_total_bw", "GBIF", 46, kQCGGPMScopeGbifBeats},
+    {"write_total_bw", "GBIF", 47, kQCGGPMScopeGbifBeats},
+    {"write_total_bw", "VBIF", 84, kQCGGPMScopeVbifBeats},
+    {"gpu_bus_busy", "GBIF", 34, kQCGGPMScopeGbifBeats},
+    {"gpu_bus_busy", "GBIF", 35, kQCGGPMScopeGbifBeats},
+    {"gpu_bus_busy", "GBIF", 46, kQCGGPMScopeGbifBeats},
+    {"gpu_bus_busy", "GBIF", 47, kQCGGPMScopeGbifBeats},
+    {"gpu_bus_busy", "VBIF", 85, kQCGGPMScopeVbifBeats},
+};
+
+static const uint32_t kQCGGPMScopedDepCount =
+    sizeof(kQCGGPMScopedDeps) / sizeof(kQCGGPMScopedDeps[0]);
 
 static const uint32_t kQCGGPMDepCount = sizeof(kQCGGPMDeps) / sizeof(kQCGGPMDeps[0]);

@@ -24,6 +24,8 @@
 
 #include "qc_counters.h"
 
+#include "qc_ggpm_plan.h"
+
 // Non-Android stub implementation, mirroring arm_counters_stub.cpp. Without this
 // the non-Android builds would fail to link once the backend is referenced from
 // the API replay paths.
@@ -38,6 +40,23 @@ QCCounters::~QCCounters()
 
 bool QCCounters::Init(ApiType api, void *context, const char *renderer)
 {
+  // There is no perf-monitor session to establish on this platform, but the planning and decoding
+  // code is shared with the device build, so it is compiled and run here too. That is what makes a
+  // layout or record-grammar regression visible in a desktop build rather than only on a phone.
+  static bool checked = false;
+  if(!checked)
+  {
+    checked = true;
+
+    char planError[256] = {};
+    const int failures = QCGGPMPlanSelfCheck(0, planError, sizeof(planError));
+    if(failures != 0)
+      RDCERR("QCCounters: %d Adreno counter planning/decode self-check failure(s), first: %s",
+             failures, planError);
+    else
+      RDCLOG("QCCounters: Adreno counter planning and decoding self-check passed");
+  }
+
   return false;
 }
 

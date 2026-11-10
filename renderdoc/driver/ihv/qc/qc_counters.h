@@ -115,6 +115,18 @@ private:
     void *end;
     void *get_counter_data;
     void *flush;
+    // Core GL, used to notice when the driver rejects a selection: a rejected
+    // glSelectPerfMonitorCountersAMD drops counters without any other signal.
+    void *get_error;
+    // Core GL, used to switch GL_PERFMON_GLOBAL_MODE_QCOM on around a pass. Adreno only allocates
+    // the result buffer a monitor reports from while that enable is on, and
+    // glGetPerfMonitorCounterDataAMD dereferences it unconditionally, so a monitor sampled without
+    // the enable crashes inside the driver instead of returning nothing.
+    void *gl_enable;
+    void *gl_disable;
+    // Core GL, used to make sure no GPU work of the finished pass is still in flight before the
+    // monitor is released.
+    void *gl_finish;
   };
 
   // One counter in the driver's own catalog, as enumerated from GL_AMD_performance_monitor.
@@ -163,6 +175,11 @@ private:
   void ResolveNeeds();
   void BuildCatalog();
   void BuildPasses();
+
+  // Split the counters to measure into m_Passes. The layout arithmetic itself is in
+  // qc_ggpm_plan.h; this only passes it the resolved bindings.
+  void PlanPasses(const rdcarray<uint32_t> &needed, const rdcarray<uint32_t> &dedicated,
+                  bool singlePass, bool append);
   void SampleDeviceClock();
 
   static const DeviceCounter *FindDeviceCounter(const rdcarray<DeviceGroup> &groups,
@@ -177,6 +194,28 @@ private:
   bool ReadResults(const rdcarray<uint32_t> &needIndices, const uint32_t *words, size_t wordCount,
                    double *out);
 
+  // Turn GL_PERFMON_GLOBAL_MODE_QCOM on or off, doing nothing when it already has that state.
+  void SetGlobalMode(bool enabled);
+
+  // Delete every monitor this fetch created. A monitor is kept alive until the fetch ends: deleting
+  // one and then generating a new handle gives the driver the same monitor number back, and a monitor
+  // created that way reports no results for any event on this device, which lost a whole pass.
+  void ReleaseMonitors();
+
+  // Fill `needed` with the counters the enabled metrics read, and `dedicated` with the ones the
+  // driver refused alongside the others.
+  void CollectNeeds(rdcarray<uint32_t> &needed, rdcarray<uint32_t> &dedicated);
+
+  // Append the block-budget pass layout to m_Passes.
+  void AppendMultiPass(rdcarray<uint32_t> &needed, rdcarray<uint32_t> &dedicated);
+
+  // Enable this pass's counters on m_Monitor, one at a time, and drop the ones the driver refuses.
+  // Selecting a whole block in one call means a single refused counter takes the rest of the block
+  // down with it, which surfaces as "every metric of that block is unavailable" with no explanation.
+  bool BuildMonitorSelection(const rdcarray<uint32_t> &pass);
+
+  void MarkRefused(uint32_t needIndex);
+
   PerfMonApi m_Perf = {};
 
   // The driver's catalog, kept both for name resolution and for the diagnostics logged in Init().
@@ -189,6 +228,50 @@ private:
   // because a hardware block can only have so many counters active at once (the driver's
   // per-group maxActive), not because the caller asked for several passes.
   rdcarray<rdcarray<uint32_t>> m_Passes;
+
+  // One flag per entry of kQCGGPMNeeds: set for a counter the driver refused to select. Some
+  // counters cannot be sampled together, because two counters of the same block can share a single
+  // hardware slot, and the driver answers with a rejected select call rather than a value. A refused
+  // counter is left out of later pass layouts so it does not spend a slot, and every metric that
+  // reads it reports no value instead of a wrong one.
+  rdcarray<char> m_Refused;
+
+  // The needs actually enabled on the current monitor: the pass minus the refused counters.
+  rdcarray<uint32_t> m_Selected;
+
+  // Set when a refusal changed what can be sampled, so the next call to GetPassCount() appends the
+  // dedicated passes those counters need. It is never rebuilt mid-sample: the pass index a sample
+  // was started with has to keep pointing at its own counters.
+  bool m_PassesDirty = false;
+
+  // Counters refused during the current fetch, waiting for the next GetPassCount() to give each of
+  // them a pass of its own.
+  rdcarray<uint32_t> m_PendingPassCounters;
+
+  // Consecutive samples of the current pass that reported no result. A selection the driver silently
+  // dropped reports nothing for every event of the pass, and each attempt costs a full timeout, so
+  // the pass is abandoned instead of timing out once per event.
+  uint32_t m_PassMisses = 0;
+
+  // Monitors that measured a finished pass, deleted once the fetch is over.
+  rdcarray<uint32_t> m_OpenMonitors;
+
+  // GL_PERFMON_GLOBAL_MODE_QCOM stays enabled for the whole fetch, not just for one pass: the driver
+  // drops the selection of a monitor set up right after the previous monitor was deleted and the
+  // global mode switched off and on again, which showed up as a whole pass reporting no results.
+  bool m_GlobalModeOn = false;
+
+  // Set when two samples of the current pass in a row reported no result, which means the driver
+  // dropped the selection: the pass is not sampled any further, because every remaining event would
+  // wait out the same timeout to get nothing. The counters of an abandoned pass report no value.
+  bool m_PassAbandoned = false;
+
+  // Samples of the current pass that did report a result, used to tell a pass that lost its whole
+  // selection from one that only trails off at the end of the frame.
+  uint32_t m_PassGoodSamples = 0;
+
+  // Set once the single pass was given up on in favour of the multi-pass layout.
+  bool m_FellBackToMultiPass = false;
 
   ApiType m_Api = ApiType::Ogl;
   void *m_ApiContext = NULL;

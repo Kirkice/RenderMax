@@ -17,5 +17,11 @@
     <ClInclude Include="qc_counters.h">
       <Filter>Counters</Filter>
     </ClInclude>
+    <ClInclude Include="qc_ggpm_metrics.h">
+      <Filter>Counters</Filter>
+    </ClInclude>
+    <ClInclude Include="qc_ggpm_plan.h">
+      <Filter>Counters</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

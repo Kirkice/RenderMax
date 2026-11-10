@@ -28,12 +28,14 @@
 
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <algorithm>
 
 #include "qc_ggpm_metrics.h"
+#include "qc_ggpm_plan.h"
 
 // GL_AMD_performance_monitor. The constants are repeated here rather than including a GL header:
 // this file is also compiled for the Vulkan backend, and the counter plumbing has no other need
@@ -51,6 +53,10 @@ enum
   GL_FLOAT = 0x1406,
   GL_UNSIGNED_INT64_AMD = 0x8BC2,
   GL_PERCENTAGE_AMD = 0x8BC3,
+  GL_NO_ERROR = 0,
+  // Qualcomm's enable that makes the perf-monitor counters count GPU-wide activity and publish
+  // results. It is not in the extension string this driver reports, but glEnable accepts it.
+  GL_PERFMON_GLOBAL_MODE_QCOM = 0x8FA0,
 };
 
 typedef void (*PFN_glGenPerfMonitorsAMD)(int n, uint32_t *monitors);
@@ -75,6 +81,7 @@ typedef void (*PFN_glEndPerfMonitorAMD)(uint32_t monitor);
 typedef void (*PFN_glGetPerfMonitorCounterDataAMD)(uint32_t monitor, uint32_t pname,
                                                    int32_t dataSize, uint32_t *data,
                                                    int32_t *bytesWritten);
+typedef uint32_t (*PFN_glGetError)();
 
 namespace {
 double NowSeconds()
@@ -106,6 +113,39 @@ bool NameEquals(const char *a, const char *b)
   }
 
   return *a == *b;
+}
+
+// The sampling sequence can only be observed through the device log, and a per-event line would
+// flood it, so the detailed trace is opt-in: /data/local/tmp/qc_debug on the device, or
+// RENDERDOC_QC_DEBUG in the replay process' environment.
+bool QCDebugLogEnabled()
+{
+  static int cached = -1;
+
+  if(cached < 0)
+  {
+    const char *env = getenv("RENDERDOC_QC_DEBUG");
+    cached = (env != NULL && env[0] != '\0') || access("/data/local/tmp/qc_debug", F_OK) == 0;
+  }
+
+  return cached != 0;
+}
+
+// Read one line-terminated search over /proc/self/maps. Used to tell whether another profiling
+// layer was injected into this process, which no GL API can report.
+bool QCMapsContain(const char *needle)
+{
+  FILE *f = fopen("/proc/self/maps", "r");
+  if(f == NULL)
+    return false;
+
+  char line[512];
+  bool found = false;
+  while(!found && fgets(line, sizeof(line), f) != NULL)
+    found = strstr(line, needle) != NULL;
+
+  fclose(f);
+  return found;
 }
 
 // Read one integer out of a /sys node, 0 when it is missing or unparsable.
@@ -312,6 +352,22 @@ void QCCounters::MakeCurrent()
 
 bool QCCounters::Init(ApiType api, void *context, const char *renderer)
 {
+  // Checked before any GL work, including creating the private context: Snapdragon Profiler's Q3D
+  // tools layer is injected into every EGL process while debug.egl.profiler is 1, and it interposes
+  // the same perf-monitor entry points this sampling uses. Sampling under it has been seen to fault
+  // inside libGLESv2_adreno.so rather than merely fail, so a process carrying it is refused instead
+  // of being allowed to crash the replay. RENDERDOC_QC_ALLOW_Q3D=1 overrides this for experiments.
+  if(QCMapsContain("libq3dtools") && getenv("RENDERDOC_QC_ALLOW_Q3D") == NULL)
+  {
+    RDCWARN("QCCounters: Snapdragon Profiler's Q3D tools layer (libq3dtools) is loaded in this "
+            "process, so Adreno counters are disabled here: it interposes the perf-monitor entry "
+            "points and sampling under it has faulted inside the GL driver. Stop the profiler and "
+            "set debug.egl.profiler to 0 (adb shell su -c 'setprop debug.egl.profiler 0'; adb "
+            "shell su -c 'pkill -f sdpservice; pkill -f pluginGPU; pkill -f SnapshotPlayer'), then "
+            "start a new session. RENDERDOC_QC_ALLOW_Q3D=1 skips this check.");
+    return false;
+  }
+
   m_Api = api;
   m_ApiContext = context;
 
@@ -339,6 +395,17 @@ bool QCCounters::Init(ApiType api, void *context, const char *renderer)
            renderer ? renderer : "");
 
   SampleDeviceClock();
+
+  // The planning and decoding arithmetic is shared with the desktop build, so it is exercised there
+  // on every build; running it here too means a plan that would silently drop counters is reported
+  // on the device that would have lost them.
+  {
+    char planError[256] = {};
+    const int planFailures = QCGGPMPlanSelfCheck(m_AdrenoPart, planError, sizeof(planError));
+    if(planFailures != 0)
+      RDCWARN("QCCounters: %d planning/decode self-check failure(s), first: %s", planFailures,
+              planError);
+  }
 
   EnumerateCatalog();
   if(m_DeviceGroups.empty())
@@ -399,6 +466,14 @@ bool QCCounters::LoadPerfMon()
       // Not fatal if missing: only used to push the monitor's start marker down to the GPU
       // before unrelated work is submitted, which matters when sampling a Vulkan replay.
       {(void **)&m_Perf.flush, "glFlush"},
+      // Not fatal if missing: without it a refused selection cannot be told apart from a selection
+      // that simply produced no records, and the whole block is lost instead of one counter.
+      {(void **)&m_Perf.get_error, "glGetError"},
+      // Not fatal if missing on its own, but a monitor cannot be sampled without the global mode
+      // enable on Adreno, so LoadPerfMon() treats a missing pair as fatal below.
+      {(void **)&m_Perf.gl_enable, "glEnable"},
+      {(void **)&m_Perf.gl_disable, "glDisable"},
+      {(void **)&m_Perf.gl_finish, "glFinish"},
   };
 
   bool complete = true;
@@ -406,7 +481,21 @@ bool QCCounters::LoadPerfMon()
   {
     *e.slot = getProc(e.name);
 
+    // eglGetProcAddress only answers extension entry points on some drivers, and glEnable/glDisable
+    // are core GL, so fall back to the process' own symbol table before calling a slot missing.
+    if(*e.slot == NULL)
+      *e.slot = dlsym(RTLD_DEFAULT, e.name);
+
     if(*e.slot == NULL && strcmp(e.name, "glFlush") == 0)
+      continue;
+
+    if(*e.slot == NULL && strcmp(e.name, "glGetError") == 0)
+      continue;
+
+    if(*e.slot == NULL && (strcmp(e.name, "glEnable") == 0 || strcmp(e.name, "glDisable") == 0))
+      continue;
+
+    if(*e.slot == NULL && strcmp(e.name, "glFinish") == 0)
       continue;
 
     if(*e.slot == NULL)
@@ -424,6 +513,19 @@ bool QCCounters::LoadPerfMon()
   }
 
   m_Perf.module = lib;
+
+  // Without these two the global mode enable cannot be turned on, and a monitor sampled without it
+  // makes the driver dereference a result buffer it never allocated, so the counters are reported
+  // as unavailable rather than sampled and crashing the replay.
+  if(m_Perf.gl_enable == NULL || m_Perf.gl_disable == NULL)
+  {
+    RDCLOG("QCCounters: glEnable/glDisable are not reachable, so the perf monitor global mode "
+           "cannot be enabled and the counters cannot be sampled");
+    dlclose(lib);
+    m_Perf = {};
+    return false;
+  }
+
   return true;
 }
 
@@ -519,6 +621,7 @@ const QCCounters::DeviceCounter *QCCounters::FindDeviceCounter(const rdcarray<De
 void QCCounters::ResolveNeeds()
 {
   m_Needs.clear();
+  m_Refused.fill(size_t(kQCGGPMNeedCount), 0);
 
   uint32_t unresolved = 0;
 
@@ -577,6 +680,21 @@ void QCCounters::SampleDeviceClock()
     RDCLOG("QCCounters: max_gpuclk is not readable, GPU %% Utilization will be unavailable");
 }
 
+// The indices in kQCGGPMNeeds of every raw counter a metric's formula reads on this part. The
+// resolution itself lives in qc_ggpm_plan.h so the desktop build compiles and runs the same code;
+// this adapter only converts the result into the container this file uses.
+static rdcarray<int> MetricNeeds(const char *key, uint32_t deviceId)
+{
+  std::vector<int> needs;
+  QCGGPMMetricNeeds(key, deviceId, needs);
+
+  rdcarray<int> ret;
+  ret.reserve(needs.size());
+  for(size_t i = 0; i < needs.size(); i++)
+    ret.push_back(needs[i]);
+  return ret;
+}
+
 void QCCounters::BuildCatalog()
 {
   m_CounterIds.clear();
@@ -595,22 +713,20 @@ void QCCounters::BuildCatalog()
     // that apart from a GPU that genuinely has nothing to report.
     built.available = true;
 
-    uint32_t deps = 0;
-    for(uint32_t d = 0; d < kQCGGPMDepCount; d++)
+    const rdcarray<int> needs = MetricNeeds(metric.key, m_AdrenoPart);
+
+    for(int needIndex : needs)
     {
-      if(strcmp(kQCGGPMDeps[d].metric, metric.key) != 0)
-        continue;
-
-      deps++;
-
-      const int needIndex = QCGGPMSample::IndexOf(kQCGGPMDeps[d].block, kQCGGPMDeps[d].id);
       if(needIndex < 0 || !m_Needs[size_t(needIndex)].resolved)
+      {
         built.available = false;
+        break;
+      }
     }
 
     // A metric with no declared dependency would always report a constant, so treat it as
     // unavailable rather than publishing it.
-    if(deps == 0)
+    if(needs.empty())
       built.available = false;
 
     m_Built.push_back(built);
@@ -620,21 +736,10 @@ void QCCounters::BuildCatalog()
 
 GPUCounter QCCounters::StableIdFromKey(const char *key)
 {
-  // FNV-1a over the metric key, folded into the Qualcomm counter range. Deriving the public ID
-  // from the name rather than from the list position guarantees a given counter keeps the same
-  // GPUCounter value on every Adreno generation and across versions, even though the set of
-  // metrics a device can evaluate differs.
-  const uint32_t range =
-      uint32_t(GPUCounter::LastQualcomm) - uint32_t(GPUCounter::FirstQualcomm) + 1;
-
-  uint32_t hash = 2166136261u;
-  for(const char *p = key; p != NULL && *p; p++)
-  {
-    hash ^= uint8_t(*p);
-    hash *= 16777619u;
-  }
-
-  return GPUCounter(uint32_t(GPUCounter::FirstQualcomm) + (hash % range));
+  // The mapping lives in qc_ggpm_plan.h: the same hash has to be produced by the device build, the
+  // desktop build and the recovered-profile checks, so there is one implementation of it.
+  return GPUCounter(QCGGPMStableId(key, uint32_t(GPUCounter::FirstQualcomm),
+                                   uint32_t(GPUCounter::LastQualcomm)));
 }
 
 int32_t QCCounters::IndexForId(GPUCounter counter) const
@@ -704,6 +809,9 @@ void QCCounters::DisableAllCounters()
   m_EnabledCounters.clear();
   m_Passes.clear();
 
+  ReleaseMonitors();
+  SetGlobalMode(false);
+
   // Each fetch starts from a clean slate: a sample left over from an earlier fetch would be
   // paired with counters it was never measured for. The session-wide cache is deliberately kept:
   // it only ever holds values that were really measured, and ReuseSample() checks each counter a
@@ -725,6 +833,112 @@ void QCCounters::EnableCounter(GPUCounter counter)
   m_Passes.clear();
 }
 
+// Spreads the counters over several passes, one per block budget, unless the device is known to
+// take them all at once. On by /data/local/tmp/qc_multipass or RENDERDOC_QC_MULTIPASS.
+static bool MultiPassEnabled()
+{
+  static int cached = -1;
+
+  if(cached < 0)
+  {
+    const char *env = getenv("RENDERDOC_QC_MULTIPASS");
+    cached = (env != NULL && env[0] != '0') ? 1 : 0;
+
+    if(cached == 0)
+    {
+      FILE *f = fopen("/data/local/tmp/qc_multipass", "rb");
+      if(f != NULL)
+      {
+        cached = 1;
+        fclose(f);
+      }
+    }
+  }
+
+  return cached == 1;
+}
+
+void QCCounters::CollectNeeds(rdcarray<uint32_t> &needed, rdcarray<uint32_t> &dedicated)
+{
+  needed.clear();
+  dedicated.clear();
+
+  // Which raw counters are actually needed: the union, over the enabled metrics, of the counters
+  // their formulas read (kQCGGPMDeps). Selecting only those keeps a fetch from spending GPU time
+  // sampling blocks no enabled metric looks at.
+  for(uint32_t enabled : m_EnabledCounters)
+  {
+    const char *key = kQCGGPMMetrics[m_Built[enabled].metric].key;
+
+    for(int needIndex : MetricNeeds(key, m_AdrenoPart))
+    {
+      if(needIndex < 0 || !m_Needs[size_t(needIndex)].resolved)
+        continue;
+
+      // A counter the driver would not select alongside the others still has to be measured, since
+      // its metrics are only unavailable because of the combination. It gets a pass with nothing
+      // else in it, where the same select call is known to be accepted.
+      if(size_t(needIndex) < m_Refused.size() && m_Refused[size_t(needIndex)])
+      {
+        if(!dedicated.contains(uint32_t(needIndex)))
+          dedicated.push_back(uint32_t(needIndex));
+        continue;
+      }
+
+      if(!needed.contains(uint32_t(needIndex)))
+        needed.push_back(uint32_t(needIndex));
+    }
+  }
+}
+
+void QCCounters::AppendMultiPass(rdcarray<uint32_t> &needed, rdcarray<uint32_t> &dedicated)
+{
+  PlanPasses(needed, dedicated, false, true);
+}
+
+void QCCounters::PlanPasses(const rdcarray<uint32_t> &needed, const rdcarray<uint32_t> &dedicated,
+                            bool singlePass, bool append)
+{
+  // The layout arithmetic lives in qc_ggpm_plan.h so that it is compiled and exercised by the
+  // desktop build as well; this only hands it the resolved bindings and copies the result back.
+  std::vector<QCGGPMPlanNeed> planNeeds;
+  planNeeds.resize(m_Needs.size());
+  for(size_t i = 0; i < m_Needs.size(); i++)
+  {
+    planNeeds[i].group = m_Needs[i].group;
+    planNeeds[i].counter = m_Needs[i].counter;
+    planNeeds[i].maxActive = m_Needs[i].maxActive;
+    planNeeds[i].type = m_Needs[i].type;
+    planNeeds[i].resolved = m_Needs[i].resolved;
+  }
+
+  std::vector<uint32_t> planNeeded, planDedicated;
+  for(uint32_t n : needed) planNeeded.push_back(n);
+  for(uint32_t n : dedicated) planDedicated.push_back(n);
+
+  std::vector<uint32_t> enabledMetrics;
+  for(uint32_t enabled : m_EnabledCounters)
+  {
+    if(size_t(enabled) < m_Built.size())
+      enabledMetrics.push_back(m_Built[enabled].metric);
+  }
+
+  std::vector<std::vector<uint32_t>> passes;
+  QCGGPMPlanPasses(planNeeded, planDedicated, planNeeds.empty() ? NULL : &planNeeds[0],
+                   planNeeds.size(), enabledMetrics, m_AdrenoPart, !singlePass, passes);
+
+  if(!append)
+    m_Passes.clear();
+
+  for(size_t p = 0; p < passes.size(); p++)
+  {
+    rdcarray<uint32_t> pass;
+    for(size_t i = 0; i < passes[p].size(); i++)
+      pass.push_back(passes[p][i]);
+    m_Passes.push_back(pass);
+  }
+}
+
 void QCCounters::BuildPasses()
 {
   m_Passes.clear();
@@ -732,56 +946,18 @@ void QCCounters::BuildPasses()
   if(m_EnabledCounters.empty())
     return;
 
-  // Which raw counters are actually needed: the union, over the enabled metrics, of the counters
-  // their formulas read (kQCGGPMDeps). Selecting only those keeps a fetch from spending GPU time
-  // sampling blocks no enabled metric looks at.
   rdcarray<uint32_t> needed;
+  rdcarray<uint32_t> dedicated;
+  CollectNeeds(needed, dedicated);
 
-  for(uint32_t enabled : m_EnabledCounters)
-  {
-    const char *key = kQCGGPMMetrics[m_Built[enabled].metric].key;
-
-    for(uint32_t d = 0; d < kQCGGPMDepCount; d++)
-    {
-      if(strcmp(kQCGGPMDeps[d].metric, key) != 0)
-        continue;
-
-      const int needIndex = QCGGPMSample::IndexOf(kQCGGPMDeps[d].block, kQCGGPMDeps[d].id);
-      if(needIndex < 0 || !m_Needs[size_t(needIndex)].resolved)
-        continue;
-
-      if(!needed.contains(uint32_t(needIndex)))
-        needed.push_back(uint32_t(needIndex));
-    }
-  }
-
-  if(needed.empty())
+  if(needed.empty() && dedicated.empty())
     return;
 
-  // One pass can hold at most `maxActive` counters from the same hardware block, so walk the
-  // blocks in turn and start a new pass whenever a block's budget would be exceeded.
-  std::map<uint32_t, uint32_t> usedInPass;
-
-  rdcarray<uint32_t> current;
-
-  for(uint32_t needIndex : needed)
-  {
-    const NeedBinding &binding = m_Needs[needIndex];
-    const uint32_t limit = binding.maxActive > 0 ? binding.maxActive : 1;
-
-    if(usedInPass[binding.group] + 1 > limit)
-    {
-      m_Passes.push_back(current);
-      current.clear();
-      usedInPass.clear();
-    }
-
-    usedInPass[binding.group]++;
-    current.push_back(needIndex);
-  }
-
-  if(!current.empty())
-    m_Passes.push_back(current);
+  // Both layouts come from QCGGPMPlanPasses: with several passes the counters are split by block
+  // capacity, and with one pass everything goes in together - which is the default here, because
+  // Adreno exposes a single performance monitor and a monitor created after another one in the same
+  // context reports no result at all. See qc_ggpm_plan.h for the full reasoning.
+  PlanPasses(needed, dedicated, !MultiPassEnabled(), false);
 }
 
 uint32_t QCCounters::GetPassCount()
@@ -789,12 +965,45 @@ uint32_t QCCounters::GetPassCount()
   if(m_Passes.empty())
     BuildPasses();
 
+  // A counter refused during an earlier pass of this fetch gets its own pass appended here, at the
+  // point where no sample is in flight: existing pass indices must not move, because the caller is
+  // iterating over them as it samples. Only useful with several passes: a device that takes all the
+  // counters in one pass is a device where a second monitor reports nothing, so appending a pass for
+  // a refused counter there would cost a full replay and still measure nothing.
+  if(m_PassesDirty && MultiPassEnabled())
+  {
+    for(uint32_t needIndex : m_PendingPassCounters)
+    {
+      bool present = false;
+      for(const rdcarray<uint32_t> &pass : m_Passes)
+        present = present || pass.contains(needIndex);
+
+      if(present)
+        continue;
+
+      rdcarray<uint32_t> single;
+      single.push_back(needIndex);
+      m_Passes.push_back(single);
+    }
+
+    m_PendingPassCounters.clear();
+    m_PassesDirty = false;
+  }
+  else if(m_PassesDirty)
+  {
+    m_PendingPassCounters.clear();
+    m_PassesDirty = false;
+  }
+
   return uint32_t(m_Passes.size());
 }
 
 void QCCounters::BeginPass(uint32_t passID)
 {
   m_OpenPass = passID;
+  m_PassMisses = 0;
+  m_PassAbandoned = false;
+  m_PassGoodSamples = 0;
 
   MakeCurrent();
 
@@ -803,44 +1012,192 @@ void QCCounters::BeginPass(uint32_t passID)
 
   // A monitor is created per pass so the selection cannot accumulate across passes: the driver's
   // select call only adds to the current selection.
-  PFN_glGenPerfMonitorsAMD gen = (PFN_glGenPerfMonitorsAMD)m_Perf.gen_monitors;
-  PFN_glSelectPerfMonitorCountersAMD select =
-      (PFN_glSelectPerfMonitorCountersAMD)m_Perf.select_counters;
+  if(!BuildMonitorSelection(m_Passes[passID]))
+  {
+    // Nothing could be selected. Sampling with the half-built monitor would ask the driver for
+    // results of a selection it never accepted, so the pass is skipped: BeginSample() bails out
+    // while m_Monitor is 0 and the metrics that need these counters report no value.
+    if(m_Monitor != 0 && m_Perf.delete_monitors != NULL)
+    {
+      PFN_glDeletePerfMonitorsAMD del = (PFN_glDeletePerfMonitorsAMD)m_Perf.delete_monitors;
+      del(1, &m_Monitor);
+    }
+    m_Monitor = 0;
+    RDCWARN("QCCounters: pass %u has no usable selection, its counters read no value", passID);
+    return;
+  }
 
-  if(m_Monitor == 0)
-    gen(1, &m_Monitor);
+  // Adreno publishes nothing for a monitor that was not started while the global mode enable is
+  // on, and the counter data query then crashes inside the driver. The harness that proved the
+  // counter set on hardware enables it between the selection and the begin call, so the same order
+  // is kept here. The enable is left on for the next pass as well, see m_GlobalModeOn.
+  SetGlobalMode(true);
 
-  if(m_Monitor == 0)
+  if(QCDebugLogEnabled())
+  {
+    PFN_glGetError getError = (PFN_glGetError)m_Perf.get_error;
+    RDCLOG("QCCounters: pass %u monitor %u selected %u globalModeError %d", passID, m_Monitor,
+           (uint32_t)m_Selected.size(),
+           getError != NULL ? int(getError()) : -1);
+  }
+}
+
+void QCCounters::SetGlobalMode(bool enabled)
+{
+  if(enabled == m_GlobalModeOn)
     return;
 
-  const rdcarray<uint32_t> &pass = m_Passes[passID];
-
-  // Group the selection by hardware block: one select call per group with all of that block's
-  // counters in this pass, which is the form the extension is specified for.
-  for(size_t i = 0; i < pass.size();)
+  if(enabled)
   {
-    const uint32_t group = m_Needs[pass[i]].group;
+    if(m_Perf.gl_enable == NULL)
+      return;
+    typedef void (*PFN_glEnable)(uint32_t cap);
+    ((PFN_glEnable)m_Perf.gl_enable)(GL_PERFMON_GLOBAL_MODE_QCOM);
+  }
+  else
+  {
+    if(m_Perf.gl_disable == NULL)
+      return;
+    typedef void (*PFN_glDisable)(uint32_t cap);
+    ((PFN_glDisable)m_Perf.gl_disable)(GL_PERFMON_GLOBAL_MODE_QCOM);
+  }
 
-    rdcarray<uint32_t> counters;
-    while(i < pass.size() && m_Needs[pass[i]].group == group)
+  m_GlobalModeOn = enabled;
+}
+
+bool QCCounters::BuildMonitorSelection(const rdcarray<uint32_t> &pass)
+{
+  PFN_glGenPerfMonitorsAMD gen = (PFN_glGenPerfMonitorsAMD)m_Perf.gen_monitors;
+  PFN_glDeletePerfMonitorsAMD del = (PFN_glDeletePerfMonitorsAMD)m_Perf.delete_monitors;
+  PFN_glSelectPerfMonitorCountersAMD select =
+      (PFN_glSelectPerfMonitorCountersAMD)m_Perf.select_counters;
+  PFN_glGetError getError = (PFN_glGetError)m_Perf.get_error;
+
+  if(gen == NULL || select == NULL)
+    return false;
+
+  m_Selected.clear();
+
+  // A pass with a single counter is the fallback for a counter the driver refuses to select next to
+  // the others, so that one is still selected even though it is marked refused.
+  const bool dedicated = pass.size() == 1;
+
+  // One counter at a time. A rejected select also leaves the monitor in an unknown state, so the
+  // whole selection is rebuilt from scratch after each refusal, minus the refused counter.
+  for(uint32_t attempt = 0; attempt < 8; attempt++)
+  {
+    if(m_Monitor != 0)
     {
-      counters.push_back(m_Needs[pass[i]].counter);
-      i++;
+      if(del != NULL)
+        del(1, &m_Monitor);
+      m_Monitor = 0;
     }
 
-    select(m_Monitor, 1, group, int32_t(counters.size()), counters.data());
+    gen(1, &m_Monitor);
+
+    if(m_Monitor == 0)
+    {
+      RDCWARN("QCCounters: the driver did not create a perf monitor");
+      return false;
+    }
+
+    m_Selected.clear();
+    bool refused = false;
+
+    for(size_t i = 0; i < pass.size(); i++)
+    {
+      const uint32_t needIndex = pass[i];
+
+      // A refused counter is still sampled when it is alone in the pass, which is exactly what the
+      // dedicated pass is for.
+      if(needIndex >= m_Refused.size() || (m_Refused[needIndex] && !dedicated))
+        continue;
+
+      const NeedBinding &binding = m_Needs[needIndex];
+
+      // Drain stale errors first, otherwise an error from unrelated GL work would read as a refusal.
+      if(getError != NULL)
+      {
+        for(int drain = 0; drain < 32 && getError() != GL_NO_ERROR; drain++)
+        {
+        }
+      }
+
+      uint32_t counter = binding.counter;
+      select(m_Monitor, 1, binding.group, 1, &counter);
+
+      if(getError != NULL && getError() != GL_NO_ERROR)
+      {
+        MarkRefused(needIndex);
+        refused = true;
+        break;
+      }
+
+      m_Selected.push_back(needIndex);
+    }
+
+    if(!refused)
+      return true;
   }
+
+  RDCWARN("QCCounters: could not build a perf monitor selection for this pass");
+  return false;
+}
+
+void QCCounters::MarkRefused(uint32_t needIndex)
+{
+  if(needIndex >= m_Refused.size() || m_Refused[needIndex])
+    return;
+
+  m_Refused[needIndex] = 1;
+
+  if(!m_PendingPassCounters.contains(needIndex))
+    m_PendingPassCounters.push_back(needIndex);
+
+  m_PassesDirty = true;
+
+  const char *name = QCGGPMCounterName(kQCGGPMNeeds[needIndex].block, kQCGGPMNeeds[needIndex].id);
+
+  RDCLOG("QCCounters: the driver refuses to select %s[%u] (\"%s\") together with the other counters "
+         "of its block, so it is measured in a pass of its own",
+         kQCGGPMNeeds[needIndex].block, kQCGGPMNeeds[needIndex].id, name != NULL ? name : "?");
 }
 
 void QCCounters::EndPass()
 {
   MakeCurrent();
 
-  if(m_Monitor && m_Perf.delete_monitors)
+  m_Selected.clear();
+
+  // Everything the pass submitted has to be done with before the monitor goes away, otherwise the
+  // next monitor is set up while the previous one still owns the hardware.
+  if(m_Perf.gl_finish != NULL)
   {
-    PFN_glDeletePerfMonitorsAMD del = (PFN_glDeletePerfMonitorsAMD)m_Perf.delete_monitors;
-    del(1, &m_Monitor);
+    typedef void (*PFN_glFinish)();
+    ((PFN_glFinish)m_Perf.gl_finish)();
+  }
+
+  // The monitor is released and the global mode switched off between passes, the same way the end of
+  // a fetch leaves them: a monitor set up while either is still in place from the previous pass
+  // reports no result for any window on this device.
+  ReleaseMonitors();
+  SetGlobalMode(false);
+}
+
+void QCCounters::ReleaseMonitors()
+{
+  if(m_Monitor != 0)
+  {
+    m_OpenMonitors.push_back(m_Monitor);
     m_Monitor = 0;
+  }
+
+  if(!m_OpenMonitors.empty() && m_Perf.delete_monitors != NULL)
+  {
+    MakeCurrent();
+    PFN_glDeletePerfMonitorsAMD del = (PFN_glDeletePerfMonitorsAMD)m_Perf.delete_monitors;
+    del((uint32_t)m_OpenMonitors.size(), m_OpenMonitors.data());
+    m_OpenMonitors.clear();
   }
 }
 
@@ -871,7 +1228,7 @@ bool QCCounters::ReuseSample(uint32_t eventId)
 
 void QCCounters::BeginSample(uint32_t eventId)
 {
-  if(m_Monitor == 0 || m_Sampling)
+  if(m_Monitor == 0 || m_Sampling || m_PassAbandoned)
     return;
 
   MakeCurrent();
@@ -881,8 +1238,9 @@ void QCCounters::BeginSample(uint32_t eventId)
 
   // Push the start marker to the GPU now. When the work being measured is submitted from another
   // API (a Vulkan replay) nothing else would flush this context before that work runs, and the
-  // window would then start after it.
-  if(m_Perf.flush)
+  // window would then start after it. A GL replay submits its own work in this context, and an
+  // extra flush inside the window makes the Adreno driver lose the monitor's result storage.
+  if(m_OwnContext && m_Perf.flush)
   {
     typedef void (*PFN_glFlush)();
     ((PFN_glFlush)m_Perf.flush)();
@@ -891,6 +1249,9 @@ void QCCounters::BeginSample(uint32_t eventId)
   m_CurrentEvent = eventId;
   m_SampleStartSec = NowSeconds();
   m_Sampling = true;
+
+  if(QCDebugLogEnabled())
+    RDCLOG("QCCounters: begin event %u monitor %u", eventId, m_Monitor);
 }
 
 void QCCounters::EndSample()
@@ -905,11 +1266,32 @@ void QCCounters::EndSample()
   PFN_glEndPerfMonitorAMD end = (PFN_glEndPerfMonitorAMD)m_Perf.end;
   end(m_Monitor);
 
+  // Push the end marker to the GPU. An event that replays to no GL call at all -- the last events of
+  // a frame usually do -- would otherwise leave the marker in the command buffer, and the monitor
+  // would never report a result for that window. The flush is outside the measured window, so it
+  // cannot change what the counters cover.
+  if(m_Perf.flush != NULL)
+  {
+    typedef void (*PFN_glFlush)();
+    ((PFN_glFlush)m_Perf.flush)();
+  }
+
+  if(QCDebugLogEnabled())
+  {
+    PFN_glGetError getError = (PFN_glGetError)m_Perf.get_error;
+    RDCLOG("QCCounters: end event %u monitor %u endError %d", m_CurrentEvent, m_Monitor,
+           getError != NULL ? int(getError()) : -1);
+  }
+
   // The caller has already waited on a fence, so the GPU has finished this draw and the result
   // should be ready. The wait below is a bounded safety net for the case where the driver defers
   // publication; when it expires the sample is dropped rather than filled with stale values.
   PFN_glGetPerfMonitorCounterDataAMD getData =
       (PFN_glGetPerfMonitorCounterDataAMD)m_Perf.get_counter_data;
+
+  // The window has to be measured before the driver is queried: the query itself can wait, and the
+  // window the counters cover is the one from begin to end.
+  const double window = NowSeconds() - m_SampleStartSec;
 
   uint32_t available = 0;
   const double waitEnd = NowSeconds() + 2.0;
@@ -921,14 +1303,78 @@ void QCCounters::EndSample()
     usleep(1000);
   }
 
+  if(QCDebugLogEnabled())
+    RDCLOG("QCCounters: event %u available %u", m_CurrentEvent, available);
+
   if(!available)
   {
+    m_PassMisses++;
+
     RDCWARN("QCCounters: no result for event %u, counters for this draw are unavailable",
             m_CurrentEvent);
+
+    // A single pass that never reports anything may simply be a selection this device will not take
+    // as a whole. The multi-pass layout is appended then, so the same fetch still measures what it
+    // can instead of losing every counter to one oversized selection.
+    if(m_OpenPass == 0 && m_PassGoodSamples == 0 && !MultiPassEnabled() && !m_FellBackToMultiPass)
+    {
+      m_FellBackToMultiPass = true;
+
+      rdcarray<uint32_t> needed;
+      rdcarray<uint32_t> dedicated;
+      CollectNeeds(needed, dedicated);
+      AppendMultiPass(needed, dedicated);
+
+      RDCWARN("QCCounters: the driver took no counter of the single pass, so the %u counters are "
+              "spread over %u passes instead",
+              (uint32_t)needed.size(), (uint32_t)m_Passes.size());
+    }
+
+    // One event with no result can be the driver deferring publication. Two in a row mean the driver
+    // dropped the whole selection when the monitor was set up: every remaining event of this pass
+    // would wait out the same timeout to get nothing, so the rest of the pass is skipped and the
+    // counters it holds report no value.
+    if(m_PassMisses >= 2 && !m_PassAbandoned)
+    {
+      m_PassAbandoned = true;
+
+      // A pass that measured nothing at all lost its selection; one that measured most of the frame
+      // and then ran dry simply reached the events at the end of a frame, which replay to no GL call
+      // and therefore produce no window for the monitor to report. Only the first case is a warning.
+      if(m_PassGoodSamples == 0)
+      {
+        const rdcarray<uint32_t> &pass = m_Passes[m_OpenPass < m_Passes.size() ? m_OpenPass : 0];
+        rdcarray<char> names;
+        for(uint32_t needIndex : pass)
+        {
+          const char *name = QCGGPMCounterName(kQCGGPMNeeds[needIndex].block,
+                                               kQCGGPMNeeds[needIndex].id);
+          if(name != NULL)
+          {
+            if(!names.empty())
+              names.append(", ", 2);
+            names.append(name, strlen(name));
+          }
+        }
+        names.push_back(0);
+
+        RDCWARN("QCCounters: the driver took none of the %u counters of pass %u in two attempts, so "
+                "its remaining events are skipped; these counters read no value in this fetch: %s",
+                (uint32_t)pass.size(), m_OpenPass, names.data());
+      }
+      else
+      {
+        RDCLOG("QCCounters: pass %u measured %u events and then reported no result for %u in a row, "
+               "which is how the frame's trailing events read; the pass stops here",
+               m_OpenPass, m_PassGoodSamples, m_PassMisses);
+      }
+    }
+
     return;
   }
 
-  const double window = NowSeconds() - m_SampleStartSec;
+  m_PassMisses = 0;
+  m_PassGoodSamples++;
 
   int32_t size = 0;
   getData(m_Monitor, GL_PERFMON_RESULT_SIZE_AMD, sizeof(size), (uint32_t *)&size, NULL);
@@ -955,7 +1401,12 @@ void QCCounters::EndSample()
       sample.raw[i] = -1.0;
   }
 
-  sample.dt = window;
+  // The window of the first pass that measured this event is kept, not the last one: a dedicated
+  // pass holds a single counter and therefore finishes sooner, and a per-second metric would read
+  // high if it were divided by that shorter window instead of by the pass that measured most of its
+  // counters.
+  if(sample.dt <= 0.0)
+    sample.dt = window;
 
   const size_t wordCount = written > 0 ? size_t(written / 4) : size_t(size / 4);
 
@@ -981,13 +1432,6 @@ void QCCounters::EndSample()
     for(uint32_t i = 0; i < kQCGGPMNeedCount; i++)
       cached.attempted[i] = 0;
   }
-  const rdcarray<uint32_t> &openPass =
-      m_Passes[m_OpenPass < m_Passes.size() ? m_OpenPass : 0];
-  for(size_t i = 0; i < openPass.size(); i++)
-  {
-    if(openPass[i] < uint32_t(cached.attempted.size()))
-      cached.attempted[openPass[i]] = 1;
-  }
   if(cached.dt <= 0.0)
     cached.dt = window;
   for(size_t i = 0; i < sample.raw.size() && i < cached.raw.size(); i++)
@@ -995,70 +1439,42 @@ void QCCounters::EndSample()
     if(sample.raw[i] >= 0.0)
       cached.raw[i] = sample.raw[i];
   }
+
+  // Only a counter that really reported a value counts as measured. A counter of the pass that came
+  // back empty has to be tried again by the next fetch: marking it attempted here would answer every
+  // later fetch for this event from the cache with no value at all, which is how a fetch could end up
+  // returning nothing for counters an earlier fetch measured.
+  const rdcarray<uint32_t> &openPass = m_Passes[m_OpenPass < m_Passes.size() ? m_OpenPass : 0];
+  for(size_t i = 0; i < openPass.size(); i++)
+  {
+    const uint32_t need = openPass[i];
+    if(need < uint32_t(cached.attempted.size()) && need < cached.raw.size() && cached.raw[need] >= 0.0)
+      cached.attempted[need] = 1;
+  }
 }
 
 bool QCCounters::ReadResults(const rdcarray<uint32_t> &needIndices, const uint32_t *words,
                              size_t wordCount, double *out)
 {
-  // AMD_performance_monitor records are {group, counter, value}; value occupies one or two
-  // words according to GL_COUNTER_TYPE_AMD, not an inline type/instance header. In particular
-  // {group, counter, low, high} is the standard uint64 representation, even when high is zero.
-  // Validate the entire buffer before publishing anything, so truncated or unknown records
-  // cannot leave a partially valid sample behind.
-  rdcarray<uint32_t> decodedNeeds;
-  rdcarray<double> decodedValues;
-  size_t offset = 0;
-  while(offset < wordCount)
+  // The record grammar and its validation live in qc_ggpm_plan.h, next to the plan that produced the
+  // selection, so both halves of the protocol are covered by the same desktop-side self check.
+  std::vector<QCGGPMPlanNeed> planNeeds;
+  planNeeds.resize(m_Needs.size());
+  for(size_t i = 0; i < m_Needs.size(); i++)
   {
-    if(wordCount - offset < 3)
-      return false;
-
-    uint32_t need = ~0U;
-    for(uint32_t index : needIndices)
-    {
-      if(m_Needs[index].group == words[offset] &&
-         m_Needs[index].counter == words[offset + 1])
-      {
-        need = index;
-        break;
-      }
-    }
-    if(need == ~0U || std::find(decodedNeeds.begin(), decodedNeeds.end(), need) != decodedNeeds.end())
-      return false;
-
-    const uint32_t type = m_Needs[need].type;
-    offset += 2;
-    double value = 0.0;
-    if(type == GL_UNSIGNED_INT64_AMD)
-    {
-      if(wordCount - offset < 2)
-        return false;
-      uint64_t raw = 0;
-      memcpy(&raw, &words[offset], sizeof(raw));
-      value = double(raw);
-      offset += 2;
-    }
-    else if(type == GL_FLOAT || type == GL_PERCENTAGE_AMD)
-    {
-      float raw = 0.0f;
-      memcpy(&raw, &words[offset++], sizeof(raw));
-      value = double(raw);
-    }
-    else if(type == GL_UNSIGNED_INT)
-    {
-      value = double(words[offset++]);
-    }
-    else
-    {
-      return false;
-    }
-    decodedNeeds.push_back(need);
-    decodedValues.push_back(value);
+    planNeeds[i].group = m_Needs[i].group;
+    planNeeds[i].counter = m_Needs[i].counter;
+    planNeeds[i].maxActive = m_Needs[i].maxActive;
+    planNeeds[i].type = m_Needs[i].type;
+    planNeeds[i].resolved = m_Needs[i].resolved;
   }
 
-  for(size_t i = 0; i < decodedNeeds.size(); i++)
-    out[decodedNeeds[i]] = decodedValues[i];
-  return !decodedNeeds.empty();
+  std::vector<uint32_t> indices;
+  for(uint32_t n : needIndices) indices.push_back(n);
+
+  return QCGGPMDecodeResults(words, wordCount, planNeeds.empty() ? NULL : &planNeeds[0],
+                             planNeeds.size(), indices.empty() ? NULL : &indices[0], indices.size(),
+                             out);
 }
 
 rdcarray<CounterResult> QCCounters::GetCounterData(const rdcarray<uint32_t> &eventIDs,
@@ -1101,6 +1517,13 @@ rdcarray<CounterResult> QCCounters::GetCounterData(const rdcarray<uint32_t> &eve
       ret.push_back(CounterResult(eventId, counter, value));
     }
   }
+
+  ReleaseMonitors();
+
+  // The counters are all read, so the driver can stop recording. Leaving the enable on would keep
+  // every later monitor in this context able to publish results, which the glGetPerfMonitorCounterData
+  // call assumes it may read, but it also keeps the driver's result buffer allocated for no reason.
+  SetGlobalMode(false);
 
   return ret;
 }
