@@ -60,6 +60,40 @@ struct TraceSample
   double value = 0.0;
 };
 
+// The aggregate of one series over one closed time window. This is the trace-panel equivalent of
+// Snapdragon Profiler's `CounterTrack$Stats` (span, min, max, avg) plus the sample accounting SDP
+// keeps in `CounterTrack$Values` (the timestamped samples a selection carries).
+//
+// What is counted, exactly:
+//   * Only samples whose own timestamp lies inside the window contribute to `count`/min/max/avg.
+//     Nothing is interpolated or extrapolated, so a window that contains no measurement reports
+//     `hasValue == false` rather than the nearest sample's value.
+//   * `avg` is the unweighted mean of those samples. Samples are not guaranteed to be uniformly
+//     spaced, so this is "the average of the N measurements taken in the window", not a
+//     time-weighted mean.
+//   * A level (`step`) series additionally reports the value it *held* at each edge of the window.
+//     Those two values are kept out of count/min/max/avg: the level may have been measured long
+//     before the window opened, and folding it in would present an older measurement as one taken
+//     inside the selection.
+struct TraceSeriesRangeStats
+{
+  // Samples recorded inside [beginSec, endSec]. Zero means the window holds no measurement.
+  int count = 0;
+  bool hasValue = false;
+  double min = 0.0;
+  double max = 0.0;
+  double avg = 0.0;
+  // Values of the first and last sample inside the window, when there is at least one.
+  double firstValue = 0.0;
+  double lastValue = 0.0;
+  // The level this series held at each edge of the window (step series only, and only when the
+  // series has any samples at all).
+  bool hasHeldBegin = false;
+  bool hasHeldEnd = false;
+  double heldBegin = 0.0;
+  double heldEnd = 0.0;
+};
+
 // A named series of samples, e.g. "DDR Bandwidth" or "GPU Busy". A trace normally carries
 // several of these over a common clock domain.
 struct TraceSeries
@@ -87,6 +121,10 @@ struct TraceSeries
   // Linear interpolation of the series at an arbitrary trace time. Returns false when the
   // series is empty. Times outside the sampled range are clamped to the nearest endpoint.
   bool SampleAt(double traceTimeSec, double &outValue) const;
+
+  // Aggregate over a closed window. `beginSec`/`endSec` are accepted in either order. Returns
+  // false, leaving `out` zeroed and `out.hasValue` false, when the window holds no samples.
+  bool RangeStats(double beginSec, double endSec, TraceSeriesRangeStats &out) const;
 };
 
 // A frame boundary detected in the trace. `timeSec` is in the trace's own clock domain.

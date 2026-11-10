@@ -1431,7 +1431,13 @@ static void drawX(const QStyleOption *opt, QPainter *p, const QRectF &rect)
   poly << pt;
 
   checkpath.addPolygon(poly);
-  p->fillPath(checkpath, opt->palette.brush(QPalette::ButtonText));
+
+  // The marker is drawn in the accent colour so a checked item reads as "on" at a glance in the
+  // dark scheme, matching the accent-filled checkboxes used elsewhere. A selected row paints the
+  // accent as its background, so the marker flips to the highlighted text colour to stay visible.
+  const QPalette::ColorRole role =
+      (opt->state & QStyle::State_Selected) ? QPalette::HighlightedText : QPalette::Highlight;
+  p->fillPath(checkpath, opt->palette.brush(role));
 }
 
 void RDStyle::drawPrimitive(PrimitiveElement element, const QStyleOption *opt, QPainter *p,

@@ -86,6 +86,84 @@ double TraceSeries::MaxValue() const
   return v;
 }
 
+// Aggregate of one series over a closed window. Samples are stored ascending by time (Sort() is
+// called by every importer), so the window is located with a binary search and then walked forward:
+// a long trace can hold hundreds of thousands of samples per series and a selection is dragged
+// interactively, so the aggregate must not rescan the whole series.
+bool TraceSeries::RangeStats(double beginSec, double endSec, TraceSeriesRangeStats &out) const
+{
+  out = TraceSeriesRangeStats();
+
+  if(samples.isEmpty())
+    return false;
+
+  const double t0 = qMin(beginSec, endSec);
+  const double t1 = qMax(beginSec, endSec);
+
+  // Held values are a property of the level, not of the window: they are present whenever the
+  // series carries samples at all, and they are reported separately from the window aggregate.
+  if(step)
+  {
+    double held = 0.0;
+    if(SampleAt(t0, held))
+    {
+      out.hasHeldBegin = true;
+      out.heldBegin = held;
+    }
+    if(SampleAt(t1, held))
+    {
+      out.hasHeldEnd = true;
+      out.heldEnd = held;
+    }
+  }
+
+  // First sample at or after the window start. `lo` is clamped to the last sample so the loop below
+  // still sees a sample when the window starts beyond the end of the series.
+  int lo = 0;
+  int hi = samples.size() - 1;
+  while(lo < hi)
+  {
+    const int mid = (lo + hi) / 2;
+    if(samples[mid].timeSec < t0)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+
+  double sum = 0.0;
+  for(int i = lo; i < samples.size(); i++)
+  {
+    const TraceSample &s = samples[i];
+
+    if(s.timeSec > t1)
+      break;
+
+    if(s.timeSec < t0)
+      continue;
+
+    if(!out.hasValue)
+    {
+      out.hasValue = true;
+      out.min = out.max = s.value;
+      out.firstValue = s.value;
+    }
+    else
+    {
+      out.min = qMin(out.min, s.value);
+      out.max = qMax(out.max, s.value);
+    }
+
+    out.lastValue = s.value;
+    out.count++;
+    sum += s.value;
+  }
+
+  if(out.hasValue)
+    out.avg = sum / double(out.count);
+
+  return out.hasValue;
+}
+
 bool TraceSeries::SampleAt(double traceTimeSec, double &outValue) const
 {
   if(samples.isEmpty())

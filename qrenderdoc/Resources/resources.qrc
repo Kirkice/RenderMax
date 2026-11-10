@@ -191,5 +191,11 @@
         <file>UE/chevron-down.svg</file>
         <file>UE/chevron-right.svg</file>
         <file>UE/starship.qss</file>
+        <file>SDP/trace-select.png</file>
+        <file>SDP/trace-select-on.png</file>
+        <file>SDP/trace-pan.png</file>
+        <file>SDP/trace-pan-on.png</file>
+        <file>SDP/trace-zoom.png</file>
+        <file>SDP/trace-zoom-on.png</file>
     </qresource>
 </RCC>

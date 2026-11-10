@@ -42,6 +42,7 @@ class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
+class QTabWidget;
 class QTableWidget;
 class QToolButton;
 
@@ -50,7 +51,8 @@ class QToolButton;
 // keys 1, 2, and 3"), kept with the same meaning and the same key bindings.
 enum class TraceNavMode
 {
-  // Drag a lasso to select elements; the selection is described in the element pane.
+  // Drag out a time window; the Selection pane reports every counter inside it. Elements are picked
+  // by clicking them, which is also what SDP's Selection mode does with a click.
   Select = 0,
   // Drag to shift the visible window. The default.
   Pan = 1,
@@ -154,6 +156,10 @@ private:
   void exportThreadTime();
 
   void updateHighlight();
+  // Fill the Selection pane from the time window dragged out on the timeline. Counters are sampled
+  // measurements, so the only honest summary of a window is what was actually recorded inside it;
+  // `valid == false` empties the pane.
+  void updateRangeSelection(bool valid, double beginSec, double endSec);
   // Draw the imported series without any frame overlay (no capture open, so nothing to align to).
   void showTraceOnly();
   void selectEvent(uint32_t eventId);
@@ -211,9 +217,20 @@ private:
   QTableWidget *m_Element = NULL;
   QLabel *m_ElementCaption = NULL;
 
+  // Selection pane: the per-counter aggregate of the time window dragged out on the timeline. SDP
+  // answers "what happened in this interval" from its Selection view; this is the same question for
+  // the counters this panel draws.
+  QTableWidget *m_RangeTable = NULL;
+  QLabel *m_RangeCaption = NULL;
+  QTabWidget *m_SideTabs = NULL;
+  QWidget *m_RangePane = NULL;
+
   QToolButton *m_ModeSelect = NULL;
   QToolButton *m_ModePan = NULL;
   QToolButton *m_ModeZoom = NULL;
+  // Height of every row in the timeline. The header column is a fixed width while the window is
+  // not, so how much caption text fits is a user choice rather than something to guess at.
+  QSpinBox *m_RowHeight = NULL;
 
   // Lane visibility controls. A phone trace has several hundred thread lanes; these are the means
   // of narrowing that to the handful a user is actually looking at, matching how Snapdragon

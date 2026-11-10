@@ -42,15 +42,18 @@
 #include <QHash>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPaintEvent>
 #include <QPalette>
 #include <QPen>
+#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPolygonF>
@@ -185,22 +188,24 @@ QColor SeriesColour(int index)
 // stylesheet, so the widget's palette is the single authority. The accessors live on
 // SystemTraceTimeline, mirroring how TimelineBar paints from palette().
 // ---------------------------------------------------------------------------------------------
-const int kHeaderWidth = 210;
+const int kHeaderWidth = 260;
 const int kRulerHeight = 26;
-const int kRowHeight = 30;
-const int kGroupHeight = 20;
 const int kScrollBarWidth = 14;
+// SDP draws its navigation chips at 24x24; keeping the button the same size means the artwork is
+// never resampled and the highlight is exactly as large as the button.
+const int kTraceChipSize = 24;
 const int kTimeScrollBarHeight = 14;
 const int kTimeScrollScale = 1000000;
-const int kSpanHeight = 18;
-const int kSpanStep = 20;
 
-// A compact lane packs the same nesting into less vertical space. Snapdragon Profiler's trace view
-// keeps most tracks at a single fixed height and lets the user open a track for detail; a trace that
-// stacks up to eight atrace nesting levels at 16 px per level otherwise spends 150 px on one thread
-// and pushes every other lane out of the window.
-const int kSpanHeightCompact = 9;
-const int kSpanStepCompact = 10;
+// Row geometry is a view setting, not a constant: Snapdragon Profiler's Trace view carries a size
+// control in its toolbar, and a wide window fits two lines of caption text where a narrow one fits
+// one. These are the starting value and the bounds; the live value is SystemTraceTimeline's
+// m_RowHeight, and every row - group header, lane, summary row - is exactly that tall. One height
+// for every band is what makes a disclosure target easy to hit, and it is what stops the row grid
+// from moving around as groups are opened and closed.
+const int kRowHeightDefault = 30;
+const int kRowHeightMin = 18;
+const int kRowHeightMax = 72;
 const int kMaxDrawDepth = 8;
 
 // How many lanes of a group are laid out before the rest are summarised in a single "more" row.
@@ -281,6 +286,114 @@ struct SystemTraceTimelineData
 }    // namespace
 
 // ---------------------------------------------------------------------------------------------
+// The navigation mode buttons. SDP's toolbar artwork is not a glyph on a transparent background:
+// each state is a complete 24x24 chip with the glyph baked into it (pointers-active is the grey chip
+// of an available tool, pointers-selection the blue chip of the current one). A chip therefore has
+// to *be* the button. A plain QToolButton cannot do that - the style insets the icon by its button
+// margin, so an 18px icon floats inside a ~30px frame and the blue highlight ends up visibly smaller
+// than the thing the mouse is over. Painting is done here instead: the chip fills the whole button
+// and hover/press brighten it, because any frame the style added would sit outside the highlight and
+// read as a second, larger button.
+class TraceModeButton : public QToolButton
+{
+public:
+  explicit TraceModeButton(QWidget *parent) : QToolButton(parent)
+  {
+    setCheckable(true);
+    setAutoRaise(true);
+    setCursor(Qt::PointingHandCursor);
+    setAttribute(Qt::WA_Hover, true);
+    setFixedSize(kTraceChipSize, kTraceChipSize);
+  }
+
+  // `off` is the chip of an available tool, `on` the chip of the current one.
+  void SetChips(const QString &off, const QString &on)
+  {
+    m_Off = QPixmap(off);
+    m_On = QPixmap(on);
+    update();
+  }
+
+protected:
+  void paintEvent(QPaintEvent *) override
+  {
+    const QPixmap &chip = isChecked() ? m_On : m_Off;
+
+    if(chip.isNull())
+      return;
+
+    QPainter p(this);
+    p.drawPixmap(rect(), chip);
+
+    if(!isChecked() && (isDown() || underMouse()))
+    {
+      // SourceAtop keeps the chip's rounded silhouette and only lightens what is already opaque.
+      p.setCompositionMode(QPainter::CompositionMode_SourceAtop);
+      p.fillRect(rect(), QColor(255, 255, 255, isDown() ? 44 : 24));
+    }
+  }
+
+private:
+  QPixmap m_Off;
+  QPixmap m_On;
+};
+
+// The two bulk actions at the foot of the track-type list. They are drawn rather than loaded from
+// an icon file: the theme's check/indeterminate SVGs only fill half of their 16px view box, so at a
+// usable icon size the glyph shrinks to a faint speck. Drawing them keeps the stroke the same
+// weight as the checked markers in the list and lets them use the same accent colour.
+class TypeBulkButton : public QToolButton
+{
+public:
+  enum Kind
+  {
+    CheckAll,
+    ClearAll,
+  };
+
+  TypeBulkButton(Kind kind, QWidget *parent) : QToolButton(parent), m_Kind(kind)
+  {
+    setAutoRaise(true);
+    setCursor(Qt::PointingHandCursor);
+    setFixedSize(24, 24);
+  }
+
+protected:
+  void paintEvent(QPaintEvent *event) override
+  {
+    // The style still owns the background, so hover and press come from the theme.
+    QToolButton::paintEvent(event);
+
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+
+    QPen pen(isEnabled() ? palette().color(QPalette::Highlight)
+                         : palette().color(QPalette::Disabled, QPalette::ButtonText),
+             2.0);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+
+    const QRectF glyph = QRectF(rect()).adjusted(6.0, 7.0, -6.0, -7.0);
+    if(m_Kind == CheckAll)
+    {
+      QPainterPath path;
+      path.moveTo(glyph.left(), glyph.center().y());
+      path.lineTo(glyph.center().x() - 0.5, glyph.bottom());
+      path.lineTo(glyph.right(), glyph.top());
+      p.drawPath(path);
+    }
+    else
+    {
+      p.drawLine(QPointF(glyph.left(), glyph.center().y()),
+                 QPointF(glyph.right(), glyph.center().y()));
+    }
+  }
+
+private:
+  Kind m_Kind;
+};
+
 // SystemTraceTimeline — the trace view itself: one lane per process/thread (or per metric), a
 // shared zoomable time ruler, and the frame overlay. There is no QtCharts module in this project,
 // so every element is drawn directly with QPainter.
@@ -307,13 +420,17 @@ public:
     setFocusPolicy(Qt::StrongFocus);
 
     m_Scroll = new QScrollBar(Qt::Vertical, this);
-    m_Scroll->setSingleStep(kRowHeight / 2);
+    m_Scroll->setSingleStep(kRowHeightDefault / 2);
 
     connect(m_Scroll, &QScrollBar::valueChanged, this, [this](int value) {
       if(m_ScrollY == value)
         return;
 
       m_ScrollY = value;
+      // The bands move under a stationary pointer, so a header that was hovered a moment ago is now
+      // a different row.
+      m_HoverHeaderRow = -1;
+      ApplyCursor();
       update();
     });
 
@@ -336,6 +453,73 @@ public:
 
   // The parameter is deliberately not named `data`: QWidget declares a member called `data`, so
   // that name would shadow it (C4458).
+  QWidget *CreateTypePanel(QWidget *parent)
+  {
+    QWidget *panel = new QWidget(parent);
+    QVBoxLayout *layout = new QVBoxLayout(panel);
+    layout->addWidget(new QLabel(QObject::tr("Track types"), panel));
+    m_TypeList = new QListWidget(panel);
+    m_TypeList->setSpacing(3);
+    m_TypeList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_TypeList->setToolTip(QObject::tr("Unchecked types are excluded from timeline layout and painting. Analysis still uses the complete trace."));
+    layout->addWidget(m_TypeList);
+    const QStringList names = TypeNames();
+    for(int i = 0; i < names.size(); ++i)
+    {
+      QListWidgetItem *item = new QListWidgetItem(names[i], m_TypeList);
+      item->setData(Qt::UserRole, i);
+      item->setSizeHint(QSize(0, 30));
+      item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+      item->setCheckState(Qt::Checked);
+    }
+    connect(m_TypeList, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
+      const int type = item->data(Qt::UserRole).toInt();
+      if(item->checkState() == Qt::Checked) m_HiddenTypes.remove(type);
+      else m_HiddenTypes.insert(type);
+      m_Hover = SpanRef();
+      m_HoverRow = -1;
+      m_HoverSeries = -1;
+      m_ScrollY = 0;
+      RebuildRows();
+      update();
+    });
+    // Snapdragon Profiler has no all/none pair for track types: its track selection is the
+    // "Tracks" dialog, which is a checkbox tree plus a filter box (TrackSelector), and its i18n has
+    // no such labels. This bulk shortcut is ours, so it is drawn the way SDP draws its own panel
+    // controls: two compact icon-only buttons with tooltips, not full-width text buttons.
+    QHBoxLayout *buttons = new QHBoxLayout();
+    buttons->setSpacing(4);
+    buttons->addStretch(1);
+    const char *buttonTips[2] = {QT_TR_NOOP("Check every track type"),
+                                 QT_TR_NOOP("Uncheck every track type")};
+    for(int mode = 0; mode < 2; ++mode)
+    {
+      TypeBulkButton *button =
+          new TypeBulkButton(mode == 0 ? TypeBulkButton::CheckAll : TypeBulkButton::ClearAll, panel);
+      button->setToolTip(QObject::tr(buttonTips[mode]));
+      buttons->addWidget(button);
+      connect(button, &QToolButton::clicked, this, [this, mode]() {
+        m_TypeList->blockSignals(true);
+        m_HiddenTypes.clear();
+        for(int i = 0; i < m_TypeList->count(); ++i)
+        {
+          m_TypeList->item(i)->setCheckState(mode == 0 ? Qt::Checked : Qt::Unchecked);
+          if(mode != 0) m_HiddenTypes.insert(i);
+        }
+        m_TypeList->blockSignals(false);
+        m_Hover = SpanRef();
+        m_HoverRow = m_HoverSeries = -1;
+        m_ScrollY = 0;
+        RebuildRows();
+        update();
+      });
+    }
+    layout->addLayout(buttons);
+    panel->setMinimumWidth(220);
+    panel->setMaximumWidth(350);
+    return panel;
+  }
+
   void SetData(const SystemTraceTimelineData &newData)
   {
     const bool traceChanged = newData.trace != m_LastTrace;
@@ -343,9 +527,16 @@ public:
     if(traceChanged)
     {
       m_RowsDirty = true;
-      // Expanded lanes are remembered by index, which is only meaningful for the trace it came from.
-      // Group collapse is remembered by name and survives, as does the filter text.
-      m_ExpandedTracks.clear();
+      // Group collapse is remembered by name and survives a re-import, as does the filter text.
+      m_KnownGroups.clear();
+      m_CollapsedGroups.clear();
+      m_ExpandedGroups.clear();
+
+      // A different trace means a different time base: the selected window named two instants of the
+      // trace that is being replaced, so it is dropped rather than re-meaning something else.
+      m_RangeValid = false;
+      m_RangeT0 = 0.0;
+      m_RangeT1 = 0.0;
 
       // Measure the trace once, here. Everything else in this class treats the extent as a constant.
       double start = 0.0;
@@ -392,6 +583,7 @@ public:
     m_TraceSpanSec = 0.0;
     m_RowsDirty = true;
     m_Rows.clear();
+    m_CounterSeriesInView.clear();
     m_ContentHeight = 0;
     m_ScrollY = 0;
     m_Hover = SpanRef();
@@ -399,6 +591,12 @@ public:
     m_HoverRow = -1;
     m_HoverSeries = -1;
     m_HoverText.clear();
+    // The window referred to the trace that is being dropped; it is not a window over nothing.
+    m_RangeValid = false;
+    m_RangeT0 = 0.0;
+    m_RangeT1 = 0.0;
+    if(OnSelectRange)
+      OnSelectRange(false, 0.0, 0.0);
     UpdateScrollBar();
     UpdateTimeScrollBar();
     update();
@@ -416,6 +614,12 @@ public:
     m_CaliperASet = false;
     m_CaliperBSet = false;
 
+    // A new trace means the window names times from the old one. ResetView has no data yet, so this
+    // cannot notify: the viewer's own rebuild clears its panel.
+    m_RangeValid = false;
+    m_RangeT0 = 0.0;
+    m_RangeT1 = 0.0;
+
     m_ResetPending = true;
     m_LastTrace = NULL;
     m_RowsDirty = true;
@@ -423,21 +627,52 @@ public:
     update();
   }
 
-  void SetNavMode(TraceNavMode mode)
+  // The cursor states the mode, except over a row that is itself a control: there the hand says
+  // "this band does something when clicked", which is the only affordance a painter-drawn header
+  // can offer.
+  void ApplyCursor()
   {
-    m_Mode = mode;
+    if(m_HoverHeaderRow >= 0)
+    {
+      setCursor(Qt::PointingHandCursor);
+      return;
+    }
 
-    switch(mode)
+    switch(m_Mode)
     {
       case TraceNavMode::Pan: setCursor(Qt::OpenHandCursor); break;
       case TraceNavMode::Select:
       case TraceNavMode::Zoom: setCursor(Qt::CrossCursor); break;
     }
+  }
 
+  void SetNavMode(TraceNavMode mode)
+  {
+    m_Mode = mode;
+    ApplyCursor();
     update();
   }
 
   TraceNavMode NavMode() const { return m_Mode; }
+
+  // Height of every row in the lane area. Group headers, lanes and the summary rows all use it, so
+  // the timeline is a uniform grid: opening or closing a group removes or adds bands but never
+  // resizes the ones that stay, and the empty sliver between two rows that used to swallow clicks
+  // cannot exist.
+  int RowHeightSetting() const { return m_RowHeight; }
+
+  void SetRowHeight(int height)
+  {
+    const int clamped = qBound(kRowHeightMin, height, kRowHeightMax);
+
+    if(clamped == m_RowHeight)
+      return;
+
+    m_RowHeight = clamped;
+    m_Scroll->setSingleStep(qMax(1, m_RowHeight / 2));
+    RebuildRows();
+    update();
+  }
 
   // --- lane visibility -----------------------------------------------------------------------
   // The importer produces one lane per thread, which on a real phone capture is several hundred
@@ -481,6 +716,11 @@ public:
       for(const TraceTrack &track : m_Data.trace->tracks)
         m_CollapsedGroups.insert(GroupOf(track));
     }
+    if(m_Data.trace != NULL)
+    {
+      for(const TraceTrack &track : m_Data.trace->tracks)
+        m_KnownGroups.insert(GroupOf(track));
+    }
 
     m_ScrollY = 0;
     RebuildRows();
@@ -488,8 +728,7 @@ public:
   }
 
   void SelectTrack(int trackIndex)
-  {
-    ScrollToTrack(trackIndex);
+  {    ScrollToTrack(trackIndex);
 
     if(trackIndex < 0 || m_Data.trace == NULL || trackIndex >= m_Data.trace->tracks.size())
       return;
@@ -498,6 +737,34 @@ public:
     if(!track.spans.isEmpty())
       SelectSpan(trackIndex, 0);
   }
+
+  // --- time-range selection -------------------------------------------------------------------
+  // SDP's Selection mode drags out a time window, and its Selection view then reports what the
+  // window contains. A counter lane holds sampled measurements rather than elements, so a window is
+  // the only thing there is to select on it: the pointer alone can only ever name one sample.
+  bool HasRangeSelection() const { return m_RangeValid; }
+  double RangeBeginSec() const { return m_RangeT0; }
+  double RangeEndSec() const { return m_RangeT1; }
+
+  void ClearRangeSelection(bool notify = true)
+  {
+    if(!m_RangeValid)
+      return;
+
+    m_RangeValid = false;
+    m_RangeT0 = 0.0;
+    m_RangeT1 = 0.0;
+
+    if(notify && OnSelectRange)
+      OnSelectRange(false, 0.0, 0.0);
+
+    update();
+  }
+
+  // Series indices of the counter lanes the current layout actually shows, i.e. after the type
+  // filter, group collapse and per-group lane cap. A lane the user has filtered out must not
+  // reappear in the selection's statistics: the panel reports what is on screen.
+  QVector<int> VisibleCounterSeries() const { return m_CounterSeriesInView; }
 
   // --- theme ---------------------------------------------------------------------------------
   // This widget draws its whole surface with QPainter, so it cannot inherit the theme the way a
@@ -536,6 +803,10 @@ public:
   // with an empty string when it leaves. A counter lane is sampled measurement drawn as a curve: it
   // has no elements to click and no axis, so this text is the only way to read a number off it.
   std::function<void(const QString &)> OnHoverReadout;
+  // Called when the time-range selection changes: first argument is whether a range is selected,
+  // then the window in trace-clock seconds, ascending. Select mode drags out this window; the
+  // viewer turns it into the per-counter aggregate SDP shows in its Selection view.
+  std::function<void(bool, double, double)> OnSelectRange;
 
 protected:
   void paintEvent(QPaintEvent *) override
@@ -608,15 +879,19 @@ protected:
 
     const QRectF rows = RowsRect();
 
-    // The caption column is interactive: a group header toggles its lanes, and a lane's leading
-    // glyph switches between the compact and expanded nesting heights. Treating the column as part
-    // of the plot would make the most useful affordances in the panel unreachable.
-    if(event->pos().x() < kHeaderWidth && event->pos().y() >= rows.top() &&
-       event->pos().y() <= rows.bottom())
+    // A group header is a control across its whole width, not just over its caption: the band is the
+    // affordance, and requiring the pointer to be in the left column was why collapsing a group felt
+    // like it only worked sometimes.
+    if(event->pos().y() >= rows.top() && event->pos().y() <= rows.bottom())
     {
-      HandleCaptionClick(event->pos());
-      event->accept();
-      return;
+      const int rowIndex = RowAt(double(event->pos().y() - rows.top()), 3.0);
+
+      if(IsControlRow(rowIndex))
+      {
+        HandleCaptionClick(event->pos());
+        event->accept();
+        return;
+      }
     }
 
     if(!rows.contains(event->pos()))
@@ -693,12 +968,36 @@ protected:
 
     UpdateCounterHover(event->pos());
 
+    // Point at the header under the cursor before the click rather than only reacting to it.
+    const QRectF rows = RowsRect();
+    int headerRow = -1;
+    if(event->pos().y() >= rows.top() && event->pos().y() <= rows.bottom())
+    {
+      const int rowIndex = RowAt(double(event->pos().y() - rows.top()), 2.0);
+      if(IsControlRow(rowIndex))
+        headerRow = rowIndex;
+    }
+
+    if(headerRow != m_HoverHeaderRow)
+    {
+      m_HoverHeaderRow = headerRow;
+      ApplyCursor();
+      update();
+    }
+
     QWidget::mouseMoveEvent(event);
   }
 
   void leaveEvent(QEvent *event) override
   {
     ClearCounterHover();
+
+    if(m_HoverHeaderRow >= 0)
+    {
+      m_HoverHeaderRow = -1;
+      ApplyCursor();
+      update();
+    }
 
     QWidget::leaveEvent(event);
   }
@@ -713,7 +1012,6 @@ protected:
 
     const DragMode mode = m_Dragging;
     m_Dragging = DragNone;
-
     const QRect dragRect = QRect(m_DragStart, event->pos()).normalized();
     const bool moved = dragRect.width() > 3 || dragRect.height() > 3;
 
@@ -733,7 +1031,10 @@ protected:
     }
     else if(mode == DragSelect && moved)
     {
-      SelectInRect(dragRect);
+      // SDP's Selection mode drags out a time window over the lanes and its Selection view then
+      // reports what that window contains. Elements are picked by clicking them; the drag is the
+      // only way to ask about a counter lane, which holds measurements rather than elements.
+      SetRangeSelection(TimeAtX(dragRect.left()), TimeAtX(dragRect.right()), true);
     }
     else if(!moved)
     {
@@ -831,6 +1132,26 @@ protected:
         NotifyNavMode(TraceNavMode::Zoom);
         event->accept();
         return;
+      // SDP's trace panel: F and M zoom to the selection, 0 and Z show the whole trace, Esc clears
+      // the selection. Both keys of each pair are accepted so a habit from either tool works; the
+      // letters only reach here when the timeline itself has focus, never while typing in a filter.
+      case Qt::Key_F:
+      case Qt::Key_M:
+        ZoomToSelection();
+        event->accept();
+        return;
+      case Qt::Key_0:
+      case Qt::Key_Z:
+        ResetViewZoom();
+        event->accept();
+        return;
+      case Qt::Key_Escape:
+        m_CaliperASet = false;
+        m_CaliperBSet = false;
+        ClearRangeSelection();
+        update();
+        event->accept();
+        return;
       default: break;
     }
 
@@ -883,22 +1204,34 @@ private:
     double counterMin = 0.0;
     double counterMax = 0.0;
     bool counterRange = false;
+    // View-space geometry only: hover values/highlights remain live. Rows are recreated on data,
+    // filter and layout changes, so cached vertices never outlive their source trace.
+    mutable QPolygonF counterPolyline;
+    mutable QRectF counterViewport;
+    mutable double counterT0 = 0.0, counterT1 = 0.0;
+    mutable double cachedMin = 0.0, cachedMax = 0.0;
+    mutable bool counterGeometryValid = false;
+    mutable QImage spanImage;
+    mutable double spanT0 = 0.0, spanT1 = 0.0;
+    mutable int spanSelected = -1, spanHovered = -1;
+    mutable qint64 spanPaletteKey = 0;
+    mutable QFont spanFont;
     // Index into SystemTrace::series for a synthesised counter row, otherwise -1.
     int series = -1;
     int top = 0;
     int height = 0;
     bool header = false;
     bool annotation = false;
-    // A group header can be collapsed to hide its lanes; a lane can be expanded from the compact
-    // drawing to the full per-nesting-level drawing.
+    // A group header can be collapsed to hide its lanes. Collapsing removes bands from the grid; it
+    // does not resize the bands that remain.
     bool collapsed = false;
-    bool expanded = false;
     int trackCount = 0;
     int visibleTrackCount = 0;
     // Non-zero on the summary row that stands in for the lanes a group did not lay out.
     int moreCount = 0;
-    int spanStep = kSpanStepCompact;
-    int spanHeight = kSpanHeightCompact;
+    // Per-nesting-level geometry, fitted into the row instead of the row growing with it.
+    int spanStep = 0;
+    int spanHeight = 0;
     QString group;
     QString annotationGroup;
   };
@@ -1019,9 +1352,41 @@ private:
       OnNavModeChanged(mode);
   }
 
+  static QStringList TypeNames()
+  {
+    return {QObject::tr("Frames and markers"), QObject::tr("CPU scheduling"),
+            QObject::tr("CPU metrics"), QObject::tr("GPU execution"),
+            QObject::tr("GPU metrics"), QObject::tr("Memory and bandwidth"),
+            QObject::tr("Power and temperature"), QObject::tr("Processes and threads"),
+            QObject::tr("Other metrics")};
+  }
+
+  static int MetricType(const QString &name)
+  {
+    const QString n = name.toLower();
+    if(n.contains(lit("bandwidth")) || n.contains(lit("ddr")) || n.contains(lit("memory"))) return 5;
+    if(n.contains(lit("thermal")) || n.contains(lit("temperature")) ||
+       n.contains(lit("power")) || n.contains(lit("voltage")) || n.contains(lit("battery"))) return 6;
+    if(n.contains(lit("gpu")) || n.contains(lit("kgsl")) || n.contains(lit("adreno"))) return 4;
+    if(n.contains(lit("cpu"))) return 2;
+    if(n.contains(lit("frame"))) return 0;
+    return 8;
+  }
+
+  static int TrackType(const TraceTrack &track)
+  {
+    if(track.kind == TraceTrackKind::Counter) return MetricType(track.group + lit(" ") + track.name);
+    if(track.atrace) return 0;
+    if(track.kind == TraceTrackKind::Cpu) return 1;
+    const QString n = (track.group + lit(" ") + track.name).toLower();
+    if(n.contains(lit("kgsl")) || n.contains(lit("gpu")) || n.contains(lit("adreno"))) return 3;
+    return 7;
+  }
+
   QString GroupOf(const TraceTrack &track) const
   {
-    return track.group.isEmpty() ? QObject::tr("Ungrouped") : track.group;
+    const QString owner = track.group.isEmpty() ? QObject::tr("Ungrouped") : track.group;
+    return TypeNames()[TrackType(track)] + QStringLiteral(" / ") + owner;
   }
 
   QString CaptionOf(int trackIndex) const
@@ -1046,6 +1411,7 @@ private:
   void RebuildRows()
   {
     m_Rows.clear();
+    m_CounterSeriesInView.clear();
     m_ContentHeight = 0;
 
     if(m_Data.trace == NULL)
@@ -1055,6 +1421,25 @@ private:
     }
 
     const SystemTrace &trace = *m_Data.trace;
+    if(m_TypeList)
+    {
+      QVector<int> counts(TypeNames().size(), 0);
+      if(!trace.tracks.isEmpty())
+        for(const TraceTrack &track : trace.tracks) ++counts[TrackType(track)];
+      else
+        for(const TraceSeries &series : trace.series) ++counts[MetricType(series.name)];
+      m_TypeList->blockSignals(true);
+      for(int i = 0; i < counts.size(); ++i)
+      {
+        QListWidgetItem *item = m_TypeList->item(i);
+        item->setText(TypeNames()[i] + QStringLiteral(" (%1)").arg(counts[i]));
+        Qt::ItemFlags flags = item->flags();
+        if(counts[i] > 0) flags |= Qt::ItemIsEnabled;
+        else flags &= ~Qt::ItemIsEnabled;
+        item->setFlags(flags);
+      }
+      m_TypeList->blockSignals(false);
+    }
     EnsureTrackIndex();
     int y = 0;
 
@@ -1067,6 +1452,8 @@ private:
 
       for(int i = 0; i < trace.tracks.size(); i++)
       {
+        if(m_HiddenTypes.contains(TrackType(trace.tracks[i])))
+          continue;
         const QString group = GroupOf(trace.tracks[i]);
 
         if(!groupTracks.contains(group))
@@ -1106,9 +1493,27 @@ private:
           visible.push_back(trackIndex);
         }
 
-        if(visible.isEmpty() && (m_ActiveOnly || !m_FilterText.isEmpty()))
+        if(visible.isEmpty())
           continue;
 
+        // Every counter lane the filters let through, whether or not the group is open and
+        // whether or not the lane cap hides it: a time window summarises the counters the user has
+        // asked to see, and folding a group away is a layout choice, not a data filter.
+        for(int trackIndex : visible)
+        {
+          const TraceTrack &track = trace.tracks[trackIndex];
+          if(track.kind == TraceTrackKind::Counter && track.counterSeries >= 0 &&
+             track.counterSeries < trace.series.size() &&
+             !m_CounterSeriesInView.contains(track.counterSeries))
+            m_CounterSeriesInView.push_back(track.counterSeries);
+        }
+
+        if(!m_KnownGroups.contains(group))
+        {
+          // Only the first visible group starts expanded. Remember subsequent user toggles.
+          if(!m_KnownGroups.isEmpty()) m_CollapsedGroups.insert(group);
+          m_KnownGroups.insert(group);
+        }
         const bool collapsed = m_CollapsedGroups.contains(group);
 
         Row header;
@@ -1118,9 +1523,9 @@ private:
         header.trackCount = groupTracks.value(group).size();
         header.visibleTrackCount = visible.size();
         header.top = y;
-        header.height = kGroupHeight;
+        header.height = m_RowHeight;
         m_Rows.push_back(header);
-        y += kGroupHeight;
+        y += m_RowHeight;
 
         if(collapsed)
           continue;
@@ -1141,15 +1546,16 @@ private:
 
           Row row;
           row.track = trackIndex;
-          row.expanded = m_ExpandedTracks.contains(trackIndex);
-          row.spanStep = row.expanded ? kSpanStep : kSpanStepCompact;
-          row.spanHeight = row.expanded ? kSpanHeight : kSpanHeightCompact;
+          // The nesting is fitted into the row rather than the row growing with it. A lane that
+          // changed height when it was opened moved every lane below it, so the next click landed
+          // somewhere else; a lane that is one fixed band is also one fixed hit target. Levels too
+          // deep to draw inside the band are drawn thinner and clipped to it - raise the row height
+          // to see more of them.
+          const int levels = qMin(kMaxDrawDepth, maxDepth) + 1;
+          row.spanStep = qBound(5, (m_RowHeight - 2) / levels, qMax(7, m_RowHeight - 10));
+          row.spanHeight = qMax(4, row.spanStep - 2);
           row.top = y;
-          // A counter lane is a single curve; a span lane is as tall as its nesting needs, capped
-          // so one deeply nested lane cannot push every other lane off the screen.
-          row.height = track.kind == TraceTrackKind::Counter
-                           ? kRowHeight
-                           : qMax(kRowHeight, 6 + (qMin(kMaxDrawDepth, maxDepth) + 1) * row.spanStep);
+          row.height = m_RowHeight;
 
           if(track.kind == TraceTrackKind::Counter && track.counterSeries >= 0 &&
              track.counterSeries < trace.series.size())
@@ -1173,9 +1579,9 @@ private:
           row.moreCount = moreCount;
           row.group = group;
           row.top = y;
-          row.height = kGroupHeight;
+          row.height = m_RowHeight;
           m_Rows.push_back(row);
-          y += kGroupHeight;
+          y += m_RowHeight;
         }
 
         if(GroupHasAnnotations(group))
@@ -1184,9 +1590,9 @@ private:
           row.annotation = true;
           row.annotationGroup = group;
           row.top = y;
-          row.height = kRowHeight;
+          row.height = m_RowHeight;
           m_Rows.push_back(row);
-          y += kRowHeight;
+          y += m_RowHeight;
         }
       }
     }
@@ -1196,19 +1602,40 @@ private:
       // per series is synthesised rather than showing an empty timeline.
       for(int i = 0; i < trace.series.size(); i++)
       {
+        const int type = MetricType(trace.series[i].name);
+        if(m_HiddenTypes.contains(type)) continue;
+        const QString group = TypeNames()[type] + QStringLiteral(" / ") + trace.series[i].name;
+        if(!m_KnownGroups.contains(group))
+        {
+          if(!m_KnownGroups.isEmpty()) m_CollapsedGroups.insert(group);
+          m_KnownGroups.insert(group);
+        }
+        Row header;
+        header.header = true;
+        header.group = group;
+        header.collapsed = m_CollapsedGroups.contains(group);
+        header.trackCount = header.visibleTrackCount = 1;
+        header.top = y;
+        header.height = m_RowHeight;
+        m_Rows.push_back(header);
+        y += m_RowHeight;
+        if(header.collapsed) continue;
         Row row;
         row.series = i;
         row.top = y;
-        row.height = kRowHeight;
+        row.height = m_RowHeight;
         row.counterMin = trace.series[i].MinValue();
         row.counterMax = trace.series[i].MaxValue();
         row.counterRange = true;
         m_Rows.push_back(row);
-        y += kRowHeight;
+        y += m_RowHeight;
       }
     }
 
     m_ContentHeight = y;
+    // Row indices change under the cursor, so a remembered hovered header would point at a
+    // different band than the one the pointer is over.
+    m_HoverHeaderRow = -1;
     UpdateScrollBar();
   }
 
@@ -1379,7 +1806,7 @@ private:
 
     m_Scroll->setRange(0, maxValue);
     m_Scroll->setPageStep(qMax(1, viewport));
-    m_Scroll->setSingleStep(qMax(1, kRowHeight / 2));
+    m_Scroll->setSingleStep(qMax(1, m_RowHeight / 2));
     m_Scroll->setVisible(maxValue > 0);
 
     m_ScrollY = qBound(0, m_ScrollY, maxValue);
@@ -1603,23 +2030,51 @@ private:
     return ref;
   }
 
-  // Row index under a y position in the lane area, -1 when the point is past the last row.
-  int RowAt(double y) const
+  // Row index under a y position in the lane area, -1 when the point is past the last row. `slop`
+  // widens each band by that many pixels on both sides, so a click that lands on the hairline
+  // separator still belongs to the row the user was aiming at instead of to nothing.
+  int RowAt(double y, double slop = 0.0) const
   {
     const double contentY = y + m_ScrollY;
 
+    int nearest = -1;
+    double nearestDistance = slop;
+
     for(int i = 0; i < m_Rows.size(); i++)
     {
-      if(contentY >= m_Rows[i].top && contentY < m_Rows[i].top + m_Rows[i].height)
+      const double top = m_Rows[i].top;
+      const double bottom = top + m_Rows[i].height;
+
+      if(contentY >= top && contentY < bottom)
         return i;
+
+      if(slop <= 0.0)
+        continue;
+
+      const double distance = qMin(qAbs(contentY - top), qAbs(contentY - bottom));
+      if(distance <= nearestDistance)
+      {
+        nearestDistance = distance;
+        nearest = i;
+      }
     }
 
-    return -1;
+    return nearest;
+  }
+
+  // True when the row at this index is a control: a group header toggles its lanes and the summary
+  // row of a capped group lays out the rest. Both answer to a click anywhere across the band.
+  bool IsControlRow(int index) const
+  {
+    if(index < 0 || index >= m_Rows.size())
+      return false;
+
+    return m_Rows[index].header || m_Rows[index].moreCount > 0;
   }
 
   void HandleCaptionClick(const QPoint &pos)
   {
-    const int index = RowAt(double(pos.y() - RowsRect().top()));
+    const int index = RowAt(double(pos.y() - RowsRect().top()), 3.0);
 
     if(index < 0 || index >= m_Rows.size())
       return;
@@ -1628,41 +2083,98 @@ private:
 
     if(row.header)
     {
-      // Anywhere on a group header collapses or expands it: the header is short and the whole band
-      // is a bigger target than the glyph alone.
+      // Anywhere on a group header collapses or expands it, and the whole width of the band is the
+      // target: the header is a control, not a label.
       if(m_CollapsedGroups.contains(row.group))
         m_CollapsedGroups.remove(row.group);
       else
         m_CollapsedGroups.insert(row.group);
-
-      RebuildRows();
-      update();
-      return;
     }
-
-    if(row.moreCount > 0)
+    else if(row.moreCount > 0)
     {
       m_ExpandedGroups.insert(row.group);
-      RebuildRows();
-      update();
-      return;
     }
-
-    if(row.track < 0)
-      return;
-
-    // The lane body toggles the compact/expanded nesting height, which is the per-row equivalent of
-    // SDP's track expand control. The leading +/- glyph is inside the same target.
-    if(m_TrackMaxDepth.value(row.track, 0) > 2)
+    else
     {
-      if(m_ExpandedTracks.contains(row.track))
-        m_ExpandedTracks.remove(row.track);
-      else
-        m_ExpandedTracks.insert(row.track);
-
-      RebuildRows();
-      update();
+      return;
     }
+
+    RebuildRows();
+
+    // The rows moved under the pointer, so the band it is over is a different one now (and may not
+    // be a control at all). Recompute rather than leaving the hand cursor on a lane.
+    const int hovered = RowAt(double(pos.y() - RowsRect().top()), 2.0);
+    m_HoverHeaderRow = IsControlRow(hovered) ? hovered : -1;
+    ApplyCursor();
+    update();
+  }
+
+  void SetRangeSelection(double ta, double tb, bool notify)
+  {
+    const double viewEnd = m_ViewStartSec + m_ViewSpanSec;
+    const double lo = qBound(m_ViewStartSec, qMin(ta, tb), viewEnd);
+    const double hi = qBound(m_ViewStartSec, qMax(ta, tb), viewEnd);
+
+    // A window that spans no time cannot hold a sample, so an empty drag clears the selection rather
+    // than leaving a zero-width band that reports "no samples in range".
+    if(hi <= lo)
+    {
+      ClearRangeSelection(notify);
+      return;
+    }
+
+    m_RangeValid = true;
+    m_RangeT0 = lo;
+    m_RangeT1 = hi;
+
+    if(notify && OnSelectRange)
+      OnSelectRange(true, lo, hi);
+
+    update();
+  }
+
+  // Bring the selected window (or the selected element, when no window is selected) to fill the
+  // plot. SDP binds this to F and M; keeping both means a user's habit from either tool works.
+  void ZoomToSelection()
+  {
+    if(m_RangeValid)
+    {
+      m_ViewStartSec = m_RangeT0;
+      m_ViewSpanSec = qMax(1.0e-6, m_RangeT1 - m_RangeT0);
+      ClampView();
+      update();
+      return;
+    }
+
+    if(m_Data.trace == NULL || !m_Selected.valid())
+      return;
+
+    if(m_Selected.track >= m_Data.trace->tracks.size())
+      return;
+
+    const TraceTrack &track = m_Data.trace->tracks[m_Selected.track];
+    if(m_Selected.span < 0 || m_Selected.span >= track.spans.size())
+      return;
+
+    const TraceSpan &element = track.spans[m_Selected.span];
+
+    m_ViewStartSec = element.beginSec;
+    m_ViewSpanSec = qMax(1.0e-6, element.endSec - element.beginSec);
+    ClampView();
+    update();
+  }
+
+  // Show the whole trace without discarding the annotations or the element selection, unlike
+  // ResetView() which is the "different trace" path. Bound to 0 and Z in SDP.
+  void ResetViewZoom()
+  {
+    const double total = TotalSpan();
+
+    m_ViewStartSec = TraceStart();
+    m_ViewSpanSec = total > 0.0 ? total : 1.0;
+
+    ClampView();
+    update();
   }
 
   void SelectAt(const QPoint &pos)
@@ -1693,70 +2205,6 @@ private:
 
     if(OnSelectSpan)
       OnSelectSpan(track.spans[spanIndex], track.name);
-  }
-
-  void SelectInRect(const QRect &widgetRect)
-  {
-    if(m_Data.trace == NULL)
-      return;
-
-    const QRectF rows = RowsRect();
-    const QRect plot(int(rows.left()), int(rows.top()), int(rows.width()), int(rows.height()));
-    const QRect box = widgetRect.intersected(plot);
-
-    if(box.isEmpty())
-      return;
-
-    const double ta = qMin(TimeAtX(box.left()), TimeAtX(box.right()));
-    const double tb = qMax(TimeAtX(box.left()), TimeAtX(box.right()));
-    const double top = double(box.top() - rows.top()) + m_ScrollY;
-    const double bottom = double(box.bottom() - rows.top()) + m_ScrollY;
-
-    SpanRef best;
-    double bestDuration = 0.0;
-
-    for(const Row &row : m_Rows)
-    {
-      if(row.header || row.annotation || row.track < 0)
-        continue;
-
-      if(row.top + row.height < top || row.top > bottom)
-        continue;
-
-      if(row.track >= m_Data.trace->tracks.size())
-        continue;
-
-      const TraceTrack &track = m_Data.trace->tracks[row.track];
-
-      for(int i = 0; i < track.spans.size(); i++)
-      {
-        const TraceSpan &span = track.spans[i];
-
-        if(span.beginSec > tb)
-          break;
-
-        if(span.endSec < ta)
-          continue;
-
-        // Of everything the lasso caught, report the smallest element: that is the specific thing
-        // the user drew a box around, rather than the process-wide span containing it.
-        const double duration = span.endSec - span.beginSec;
-        if(!best.valid() || duration < bestDuration)
-        {
-          best.track = row.track;
-          best.span = i;
-          bestDuration = duration;
-        }
-      }
-    }
-
-    if(best.valid())
-    {
-      SelectSpan(best.track, best.span);
-      return;
-    }
-
-    SelectNearestAction(box.center());
   }
 
   void SelectNearestAction(const QPoint &pos)
@@ -1847,10 +2295,14 @@ private:
     m_LabelBudget = 1400;
 
     // Lane backgrounds and group headers. The clip is set before the scroll translation, so it
-    // stays in widget space and the lanes never paint over the ruler.
+    // stays in widget space and the lanes never paint over the ruler. The translation includes the
+    // ruler height because row coordinates are content coordinates starting at 0, while the lane
+    // area starts below the ruler: without it every row is painted kRulerHeight above the band that
+    // hit testing (SpanAt/RowAt, which do subtract rows.top()) attributes it to, and the pointer
+    // lands on the row above.
     p.save();
     p.setClipRect(QRectF(0, rows.top(), rightEdge, rows.height()));
-    p.translate(0, -m_ScrollY);
+    p.translate(0, rows.top() - m_ScrollY);
 
     for(int i = 0; i < m_Rows.size(); i++)
     {
@@ -1861,28 +2313,56 @@ private:
 
       if(row.header)
       {
-        p.fillRect(band, SurfaceAlt());
+        const bool hovered = (i == m_HoverHeaderRow);
+
+        p.fillRect(band, hovered ? Blend(SurfaceAlt(), Highlight(), 0.18) : SurfaceAlt());
 
         p.setPen(QPen(Grid(), 1));
         p.drawLine(QPointF(0, row.top), QPointF(rightEdge, row.top));
 
         // A disclosure triangle, as SDP's group headers have: the header is a control, not just a
-        // label, and its state is what decides whether the group's lanes are laid out at all.
-        const QString handle = row.collapsed ? QStringLiteral("\u25B8") : QStringLiteral("\u25BE");
-        p.setPen(row.collapsed ? DimText() : Text());
-        p.drawText(QRectF(4, row.top, 14, row.height), Qt::AlignCenter, handle);
+        // label, and its state is what decides whether the group's lanes are laid out at all. It is
+        // drawn rather than typed, because a font glyph changes size with the font and the row
+        // height while the hit target behind it does not.
+        const double centre = (double(row.height)) * 0.5;
+        const double size = qBound(3.5, double(row.height) / 6.0, 6.0);
+        QPainterPath triangle;
+        if(row.collapsed)
+        {
+          triangle.moveTo(11.0 - size * 0.5, centre - size * 0.5);
+          triangle.lineTo(11.0 + size * 0.5, centre);
+          triangle.lineTo(11.0 - size * 0.5, centre + size * 0.5);
+        }
+        else
+        {
+          triangle.moveTo(11.0 - size * 0.5, centre - size * 0.4);
+          triangle.lineTo(11.0 + size * 0.5, centre - size * 0.4);
+          triangle.lineTo(11.0, centre + size * 0.5);
+        }
+        triangle.closeSubpath();
+        p.setPen(Qt::NoPen);
+        p.setBrush(hovered ? Text() : (row.collapsed ? DimText() : Text()));
+        p.save();
+        p.translate(0.0, double(row.top));
+        p.drawPath(triangle);
+        p.restore();
+        p.setBrush(Qt::NoBrush);
 
         QFont font = p.font();
         font.setBold(true);
         p.setFont(font);
-        p.setPen(row.collapsed ? DimText() : Text());
+        p.setPen(hovered ? Text() : (row.collapsed ? DimText() : Text()));
         const QString counts =
             row.visibleTrackCount == row.trackCount
                 ? QObject::tr("%1").arg(row.trackCount)
                 : QObject::tr("%1/%2").arg(row.visibleTrackCount).arg(row.trackCount);
+        // The label is confined to the caption column. A group header spans the whole band, but
+        // its text does not: the time grid is drawn after this pass and the column separator in
+        // PaintCaptions, so a label reaching into the plot would have a vertical line through it.
         const QString label = QStringLiteral("%1  (%2)").arg(row.group, counts);
-        p.drawText(QRectF(20, row.top, rightEdge - 28, row.height), Qt::AlignLeft | Qt::AlignVCenter,
-                   label);
+        const double labelWidth = double(kHeaderWidth) - 34.0;
+        p.drawText(QRectF(24, row.top, labelWidth, row.height), Qt::AlignLeft | Qt::AlignVCenter,
+                   p.fontMetrics().elidedText(label, Qt::ElideRight, int(labelWidth)));
         font.setBold(false);
         p.setFont(font);
         continue;
@@ -1892,6 +2372,9 @@ private:
 
       if(row.moreCount > 0)
       {
+        if(i == m_HoverHeaderRow)
+          p.fillRect(band, Blend(SurfaceAlt(), Highlight(), 0.18));
+
         p.setPen(QPen(Grid(), 1));
         p.drawLine(QPointF(0, row.top + row.height - 1),
                    QPointF(rightEdge, row.top + row.height - 1));
@@ -1916,17 +2399,23 @@ private:
       p.drawLine(QPointF(x, rows.top()), QPointF(x, rows.bottom()));
     }
 
-    // Lane contents.
+    // Lane contents. Same content-to-widget mapping as the backgrounds above.
     p.save();
     p.setClipRect(QRectF(rows.left(), rows.top(), rows.width(), rows.height()));
-    p.translate(0, -m_ScrollY);
+    p.translate(0, rows.top() - m_ScrollY);
 
     for(int rowIndex = 0; rowIndex < m_Rows.size(); rowIndex++)
     {
       const Row &row = m_Rows[rowIndex];
 
       if(row.top + row.height < m_ScrollY || row.top > m_ScrollY + rows.height())
+      {
+        // Keep raster storage bounded to visible lanes, not the entire trace.
+        row.spanImage = QImage();
+        row.counterPolyline.clear();
+        row.counterGeometryValid = false;
         continue;
+      }
       if(row.header)
         continue;
 
@@ -1948,7 +2437,7 @@ private:
         }
         else
         {
-          PaintSpanLane(p, track, row, t0, t1);
+          PaintCachedSpanLane(p, track, row, t0, t1);
         }
 
         continue;
@@ -1990,179 +2479,194 @@ private:
     };
 
     const int count = series.samples.size();
-    QPolygonF poly;
-
-    // A counter lane is sampled far more often than it has pixel columns to draw on: a sysfs poller
-    // running at kilohertz rates produces tens of thousands of samples across a few hundred pixels,
-    // and the lane only ever shows one height per column. Emitting one vertex per sample therefore
-    // spent seconds in the painter to draw the same picture, which made panning and zooming a large
-    // trace unusable.
-    //
-    // Vertices are reduced to one column at a time, keeping the first, lowest, highest and last value
-    // that falls in it. A spike narrower than a pixel survives, and so does the vertical riser of a
-    // level series, while a flat stretch collapses to two points. Keeping every Nth sample instead
-    // would drop exactly the excursions a counter lane exists to show.
-    int columnX = 0;
-    bool columnOpen = false;
-    double columnFirstY = 0.0;
-    double columnLastY = 0.0;
-    double columnMinY = 0.0;
-    double columnMaxY = 0.0;
-
-    const auto flushColumn = [&]() {
-      if(!columnOpen)
-        return;
-
-      const double x = double(columnX);
-      poly << QPointF(x, columnFirstY);
-
-      if(columnMinY < columnFirstY)
-        poly << QPointF(x, columnMinY);
-      if(columnMaxY > columnFirstY)
-        poly << QPointF(x, columnMaxY);
-      // The column's closing value is what draws a level series' riser. Emitting it even when one of
-      // the extremes already ended there costs a repeated vertex, which a polyline draws as a
-      // zero-length segment and which is cheaper than tracking whether it is needed.
-      if(columnLastY != columnFirstY)
-        poly << QPointF(x, columnLastY);
-
-      columnOpen = false;
-    };
-
-    const auto push = [&](double x, double y) {
-      const int column = int(x);
-
-      if(!columnOpen || column != columnX)
-      {
-        flushColumn();
-
-        columnOpen = true;
-        columnX = column;
-        columnFirstY = columnLastY = columnMinY = columnMaxY = y;
-        return;
-      }
-
-      columnLastY = y;
-      columnMinY = qMin(columnMinY, y);
-      columnMaxY = qMax(columnMaxY, y);
-    };
-
-    // The lane has to be covered even where no sample of its own falls: a counter is sampled every
-    // 20ms on a Pixel, while the timeline zooms down to a 200th of the trace, so a window narrower
-    // than the sampling interval is the normal case, not the corner case. Stopping the drawing at
-    // the last sample inside the window is what made the right-hand part of a lane go blank as soon
-    // as the user zoomed in. Both edges therefore get the neighbour that they need.
-    int first = 0;
-    int afterT1 = count;
-    if(count > 0)
+    const bool reuseGeometry = row.counterGeometryValid && row.counterViewport == rows &&
+                               row.counterT0 == t0 && row.counterT1 == t1 &&
+                               row.cachedMin == vmin && row.cachedMax == vmax;
+    if(!reuseGeometry)
     {
-      const auto beginIt = std::lower_bound(
-          series.samples.constBegin(), series.samples.constEnd(), t0,
-          [](const TraceSample &sample, double time) { return sample.timeSec < time; });
-      const auto endIt = std::upper_bound(
-          series.samples.constBegin(), series.samples.constEnd(), t1,
-          [](double time, const TraceSample &sample) { return time < sample.timeSec; });
+      QPolygonF poly;
+      poly.reserve(qMax(8, int(rows.width()) * 4 + 8));
 
-      first = int(beginIt - series.samples.constBegin());
-      afterT1 = int(endIt - series.samples.constBegin());
+      // A counter lane is sampled far more often than it has pixel columns to draw on: a sysfs poller
+      // running at kilohertz rates produces tens of thousands of samples across a few hundred pixels,
+      // and the lane only ever shows one height per column. Emitting one vertex per sample therefore
+      // spent seconds in the painter to draw the same picture, which made panning and zooming a large
+      // trace unusable.
+      //
+      // Vertices are reduced to one column at a time, keeping the first, lowest, highest and last value
+      // that falls in it. A spike narrower than a pixel survives, and so does the vertical riser of a
+      // level series, while a flat stretch collapses to two points. Keeping every Nth sample instead
+      // would drop exactly the excursions a counter lane exists to show.
+      int columnX = 0;
+      bool columnOpen = false;
+      double columnFirstY = 0.0;
+      double columnLastY = 0.0;
+      double columnMinY = 0.0;
+      double columnMaxY = 0.0;
 
-      // Keep one sample before the viewport so a step/curve remains connected at the left edge.
-      if(first > 0)
-        first--;
-    }
+      const auto flushColumn = [&]() {
+        if(!columnOpen)
+          return;
 
-    if(count > 0 && series.step)
-    {
-      // A level series (frequency, clock rate, idle state) holds each value until the next sample,
-      // so the value in force at the left edge is the last sample at or before it. Interpolating
-      // between two samples would draw a value that was never measured.
-      int held = first;
-      if(held < count && series.samples[held].timeSec > t0)
-        held--;
-      if(held < 0)
-        held = 0;
+        const double x = double(columnX);
+        poly << QPointF(x, columnFirstY);
 
-      // The value in force at the right edge is the last sample at or before it, so the sample that
-      // crosses the edge is not needed here: the hold is extended to the edge explicitly below.
-      const int to = qMin(count - 1, afterT1 - 1);
+        if(columnMinY < columnFirstY)
+          poly << QPointF(x, columnMinY);
+        if(columnMaxY > columnFirstY)
+          poly << QPointF(x, columnMaxY);
+        // The column's closing value is what draws a level series' riser. Emitting it even when one of
+        // the extremes already ended there costs a repeated vertex, which a polyline draws as a
+        // zero-length segment and which is cheaper than tracking whether it is needed.
+        if(columnLastY != columnFirstY)
+          poly << QPointF(x, columnLastY);
 
-      if(held <= to)
-      {
-        double heldY = yFor(series.samples[held].value);
-
-        push(XForTime(qMax(t0, series.samples[held].timeSec)), heldY);
-
-        for(int i = held + 1; i <= to; i++)
-        {
-          const double x = XForTime(series.samples[i].timeSec);
-          push(x, heldY);
-          heldY = yFor(series.samples[i].value);
-          push(x, heldY);
-        }
-
-        // Still holding at the right edge, which is the whole point of drawing a level series as a
-        // hold rather than as a sparse set of dots.
-        push(XForTime(t1), heldY);
-      }
-    }
-    else if(count > 0)
-    {
-      // A curve connects neighbouring samples, so the two segments that cross the window edges are
-      // clipped in time and their values interpolated there. That keeps the drawing inside the
-      // widget as well: an unclipped neighbour can be megabytes of pixels away when the sampling
-      // interval is much wider than the window.
-      const auto edge = [&](int i0, int i1, double at) {
-        const TraceSample &a = series.samples[i0];
-        const TraceSample &b = series.samples[i1];
-        const double dt = b.timeSec - a.timeSec;
-        const double f = dt > 0.0 ? (at - a.timeSec) / dt : 0.0;
-
-        push(XForTime(at), yFor(a.value + f * (b.value - a.value)));
+        columnOpen = false;
       };
 
-      const int from = first;
-      const int to = qMin(count - 1, afterT1);
+      const auto push = [&](double x, double y) {
+        const int column = int(x);
 
-      if(from == to)
-      {
-        // One known value cannot be connected to anything, but reporting it across the window is
-        // still truer than an empty lane. Only done when the sample is actually inside the window:
-        // a value that predates it must not be presented as current.
-        const double t = series.samples[from].timeSec;
-
-        if(t >= t0 && t <= t1)
+        if(!columnOpen || column != columnX)
         {
-          const double y = yFor(series.samples[from].value);
-          push(XForTime(t0), y);
-          push(XForTime(t1), y);
+          flushColumn();
+
+          columnOpen = true;
+          columnX = column;
+          columnFirstY = columnLastY = columnMinY = columnMaxY = y;
+          return;
+        }
+
+        columnLastY = y;
+        columnMinY = qMin(columnMinY, y);
+        columnMaxY = qMax(columnMaxY, y);
+      };
+
+      // The lane has to be covered even where no sample of its own falls: a counter is sampled every
+      // 20ms on a Pixel, while the timeline zooms down to a 200th of the trace, so a window narrower
+      // than the sampling interval is the normal case, not the corner case. Stopping the drawing at
+      // the last sample inside the window is what made the right-hand part of a lane go blank as soon
+      // as the user zoomed in. Both edges therefore get the neighbour that they need.
+      int first = 0;
+      int afterT1 = count;
+      if(count > 0)
+      {
+        const auto beginIt = std::lower_bound(
+            series.samples.constBegin(), series.samples.constEnd(), t0,
+            [](const TraceSample &sample, double time) { return sample.timeSec < time; });
+        const auto endIt = std::upper_bound(
+            series.samples.constBegin(), series.samples.constEnd(), t1,
+            [](double time, const TraceSample &sample) { return time < sample.timeSec; });
+
+        first = int(beginIt - series.samples.constBegin());
+        afterT1 = int(endIt - series.samples.constBegin());
+
+        // Keep one sample before the viewport so a step/curve remains connected at the left edge.
+        if(first > 0)
+          first--;
+      }
+
+      if(count > 0 && series.step)
+      {
+        // A level series (frequency, clock rate, idle state) holds each value until the next sample,
+        // so the value in force at the left edge is the last sample at or before it. Interpolating
+        // between two samples would draw a value that was never measured.
+        int held = first;
+        if(held < count && series.samples[held].timeSec > t0)
+          held--;
+        if(held < 0)
+          held = 0;
+
+        // The value in force at the right edge is the last sample at or before it, so the sample that
+        // crosses the edge is not needed here: the hold is extended to the edge explicitly below.
+        const int to = qMin(count - 1, afterT1 - 1);
+
+        if(held <= to)
+        {
+          double heldY = yFor(series.samples[held].value);
+
+          push(XForTime(qMax(t0, series.samples[held].timeSec)), heldY);
+
+          for(int i = held + 1; i <= to; i++)
+          {
+            const double x = XForTime(series.samples[i].timeSec);
+            push(x, heldY);
+            heldY = yFor(series.samples[i].value);
+            push(x, heldY);
+          }
+
+          // Still holding at the right edge, which is the whole point of drawing a level series as a
+          // hold rather than as a sparse set of dots.
+          push(XForTime(t1), heldY);
         }
       }
-      else
+      else if(count > 0)
       {
-        if(series.samples[from].timeSec < t0)
+        // A curve connects neighbouring samples, so the two segments that cross the window edges are
+        // clipped in time and their values interpolated there. That keeps the drawing inside the
+        // widget as well: an unclipped neighbour can be megabytes of pixels away when the sampling
+        // interval is much wider than the window.
+        const auto edge = [&](int i0, int i1, double at) {
+          const TraceSample &a = series.samples[i0];
+          const TraceSample &b = series.samples[i1];
+          const double dt = b.timeSec - a.timeSec;
+          const double f = dt > 0.0 ? (at - a.timeSec) / dt : 0.0;
+
+          push(XForTime(at), yFor(a.value + f * (b.value - a.value)));
+        };
+
+        const int from = first;
+        const int to = qMin(count - 1, afterT1);
+
+        if(from == to)
         {
-          edge(from, from + 1, t0);
+          // One known value cannot be connected to anything, but reporting it across the window is
+          // still truer than an empty lane. Only done when the sample is actually inside the window:
+          // a value that predates it must not be presented as current.
+          const double t = series.samples[from].timeSec;
+
+          if(t >= t0 && t <= t1)
+          {
+            const double y = yFor(series.samples[from].value);
+            push(XForTime(t0), y);
+            push(XForTime(t1), y);
+          }
         }
         else
         {
-          push(XForTime(series.samples[from].timeSec), yFor(series.samples[from].value));
-        }
+          if(series.samples[from].timeSec < t0)
+          {
+            edge(from, from + 1, t0);
+          }
+          else
+          {
+            push(XForTime(series.samples[from].timeSec), yFor(series.samples[from].value));
+          }
 
-        for(int i = from + 1; i < to; i++)
-          push(XForTime(series.samples[i].timeSec), yFor(series.samples[i].value));
+          for(int i = from + 1; i < to; i++)
+            push(XForTime(series.samples[i].timeSec), yFor(series.samples[i].value));
 
-        if(series.samples[to].timeSec > t1)
-        {
-          edge(to - 1, to, t1);
-        }
-        else
-        {
-          push(XForTime(series.samples[to].timeSec), yFor(series.samples[to].value));
+          if(series.samples[to].timeSec > t1)
+          {
+            edge(to - 1, to, t1);
+          }
+          else
+          {
+            push(XForTime(series.samples[to].timeSec), yFor(series.samples[to].value));
+          }
         }
       }
+
+      flushColumn();
+      row.counterPolyline.swap(poly);
+      row.counterViewport = rows;
+      row.counterT0 = t0;
+      row.counterT1 = t1;
+      row.cachedMin = vmin;
+      row.cachedMax = vmax;
+      row.counterGeometryValid = true;
     }
-
-    flushColumn();
+    const QPolygonF &poly = row.counterPolyline;
 
     if(poly.size() < 2)
       return;
@@ -2218,8 +2722,56 @@ private:
     p.drawText(box, Qt::AlignCenter, label);
   }
 
+  void PaintCachedSpanLane(QPainter &p, const TraceTrack &track, const Row &row, double t0,
+                           double t1)
+  {
+    // Cache a lane in device pixels. Hover invalidates only the affected lane; counter hover,
+    // selection overlays and repeated exposure no longer repaint thousands of unchanged spans.
+    const qreal dpr = devicePixelRatioF();
+    const QSize pixels(int(ceil(width() * dpr)), int(ceil(row.height * dpr)));
+    if(pixels.width() <= 0 || pixels.height() <= 0 ||
+       qint64(pixels.width()) * pixels.height() > 4 * 1024 * 1024)
+    {
+      PaintSpanLane(p, track, row, t0, t1);
+      return;
+    }
+    const int selected = m_Selected.track == row.track ? m_Selected.span : -1;
+    const int hovered = m_Hover.track == row.track ? m_Hover.span : -1;
+    if(row.spanImage.isNull() || row.spanImage.size() != pixels ||
+       row.spanImage.devicePixelRatio() != dpr || row.spanT0 != t0 || row.spanT1 != t1 ||
+       row.spanSelected != selected || row.spanHovered != hovered ||
+       row.spanPaletteKey != palette().cacheKey() || row.spanFont != p.font())
+    {
+      row.spanImage = QImage(pixels, QImage::Format_ARGB32_Premultiplied);
+      row.spanImage.setDevicePixelRatio(dpr);
+      row.spanImage.fill(Qt::transparent);
+      QPainter lane(&row.spanImage);
+      lane.setFont(p.font());
+      lane.translate(0, -row.top);
+      lane.setClipRect(QRectF(RowsRect().left(), row.top, RowsRect().width(), row.height));
+      // Per-lane deterministic budget, independent of whether preceding lanes were cached.
+      const int budget = m_LabelBudget;
+      m_LabelBudget = 64;
+      PaintSpanLane(lane, track, row, t0, t1);
+      m_LabelBudget = budget;
+      row.spanT0 = t0;
+      row.spanT1 = t1;
+      row.spanSelected = selected;
+      row.spanHovered = hovered;
+      row.spanPaletteKey = palette().cacheKey();
+      row.spanFont = p.font();
+    }
+    p.drawImage(QPointF(0, row.top), row.spanImage);
+  }
+
   void PaintSpanLane(QPainter &p, const TraceTrack &track, const Row &row, double t0, double t1)
   {
+    // The nesting is compressed into the row, so the deepest levels can reach past it. Clipping to
+    // the band keeps one lane from painting over the one below.
+    p.save();
+    p.setClipRect(QRectF(RowsRect().left(), double(row.top), RowsRect().width(), double(row.height)),
+                  Qt::IntersectClip);
+
     int first = 0;
     if(!row.maxEndPrefix.isEmpty())
     {
@@ -2297,6 +2849,8 @@ private:
         }
       }
     }
+
+    p.restore();
   }
 
   void PaintAnnotations(QPainter &p, const Row &row, const QRectF &rows)
@@ -2335,7 +2889,7 @@ private:
 
     p.save();
     p.setClipRect(QRectF(0, rows.top(), kHeaderWidth, rows.height()));
-    p.translate(0, -m_ScrollY);
+    p.translate(0, rows.top() - m_ScrollY);
 
     for(int i = 0; i < m_Rows.size(); i++)
     {
@@ -2427,32 +2981,36 @@ private:
       if(caption.isEmpty())
         continue;
 
-      // A lane with more nesting than is being drawn says so, rather than silently looking shallower
-      // than it is. Clicking the lane toggles between the compact and the fully expanded drawing.
+      // A lane whose nesting does not fit the band says so, rather than silently looking shallower
+      // than it is. The lane never resizes to show the rest: the height is the user's setting, so
+      // the marker is the only thing that may change.
       const int maxDepth = row.track >= 0 ? m_TrackMaxDepth.value(row.track, 0) : 0;
-      const bool canExpand = row.track >= 0 && maxDepth > 2;
+      const bool truncated = row.spanStep > 0 &&
+                             (3 + maxDepth * row.spanStep + row.spanHeight) > row.height;
 
-      if(canExpand)
+      p.fillRect(QRectF(8.0, double(row.top) + 6.0, 8.0, 8.0), swatch);
+
+      if(truncated)
       {
-        p.setPen(row.expanded ? Text() : DimText());
-        p.drawText(QRectF(4.0, double(row.top), 12.0, double(row.height)), Qt::AlignCenter,
-                   row.expanded ? QStringLiteral("\u2212") : QStringLiteral("+"));
+        p.setPen(DimText());
+        p.drawText(QRectF(double(kHeaderWidth) - 30.0, double(row.top), 24.0, double(row.height)),
+                   Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("\u22EF"));
       }
 
-      p.fillRect(QRectF(18.0, double(row.top) + 6.0, 8.0, 8.0), swatch);
-
-      const QString elided = p.fontMetrics().elidedText(caption, Qt::ElideRight, int(captionWidth));
+      // Leave room for the truncation marker instead of drawing the two on top of each other.
+      const double textWidth = truncated ? captionWidth - 16.0 : captionWidth;
+      const QString elided = p.fontMetrics().elidedText(caption, Qt::ElideRight, int(textWidth));
 
       p.setPen(Text());
-      p.drawText(QRectF(32.0, double(row.top) + 3.0, captionWidth, 13.0),
+      p.drawText(QRectF(22.0, double(row.top) + 3.0, textWidth, 13.0),
                  Qt::AlignLeft | Qt::AlignVCenter, elided);
 
       if(!detail.isEmpty() && row.height >= 26)
       {
         p.setPen(DimText());
-        p.drawText(QRectF(32.0, double(row.top) + 16.0, captionWidth, 12.0),
+        p.drawText(QRectF(22.0, double(row.top) + 16.0, textWidth, 12.0),
                    Qt::AlignLeft | Qt::AlignVCenter,
-                   p.fontMetrics().elidedText(detail, Qt::ElideRight, int(captionWidth)));
+                   p.fontMetrics().elidedText(detail, Qt::ElideRight, int(textWidth)));
       }
     }
 
@@ -2478,13 +3036,33 @@ private:
                QPointF(double(kHeaderWidth) - 1.0, double(kRulerHeight)));
 
     p.setPen(DimText());
-    p.drawText(QRectF(8.0, 0.0, double(kHeaderWidth) - 16.0, double(kRulerHeight)),
-               Qt::AlignLeft | Qt::AlignVCenter,
-               m_CaliperASet && m_CaliperBSet
-                   ? QObject::tr("dt %1").arg(FormatSeconds(fabs(m_CaliperB - m_CaliperA)))
-                   : QObject::tr("Time"));
+    if(m_CaliperASet && m_CaliperBSet)
+    {
+      p.drawText(QRectF(8.0, 0.0, double(kHeaderWidth) - 16.0, double(kRulerHeight)),
+                 Qt::AlignLeft | Qt::AlignVCenter,
+                 QObject::tr("dt %1").arg(FormatSeconds(fabs(m_CaliperB - m_CaliperA))));
+    }
+    else if(m_RangeValid)
+    {
+      // The selected window's own duration, next to the time axis it was dragged on, so the size of
+      // the window is readable without leaving the plot for the Selection panel.
+      p.drawText(QRectF(8.0, 0.0, double(kHeaderWidth) - 16.0, double(kRulerHeight)),
+                 Qt::AlignLeft | Qt::AlignVCenter,
+                 QObject::tr("sel %1").arg(FormatSeconds(m_RangeT1 - m_RangeT0)));
+    }
+    else
+    {
+      p.drawText(QRectF(8.0, 0.0, double(kHeaderWidth) - 16.0, double(kRulerHeight)),
+                 Qt::AlignLeft | Qt::AlignVCenter, QObject::tr("Time"));
+    }
 
     const double step = NiceStep(m_ViewSpanSec, rows.width());
+
+    // Centred labels overhang their tick, and the first tick sits on the column edge, so the
+    // labels are clipped to the plot area: a tick label must never be painted across the caption
+    // column or through its separator.
+    p.save();
+    p.setClipRect(QRectF(rows.left(), 0.0, rows.width(), double(kRulerHeight)));
 
     for(double t = ceil(t0 / step) * step; t <= t1; t += step)
     {
@@ -2497,6 +3075,8 @@ private:
       p.drawText(QRectF(x - 50.0, 0.0, 100.0, double(kRulerHeight) - 8.0),
                  Qt::AlignHCenter | Qt::AlignVCenter, FormatSeconds(t));
     }
+
+    p.restore();
   }
 
   void PaintOverlays(QPainter &p, const QRectF &rows)
@@ -2593,6 +3173,25 @@ private:
                  QObject::tr("Trace not aligned to the frame (clock domains unrelated)"));
     }
 
+    // --- selected time window --------------------------------------------------------------
+    // Drawn before the calipers and after the frame tint, so a selection over a frame reads as a
+    // selection rather than as a brighter frame. The fill is translucent and the edges solid: the
+    // window has to be visible over curves without hiding the samples inside it.
+    if(m_RangeValid)
+    {
+      const double xa = XForTime(m_RangeT0);
+      const double xb = XForTime(m_RangeT1);
+
+      p.setPen(Qt::NoPen);
+      p.setBrush(QColor(Highlight().red(), Highlight().green(), Highlight().blue(), 40));
+      p.drawRect(QRectF(xa, rows.top(), xb - xa, rows.height()));
+      p.setBrush(Qt::NoBrush);
+
+      p.setPen(QPen(Highlight(), 1));
+      p.drawLine(QPointF(xa, rows.top()), QPointF(xa, rows.bottom()));
+      p.drawLine(QPointF(xb, rows.top()), QPointF(xb, rows.bottom()));
+    }
+
     // --- calipers -------------------------------------------------------------------------
     if(m_CaliperASet && m_CaliperBSet)
     {
@@ -2644,6 +3243,7 @@ private:
 
   SystemTraceTimelineData m_Data;
   QVector<Row> m_Rows;
+  QVector<int> m_CounterSeriesInView;
   QVector<Annotation> m_Annotations;
   QScrollBar *m_Scroll = NULL;
   QScrollBar *m_TimeScroll = NULL;
@@ -2671,6 +3271,14 @@ private:
   SpanRef m_Hover;
   SpanRef m_Selected;
 
+  // Row under the cursor that is a control rather than a lane (a group header, or the summary row
+  // standing in for the lanes a group did not lay out). Highlighted while hovered and pointed at
+  // with the hand cursor, so the target is visible before the click rather than after it.
+  int m_HoverHeaderRow = -1;
+
+  // Live row height, in logical pixels. Changed through SetRowHeight() only.
+  int m_RowHeight = kRowHeightDefault;
+
   // Counter readout state: the row under the cursor, the series it draws, the value that series
   // holds at the cursor, and the sample that value came from. Kept so a repaint draws the same
   // number the caption was told about, instead of resolving it twice and risking a mismatch.
@@ -2687,10 +3295,12 @@ private:
   // trace, not the trace itself, and must survive a data refresh that keeps the same trace.
   QString m_FilterText;
   bool m_ActiveOnly = true;
+  QListWidget *m_TypeList = NULL;
+  QSet<int> m_HiddenTypes;
+  QSet<QString> m_KnownGroups;
   QSet<QString> m_CollapsedGroups;
   // Groups whose lane cap the user has lifted, by name so it survives a re-import.
   QSet<QString> m_ExpandedGroups;
-  QSet<int> m_ExpandedTracks;
 
   const SystemTrace *m_IndexedTrace = NULL;
   QVector<QVector<double>> m_TrackMaxEnd;
@@ -2700,6 +3310,12 @@ private:
   bool m_CaliperBSet = false;
   double m_CaliperA = 0.0;
   double m_CaliperB = 0.0;
+
+  // The Select-mode drag window, in trace-clock seconds, always ascending. Selecting a window is how
+  // a counter lane is inspected as a whole: it is a series of measurements, not a list of elements.
+  bool m_RangeValid = false;
+  double m_RangeT0 = 0.0;
+  double m_RangeT1 = 0.0;
 };
 
 SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
@@ -2782,39 +3398,64 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   fileRow->addWidget(m_Capture);
 
   // Navigation modes, matching SDP's Trace window: Select, Pan and Zoom, also reachable with the
-  // 1, 2 and 3 keys while the timeline has focus.
-  m_ModeSelect = new QToolButton(this);
-  m_ModeSelect->setText(tr("Select"));
-  m_ModeSelect->setCheckable(true);
-  m_ModeSelect->setToolTip(tr("Select (1): drag a box to pick elements; their fields are shown "
-                              "below the timeline."));
+  // 1, 2 and 3 keys while the timeline has focus. The artwork is SDP's own toolbar icon set: the
+  // grey chip for a mode that is not current and the blue selection chip for the one that is,
+  // exactly the two states its toolbar cycles through. The buttons carry no text, because the
+  // icon says the same thing in a quarter of the width and the tooltip still spells it out.
+  auto modeButton = [this](const QString &tip, const QString &chipOff, const QString &chipOn) {
+    TraceModeButton *button = new TraceModeButton(this);
+    button->SetChips(chipOff, chipOn);
+    button->setToolTip(tip);
+    return button;
+  };
 
-  m_ModePan = new QToolButton(this);
-  m_ModePan->setText(tr("Pan"));
-  m_ModePan->setCheckable(true);
-  m_ModePan->setToolTip(tr("Pan (2): drag to move the visible time window. Ctrl+A / Ctrl+D also "
-                           "pan. This is the default mode."));
+  m_ModeSelect = modeButton(tr("Select (1): drag out a time window to summarise the counters inside "
+                                "it, or click an element to show its fields. F/M zoom to the "
+                                "selection, Esc clears it."),
+                            QStringLiteral(":/SDP/trace-select.png"),
+                            QStringLiteral(":/SDP/trace-select-on.png"));
 
-  m_ModeZoom = new QToolButton(this);
-  m_ModeZoom->setText(tr("Zoom"));
-  m_ModeZoom->setCheckable(true);
-  m_ModeZoom->setToolTip(tr("Zoom (3): drag a region to zoom into it. The wheel and Ctrl+W / "
-                            "Ctrl+S zoom as well."));
+  m_ModePan = modeButton(tr("Pan (2): drag to move the visible time window. Ctrl+A / Ctrl+D also "
+                            "pan. This is the default mode."),
+                         QStringLiteral(":/SDP/trace-pan.png"),
+                         QStringLiteral(":/SDP/trace-pan-on.png"));
+
+  m_ModeZoom = modeButton(tr("Zoom (3): drag a region to zoom into it. The wheel and Ctrl+W / "
+                             "Ctrl+S zoom as well."),
+                          QStringLiteral(":/SDP/trace-zoom.png"),
+                          QStringLiteral(":/SDP/trace-zoom-on.png"));
 
   connect(m_ModeSelect, &QToolButton::clicked, this, [this] { setNavMode(TraceNavMode::Select); });
   connect(m_ModePan, &QToolButton::clicked, this, [this] { setNavMode(TraceNavMode::Pan); });
   connect(m_ModeZoom, &QToolButton::clicked, this, [this] { setNavMode(TraceNavMode::Zoom); });
 
-  QLabel *modeHint = new QLabel(tr("Double-click sets a caliper, shift-click the second one; "
-                                   "right-click an element to annotate it."),
+  // Row height is adjustable because the caption column is fixed at kHeaderWidth while the window
+  // is not: at 30 px a two-line caption fits, at a small window it does not, and a trace with deep
+  // atrace nesting wants more room per lane. Every row uses this height, so nothing moves when a
+  // group is opened or closed.
+  m_RowHeight = new QSpinBox(this);
+  m_RowHeight->setRange(kRowHeightMin, kRowHeightMax);
+  m_RowHeight->setSingleStep(2);
+  m_RowHeight->setValue(kRowHeightDefault);
+  m_RowHeight->setSuffix(tr(" px"));
+  m_RowHeight->setToolTip(tr("Height of every row, from %1 to %2 pixels. Group headers and lanes "
+                             "share it, so the grid does not shift when a group opens.")
+                              .arg(kRowHeightMin)
+                              .arg(kRowHeightMax));
+
+  QLabel *modeHint = new QLabel(tr("Select-drag summarises counters (F/M zoom, Esc clears). "
+                                  "Calipers: double-click, then shift-click. Right-click annotates."),
                                 this);
-  modeHint->setWordWrap(true);
 
   QHBoxLayout *modeRow = new QHBoxLayout();
+  modeRow->setSpacing(6);
   modeRow->addWidget(new QLabel(tr("Navigation:"), this));
   modeRow->addWidget(m_ModeSelect);
   modeRow->addWidget(m_ModePan);
   modeRow->addWidget(m_ModeZoom);
+  modeRow->addSpacing(8);
+  modeRow->addWidget(new QLabel(tr("Rows:"), this));
+  modeRow->addWidget(m_RowHeight);
   modeRow->addWidget(modeHint, 1);
 
   // Lane visibility. The importer cannot know which of the several hundred threads matters for the
@@ -2864,6 +3505,16 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   };
   m_Chart->OnNavModeChanged = [this](TraceNavMode mode) { setNavMode(mode); };
   m_Chart->OnHoverReadout = [this](const QString &text) { m_HoverReadout->setText(text); };
+  m_Chart->OnSelectRange = [this](bool valid, double beginSec, double endSec) {
+    updateRangeSelection(valid, beginSec, endSec);
+  };
+
+  connect(m_RowHeight, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this,
+          [this](int value) {
+            if(m_Chart)
+              m_Chart->SetRowHeight(value);
+          });
+  m_Chart->SetRowHeight(m_RowHeight->value());
 
   // '/' focuses the lane filter while the timeline has focus, the way SDP's filter entries are one
   // keystroke away. The shortcut is scoped to the timeline widget so that typing '/' inside the
@@ -2990,8 +3641,38 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   elementLayout->addWidget(m_ElementCaption);
   elementLayout->addWidget(m_Element, 1);
 
+  // Selection pane. SDP opens a Selection view for the window dragged out in Selection mode; on a
+  // counter lane what that window contains is a set of samples, so the summary it can honestly give
+  // is how many were recorded and their min/max/mean. The caption states the counting rules, because
+  // a min/max/avg over a sparse sampled curve is exactly the place where an interpolated "average"
+  // would look plausible and be wrong.
+  m_RangePane = new QWidget(this);
+
+  m_RangeCaption = new QLabel(tr("No time window selected. Drag in Select mode (1)."), m_RangePane);
+  m_RangeCaption->setWordWrap(true);
+
+  m_RangeTable = new QTableWidget(m_RangePane);
+  m_RangeTable->setColumnCount(5);
+  m_RangeTable->setHorizontalHeaderLabels({tr("Counter"), tr("Samples"), tr("Min"), tr("Max"),
+                                           tr("Avg")});
+  m_RangeTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+  m_RangeTable->verticalHeader()->setVisible(false);
+  m_RangeTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  m_RangeTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+  m_RangeTable->setToolTip(
+      tr("Only the samples recorded inside the selected window are counted: nothing is interpolated "
+         "and a level that was measured before the window opened is not folded in. An empty window "
+         "therefore reports no samples rather than the nearest value."));
+
+  QVBoxLayout *rangeLayout = new QVBoxLayout(m_RangePane);
+  rangeLayout->setContentsMargins(0, 0, 0, 0);
+  rangeLayout->addWidget(m_RangeCaption);
+  rangeLayout->addWidget(m_RangeTable, 1);
+
   QTabWidget *sideTabs = new QTabWidget(this);
+  m_SideTabs = sideTabs;
   sideTabs->addTab(m_Series, tr("Tracks"));
+  sideTabs->addTab(m_RangePane, tr("Selection"));
   sideTabs->addTab(framesPane, tr("Frames"));
   sideTabs->addTab(threadTimePane, tr("Thread Time"));
   sideTabs->addTab(elementPane, tr("Element"));
@@ -3014,12 +3695,14 @@ SystemTraceViewer::SystemTraceViewer(ICaptureContext &ctx, QWidget *parent)
   // collapsible, so the handle never reduces either pane to nothing and no collapse arrows are drawn.
   RDSplitter *middle = new RDSplitter(Qt::Horizontal, this);
   middle->setHandleWidth(12);
+  middle->addWidget(m_Chart->CreateTypePanel(middle));
   middle->addWidget(m_Chart);
   middle->addWidget(sideTabs);
-  middle->setStretchFactor(0, 1);
-  middle->setStretchFactor(1, 0);
+  middle->setStretchFactor(0, 0);
+  middle->setStretchFactor(1, 1);
+  middle->setStretchFactor(2, 0);
   middle->setChildrenCollapsible(false);
-  middle->setSizes({640, 320});
+  middle->setSizes({240, 700, 300});
 
   sideTabs->setMinimumWidth(180);
   sideTabs->setMaximumWidth(900);
@@ -3323,6 +4006,9 @@ void SystemTraceViewer::applyImportedTrace(const QString &path,
 
   if(m_ElementCaption)
     m_ElementCaption->setText(tr("No element selected"));
+
+  // The selection pane names a window of the trace that has just been replaced.
+  updateRangeSelection(false, 0.0, 0.0);
 
   if(m_HoverReadout)
     m_HoverReadout->clear();
@@ -3681,6 +4367,124 @@ void SystemTraceViewer::showElementFields(const TraceSpan &span, const QString &
     m_ElementCaption->setText(trackName.isEmpty()
                                   ? tr("Element: %1").arg(span.name)
                                   : tr("Element: %1 on %2").arg(span.name, trackName));
+}
+
+void SystemTraceViewer::updateRangeSelection(bool valid, double beginSec, double endSec)
+{
+  if(m_RangeTable == NULL)
+    return;
+
+  m_RangeTable->setRowCount(0);
+
+  const double window = endSec - beginSec;
+
+  if(!valid || !traceUsable())
+  {
+    if(m_RangeCaption)
+      m_RangeCaption->setText(tr("No time window selected. Drag in Select mode (1)."));
+    return;
+  }
+
+  // Only the lanes the timeline actually shows are summarised: a type the user has filtered out is
+  // not part of what they are looking at, and reporting it here would contradict the plot.
+  const QVector<int> series = m_Chart != NULL ? m_Chart->VisibleCounterSeries() : QVector<int>();
+
+  // Raise the pane the selection belongs to, the way SDP opens its Selection view for a window; a
+  // summary the user has to go looking for is a summary they will not read.
+  if(m_SideTabs != NULL && m_RangePane != NULL)
+    m_SideTabs->setCurrentWidget(m_RangePane);
+
+  int withSamples = 0;
+  int withoutSamples = 0;
+
+  for(int seriesIndex : series)
+  {
+    if(seriesIndex < 0 || seriesIndex >= m_Trace.series.size())
+      continue;
+
+    const TraceSeries &s = m_Trace.series[seriesIndex];
+
+    TraceSeriesRangeStats stats;
+    const bool hasValue = s.RangeStats(beginSec, endSec, stats);
+
+    if(!hasValue)
+    {
+      withoutSamples++;
+      continue;
+    }
+
+    withSamples++;
+
+    const int row = m_RangeTable->rowCount();
+    m_RangeTable->insertRow(row);
+
+    m_RangeTable->setItem(row, 0, new QTableWidgetItem(s.name));
+    m_RangeTable->setItem(row, 1, new NumericTableItem(QString::number(stats.count), double(stats.count)));
+    m_RangeTable->setItem(row, 2, new NumericTableItem(FormatValue(stats.min), stats.min));
+    m_RangeTable->setItem(row, 3, new NumericTableItem(FormatValue(stats.max), stats.max));
+    m_RangeTable->setItem(row, 4, new NumericTableItem(FormatValue(stats.avg), stats.avg));
+
+    // The unit is per series, so it travels on the row rather than in a shared column header.
+    QString detail = s.unit.isEmpty()
+                         ? tr("%1 samples inside the window; first %2, last %3")
+                               .arg(stats.count)
+                               .arg(FormatValue(stats.firstValue), FormatValue(stats.lastValue))
+                         : tr("%1 samples inside the window; first %2 %3, last %4 %5")
+                               .arg(stats.count)
+                               .arg(FormatValue(stats.firstValue), s.unit, FormatValue(stats.lastValue),
+                                    s.unit);
+
+    if(s.step && stats.hasHeldBegin && stats.hasHeldEnd)
+    {
+      // A level series holds a value that was measured earlier; state the held levels separately so
+      // they are never read as samples taken inside the window.
+      detail += tr("\nLevel held %1 at the start of the window, %2 "
+                   "at the end (measured earlier, not counted)")
+                    .arg(s.unit.isEmpty() ? FormatValue(stats.heldBegin)
+                                          : QStringLiteral("%1 %2").arg(FormatValue(stats.heldBegin),
+                                                                         s.unit),
+                         s.unit.isEmpty() ? FormatValue(stats.heldEnd)
+                                          : QStringLiteral("%1 %2").arg(FormatValue(stats.heldEnd),
+                                                                         s.unit));
+    }
+
+    for(int column = 0; column < m_RangeTable->columnCount(); column++)
+    {
+      QTableWidgetItem *item = m_RangeTable->item(row, column);
+      if(item != NULL)
+        item->setToolTip(detail);
+    }
+  }
+
+  if(m_RangeCaption)
+  {
+    QString caption = tr("Window %1 to %2 (%3). ")
+                          .arg(FormatSeconds(beginSec), FormatSeconds(endSec), FormatSeconds(window));
+
+    if(withSamples == 0)
+    {
+      caption += tr("No samples in range: this window contains no measurement, so there is nothing "
+                    "to average. Widen it or pick a window the trace sampled.");
+    }
+    else
+    {
+      // State the counting rule next to the numbers, and what was left out.
+      caption += tr("%1 counter%2 with samples, counted only where the trace recorded them "
+                    "(no interpolation; averages are of the samples, not of time).")
+                     .arg(withSamples)
+                     .arg(withSamples == 1 ? QString() : QStringLiteral("s"));
+
+      if(withoutSamples > 0)
+        caption += QStringLiteral(" ") + tr("%1 shown counter%2 had none.")
+                                               .arg(withoutSamples)
+                                               .arg(withoutSamples == 1 ? QString()
+                                                                        : QStringLiteral("s"));
+    }
+
+    m_RangeCaption->setText(caption);
+  }
+
+  m_RangeTable->resizeColumnToContents(0);
 }
 
 void SystemTraceViewer::rebuild()
