@@ -51,7 +51,12 @@ metrics at a time always fits.
 **Tool layers must be gone.** Snapdragon Profiler's `libq3dtools_esx.so` is injected into every EGL
 process while `debug.egl.profiler=1`, and its presence makes the perf-monitor query crash inside the
 driver. `Init` refuses to sample when `/proc/self/maps` contains `libq3dtools`
-(`RENDERDOC_QC_ALLOW_Q3D=1` overrides that). To do the same by hand:
+(`RENDERDOC_QC_ALLOW_Q3D=1` overrides that).
+
+A system trace capture already deals with this: before recording it reads `debug.egl.profiler`, and
+with root it stops Snapdragon Profiler's service and clears the property, logging the value before and
+after. Without root it warns instead, because the counters are refused rather than sampled under the
+layer. To do the same by hand:
 
 ```
 adb shell su -c 'pkill -f sdpservice; pkill -f pluginGPU; pkill -f SnapshotPlayer'

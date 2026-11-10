@@ -551,6 +551,12 @@ struct ChromeEventStats
   // `bw_hwmon_meas` reports DDR bandwidth per bus master; the ones that are not the GPU are still
   // real measurements but are not GPU rows, so they are counted rather than drawn.
   int bandwidthOtherDevices = 0;
+  // Live GPU samples the capture's own sampler wrote into the trace (`RMGPUSAMPLE` markers), of
+  // which `liveGpuWindowSamples` came with a usable interval. A marker with no measurable increment
+  // behind it (the first one, or a window in which KGSL's counters did not move at all) produces a
+  // clock reading but no utilisation, and is counted rather than drawn as 0%.
+  int liveGpuSamples = 0;
+  int liveGpuWindowSamples = 0;
 };
 
 // A trace can carry dozens of clocks. Every one of them is a real measurement, but a ceiling keeps
@@ -2552,6 +2558,69 @@ void ConsumeWorkqueueEnd(const SystraceRecord &rec, ChromeTraceBuilder &builder,
 //
 // The name is free text (surface names, "Choreographer#doFrame 174031") so only the leading two
 // fields and, for counters and async marks, the trailing field are taken structurally.
+// The capture's own GPU sampler, read back out of the trace.
+//
+// `RMGPUSAMPLE|<busy>|<elapsed>|<clock-hz>` is written into trace_marker while the recording runs, on
+// devices whose KGSL tracepoints cannot be enabled. The pair is KGSL's own accounting for the window
+// that ended at the sample - the same numbers the kernel's `kgsl_gpubusy` tracepoint prints as
+// `busy=`/`elapsed=` - and KGSL refreshes it about once per second, so the sampler publishes only when
+// the pair changes. Each marker is therefore one distinct measurement rather than a repeat of the
+// previous one.
+//
+// Utilisation is the ratio within a single sample: dividing a sample by the increment since the last
+// one would be wrong, because these are per-window values and not monotonic counters (elapsed moves
+// both up and down as the window rolls).
+//
+// The same quantities are published by the kernel as `kgsl_gpubusy` and `kgsl_clk`, and where those
+// exist they are drawn as they always were. These samples are their own series (`... (sampled)`)
+// because they have a different sampling interval and a different provenance, and mixing two sources
+// into one series would make its rate ambiguous.
+void ConsumeLiveGpuSample(const SystraceRecord &rec, ChromeTraceBuilder &builder,
+                          SystraceState &state)
+{
+  const QStringList fields = rec.payload.split(QLatin1Char('|'));
+
+  if(fields.size() < 4)
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  bool okBusy = false;
+  bool okElapsed = false;
+  bool okClock = false;
+  const double busy = fields[1].trimmed().toDouble(&okBusy);
+  const double elapsed = fields[2].trimmed().toDouble(&okElapsed);
+  const double clock = fields[3].trimmed().toDouble(&okClock);
+
+  if(!okBusy || !okElapsed || !okClock)
+  {
+    builder.stats.malformed++;
+    return;
+  }
+
+  builder.stats.liveGpuSamples++;
+
+  // The clock is a level: each sample stands on its own and needs no window, so it is published even
+  // when the busy pair says nothing.
+  if(clock > 0.0)
+  {
+    AddSystraceSample(builder, state, QObject::tr("GPU Frequency (sampled)"), QStringLiteral("MHz"),
+                      true, QObject::tr("GPU"), -1, rec.timeSec, clock / 1.0e6);
+  }
+
+  // An empty window means KGSL had nothing to account for - the GPU was powered down for the whole
+  // window - so utilisation is unknown rather than zero.
+  if(elapsed <= 0.0)
+    return;
+
+  const double percent = qBound(0.0, 100.0 * busy / elapsed, 100.0);
+
+  AddSystraceSample(builder, state, QObject::tr("GPU Busy (sampled)"), QStringLiteral("%"), false,
+                    QObject::tr("GPU"), -1, rec.timeSec, percent);
+  builder.stats.liveGpuWindowSamples++;
+}
+
 void ConsumeAtrace(const SystraceRecord &rec, ChromeTraceBuilder &builder, SystraceState &state)
 {
   const QString &payload = rec.payload;
@@ -2561,6 +2630,14 @@ void ConsumeAtrace(const SystraceRecord &rec, ChromeTraceBuilder &builder, Systr
   // not a malformed atrace mark.
   if(payload.startsWith(QLatin1String("trace_event_clock_sync")))
     return;
+
+  // The capture's own GPU samples share the event but not the atrace grammar, so they are recognised
+  // before it is parsed - otherwise every sample would be counted as an unmodelled vendor mark.
+  if(payload.startsWith(QLatin1String("RMGPUSAMPLE|")))
+  {
+    ConsumeLiveGpuSample(rec, builder, state);
+    return;
+  }
 
   builder.stats.atraceMarks++;
 
@@ -3589,6 +3666,14 @@ SystemTrace BuildTraceFromBuilder(ChromeTraceBuilder &builder, const QString &pa
         "recorded timestamp")
                           .arg(stats.gpuWaitsUnterminated);
 
+  if(stats.liveGpuSamples > 0 && stats.liveGpuWindowSamples == 0)
+    trace.warnings << QObject::tr(
+        "The capture's GPU sampler wrote %1 sample(s) into this trace, but every one of them reported "
+        "an empty accounting window, so no utilisation could be computed. An empty window is what a "
+        "GPU that was powered down for the whole interval looks like to KGSL, so the missing "
+        "utilisation lane here does not mean the GPU was busy.")
+                          .arg(stats.liveGpuSamples);
+
   if(stats.unusableCounters > 0)
     trace.warnings << QObject::tr(
         "%1 counter events carried no named values and were skipped")
@@ -3718,6 +3803,8 @@ SystemTrace BuildTraceFromBuilder(ChromeTraceBuilder &builder, const QString &pa
   trace.gpuStats.powerStateChanges = stats.gpuPowerStateChanges;
   trace.gpuStats.thermalTrips = stats.gpuThermalTrips;
   trace.gpuStats.bandwidthOtherDevices = stats.bandwidthOtherDevices;
+  trace.gpuStats.liveGpuSamples = stats.liveGpuSamples;
+  trace.gpuStats.liveGpuWindowSamples = stats.liveGpuWindowSamples;
   trace.wakeups = builder.wakeups;
   trace.batches = builder.batches;
   trace.eventCounts = builder.eventCounts;

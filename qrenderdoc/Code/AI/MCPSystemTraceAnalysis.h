@@ -194,7 +194,9 @@ inline QJsonObject Analyze(const QString &tool,const SystemTrace &trace,const QJ
     for(const auto &t:trace.tracks) if(t.kind==TraceTrackKind::Cpu) sched++;
     out[QStringLiteral("capabilities")]=QJsonObject{{QStringLiteral("cpuScheduler"),sched>0},{QStringLiteral("gpuExecution"),trace.gpuStats.HasExecutionWindows()},
       {QStringLiteral("seriesCount"),trace.series.size()},{QStringLiteral("trackCount"),trace.tracks.size()},{QStringLiteral("frameCount"),trace.frameBoundaries.size()},
-      {QStringLiteral("rawWakeupEventsRetained"),!trace.wakeups.isEmpty()},{QStringLiteral("note"),QStringLiteral("Capabilities describe observed model data, not device support or enabled events.")}};
+      {QStringLiteral("rawWakeupEventsRetained"),!trace.wakeups.isEmpty()},
+      {QStringLiteral("liveGpuSamples"),trace.gpuStats.liveGpuSamples},{QStringLiteral("liveGpuWindowSamples"),trace.gpuStats.liveGpuWindowSamples},
+      {QStringLiteral("note"),QStringLiteral("Capabilities describe observed model data, not device support or enabled events. liveGpuSamples counts the capture sampler's own utilisation/clock markers; zero means it did not run, not that the GPU was idle.")}};
   }
   if(op==QStringLiteral("getSystemTraceEventInventory") || overview)
   {

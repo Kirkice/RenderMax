@@ -73,6 +73,28 @@ Frame capture and live inspection are then unavailable, while `renderdoc_capture
 every analysis tool work on the recorded file. Stopping the stale server before launching restores
 the direct channel, which reports `targetControl: true`.
 
+### GPU lanes and the live sampler
+
+The GPU lanes come from KGSL tracepoints (`kgsl_gpubusy`, `kgsl_clk`, `kgsl_pwrlevel`,
+`kgsl_adreno_cmdbatch_*`), which the capture asks for only when the probe finds them present and
+enable-able. A device whose kernel exports none of them still records, and the report then says
+nothing measured the GPU - which is not the same as the GPU being idle.
+
+Where `/sys/class/kgsl/kgsl-3d0/gpubusy` is readable and the session has root, the capture also runs
+a small sampler on the device for the duration of the recording. It reads KGSL's own busy/elapsed pair
+and clock and writes one `RMGPUSAMPLE` marker into `trace_marker` whenever the pair changes. KGSL
+refreshes that pair about once a second, so a sample is one distinct accounting window rather than a
+repeat of the previous one. The importer turns each sample into `GPU Busy (sampled)` (% of the window,
+`busy/elapsed`) and `GPU Frequency (sampled)` (MHz), published as their own series because their
+interval and provenance differ from the tracepoints'.
+
+The sampler's numbers are the same ones the kernel's `kgsl_gpubusy` tracepoint carries - on the
+reference device the marker values match the tracepoint values exactly - so it is a substitute for a
+tracepoint that cannot be enabled, not a different estimate. `renderdoc_getSystemTraceCapabilities`
+reports `liveGpuSamples` and `liveGpuWindowSamples`; zero means the sampler did not run, never that
+the GPU was idle. A sample with an empty window (the GPU was powered down for the whole interval)
+yields no utilisation and is not drawn as 0%.
+
 ## Implementation limitations
 
 Import is synchronous; cancellation is checked before/after import and analysis, not inside the importer. A single trace up to 16 MiB source size is cached on the serialized session worker, keyed by path/size/mtime; this is not a parsed-memory hard cap. Basic reports provide measured evidence, not an automated causal bottleneck classifier.

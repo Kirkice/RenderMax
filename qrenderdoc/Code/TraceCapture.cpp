@@ -177,6 +177,57 @@ QString ReadDeviceFile(IDeviceProtocolController *protocol, const rdcstr &url, b
   return QString();
 }
 
+// The device-side sampler that publishes GPU utilisation and clock into the recording.
+//
+// Why a sampler at all: the quantities it reads are the ones the kernel's `kgsl_gpubusy` and
+// `kgsl_clk` tracepoints publish, but those tracepoints are compiled out of, or not enable-able on,
+// a good many production kernels - and then the timeline simply has no utilisation lane, which reads
+// as "the GPU was idle" rather than "nothing measured it".
+//
+// Why through trace_marker: the recording already collects `ftrace/print` (that is the event every
+// atrace mark travels in), so a marker written here lands in the same buffer, on the same clock as
+// every other record. There is no correlation step and no second clock to get wrong, and the sample's
+// own timestamp is what the importer uses.
+//
+// Why shell rather than in-process: the sampling has to keep running while `perfetto` records, and
+// the record call blocks the one device channel this capture has. The script therefore starts
+// before it and stops itself at the same duration.
+//
+// The marker carries raw KGSL numbers (`busy elapsed clock-hz`) rather than a pre-computed
+// percentage: the ratio is only meaningful between two consecutive samples, and computing it where
+// the timestamps are known keeps a dropped marker from turning into a wrong value.
+const char *kLiveGpuSamplerScript =
+    "#!/system/bin/sh\n"
+    "# RenderMax live GPU sampler - written and started by the trace capture.\n"
+    "# usage: <script> <duration-seconds> <interval-seconds>\n"
+    "#\n"
+    "# KGSL refreshes gpubusy about once a second and holds the previous window in between, so a\n"
+    "# sample is published only when the pair changes: every marker is then one distinct measurement\n"
+    "# instead of a repeat of the one before it.\n"
+    "DUR=$1\n"
+    "IVAL=${2:-0.5}\n"
+    "OUT=\"\"\n"
+    "for f in /sys/kernel/tracing/trace_marker /sys/kernel/debug/tracing/trace_marker; do\n"
+    "  if [ -w \"$f\" ]; then OUT=$f; break; fi\n"
+    "done\n"
+    "[ -n \"$OUT\" ] || exit 2\n"
+    "BASE=/sys/class/kgsl/kgsl-3d0\n"
+    "[ -r $BASE/gpubusy ] || exit 3\n"
+    "END=$(( $(date +%s) + DUR ))\n"
+    "last=\"\"\n"
+    "while :; do\n"
+    "  [ \"$(date +%s)\" -lt \"$END\" ] || break\n"
+    "  pair=$(cat $BASE/gpubusy 2>/dev/null)\n"
+    "  clk=$(cat $BASE/gpuclk 2>/dev/null)\n"
+    "  [ -n \"$clk\" ] || clk=0\n"
+    "  if [ -n \"$pair\" ] && [ \"$pair\" != \"$last\" ]; then\n"
+    "    last=$pair\n"
+    "    set -- $pair\n"
+    "    echo \"RMGPUSAMPLE|$1|$2|$clk\" > \"$OUT\"\n"
+    "  fi\n"
+    "  sleep $IVAL\n"
+    "done\n";
+
 // Reads `/sys/class/...` for the GPU's published state and asks the kernel which tracepoints this
 // device can actually collect. Both halves need the same privilege, so they are probed together once
 // and the result decides the config.
@@ -207,6 +258,25 @@ GpuTraceCapabilities ProbeGpuCapabilities(IDeviceProtocolController *protocol, c
   gpu.gpuMaxClock =
       ReadDeviceFile(protocol, url, root, kgsl + QStringLiteral("devfreq/max_freq"), result);
   gpu.sysfsReadable = !gpu.gpuClock.isEmpty() || !gpu.gpuBusyPercent.isEmpty();
+
+  // KGSL's own busy/elapsed accounting, the same pair the `kgsl_gpubusy` tracepoint publishes. It is
+  // read here because the live sampler reads it once per interval while the trace records, which is
+  // what gives a utilisation lane on a device whose KGSL tracepoints cannot be enabled.
+  gpu.gpubusy = ReadDeviceFile(protocol, url, root, kgsl + QStringLiteral("gpubusy"), result);
+  {
+    // The node reports two whitespace-separated numbers (`busy elapsed`). Both have to be present for
+    // the sampler to compute a ratio, so the sample is parsed here rather than assumed well formed.
+    int numbers = 0;
+    bool inNumber = false;
+    for(const QChar c : gpu.gpubusy)
+    {
+      const bool digit = c.isDigit();
+      if(digit && !inNumber)
+        numbers++;
+      inNumber = digit;
+    }
+    gpu.gpuBusyReadable = numbers >= 2;
+  }
 
   // The node SDP's own GPU counters are read from. Its absence is a kernel configuration fact, not a
   // permission problem: `perfcounter` only exists when CONFIG_QCOM_KGSL_PERFCOUNTER is set, and
@@ -275,6 +345,14 @@ GpuTraceCapabilities ProbeGpuCapabilities(IDeviceProtocolController *protocol, c
     Log(result, QStringLiteral("tracepoint %1 (%2): %3").arg(name, QLatin1String(entry.purpose), state));
   }
 
+  Log(result, QStringLiteral("GPU probe: live sampling %1")
+                  .arg(gpu.gpuBusyReadable
+                           ? (gpu.rootAvailable
+                                  ? QStringLiteral("available (gpubusy readable, trace_marker "
+                                                   "writable through su)")
+                                  : QStringLiteral("unavailable: writing trace_marker needs root"))
+                           : QStringLiteral("unavailable: gpubusy is not readable")));
+
   Log(result, QStringLiteral("GPU probe: root=%1 sysfs=%2 perfcounter=%3 clock=%4 busy=%5 max=%6")
                   .arg(gpu.rootAvailable ? QStringLiteral("yes") : QStringLiteral("no"))
                   .arg(gpu.sysfsReadable ? QStringLiteral("yes") : QStringLiteral("no"))
@@ -290,6 +368,197 @@ GpuTraceCapabilities ProbeGpuCapabilities(IDeviceProtocolController *protocol, c
 QString ToQStringDisplay(const rdcstr &s)
 {
   return QString::fromUtf8(s.c_str(), (int)s.size());
+}
+
+// Starts the sampler on the device. It is detached (`nohup ... &`) because it has to keep running
+// while the recording command blocks this capture's only device channel, and it stops itself when its
+// duration expires. Returns the device path of the script, or an empty string when it did not start;
+// the reason always goes into the capture log, since a missing utilisation lane has to be explained.
+QString StartLiveGpuSampler(IDeviceProtocolController *protocol, const rdcstr &url, bool root,
+                            const QString &deviceDir, int durationMs, TraceCaptureResult &result)
+{
+  // Root is required for the write itself, not for the read: `trace_marker` is writable only by the
+  // tracing domain, so an unprivileged shell can sample the node but cannot put the sample anywhere
+  // the recording will see it.
+  if(!root)
+  {
+    Log(result, QStringLiteral("live GPU sampler: not started (writing trace_marker needs root); "
+                               "GPU utilisation and clock will only be present if this kernel's "
+                               "kgsl tracepoints could be enabled"));
+    return QString();
+  }
+
+  const QString deviceScript = deviceDir + QStringLiteral("/gpusample.sh");
+  const QString localScript =
+      QDir(QDir::tempPath()).absoluteFilePath(QStringLiteral("rdoc-gpusample-%1.sh")
+                                                  .arg(QDateTime::currentDateTime().toString(
+                                                      QStringLiteral("yyyyMMdd-HHmmsszzz"))));
+
+  QFile file(localScript);
+  if(!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+  {
+    Log(result, QStringLiteral("live GPU sampler: not started (could not write %1: %2)")
+                    .arg(localScript, file.errorString()));
+    return QString();
+  }
+  const QByteArray script = QString::fromLatin1(kLiveGpuSamplerScript).toUtf8();
+  const bool wrote = file.write(script) == script.size();
+  file.close();
+
+  if(!wrote)
+  {
+    Log(result, QStringLiteral("live GPU sampler: not started (short write to %1)").arg(localScript));
+    return QString();
+  }
+
+  const ResultDetails push =
+      protocol->PushFile(url, localScript.toUtf8().data(), deviceScript.toUtf8().data());
+  if(!push.OK())
+  {
+    Log(result, QStringLiteral("live GPU sampler: not started (push failed: %1)")
+                    .arg(ToQStringDisplay(push.Message())));
+    return QString();
+  }
+
+  // The interval is half a second: KGSL refreshes its busy window about once a second and the script
+  // only publishes a changed pair, so this catches every refresh without duplicating one, and the
+  // markers cost nothing beside the ftrace stream. The script outlives the recording by a second so
+  // the last interval is not cut off.
+  const QString seconds = QString::number(qMax(1, (durationMs + 999) / 1000 + 1));
+  const QString command =
+      QStringLiteral("nohup sh %1 %2 0.5 >/dev/null 2>&1 &").arg(ShellQuote(deviceScript), seconds);
+
+  rdcstr out;
+  const ResultDetails started =
+      protocol->ExecCommand(url, RootedCommand(true, command).toUtf8().data(), &out);
+
+  if(!started.OK())
+  {
+    Log(result, QStringLiteral("live GPU sampler: not started (%1)")
+                    .arg(ToQStringDisplay(started.Message())));
+    return QString();
+  }
+
+  Log(result, QStringLiteral("live GPU sampler: started for %1s at 0.5s intervals "
+                             "(%2); samples arrive as tracing_mark_write records")
+                  .arg(seconds, deviceScript));
+  return deviceScript;
+}
+
+// Stops the sampler and removes its script. Called whether or not the recording succeeded: a sampler
+// left running would keep writing into whatever trace is recorded next.
+void StopLiveGpuSampler(IDeviceProtocolController *protocol, const rdcstr &url,
+                        const QString &deviceScript, TraceCaptureResult &result)
+{
+  if(deviceScript.isEmpty())
+    return;
+
+  rdcstr ignored;
+  const ResultDetails stopped = protocol->ExecCommand(
+      url,
+      RootedCommand(true, QStringLiteral("pkill -f %1 2>/dev/null; rm -f %2")
+                               .arg(ShellQuote(deviceScript), ShellQuote(deviceScript)))
+          .toUtf8()
+          .data(),
+      &ignored);
+
+  if(!stopped.OK())
+    Log(result, QStringLiteral("live GPU sampler: stop reported %1")
+                    .arg(ToQStringDisplay(stopped.Message())));
+}
+
+// Reads and, with root, clears Snapdragon Profiler's Q3D tools layer.
+//
+// `debug.egl.profiler=1` makes the platform load `libq3dtools_esx.so` into every EGL process it
+// starts, where it interposes the GL entry points - including the perf-monitor ones the Adreno counter
+// sampling depends on. Left in place it is not merely a nuisance: sampling under it has been seen to
+// fault inside the driver, so the counters are refused outright while it is loaded (qc_counters.cpp
+// checks /proc/self/maps for it).
+//
+// The property is cleared here rather than documented as a manual step because turning it off alone is
+// not enough: Snapdragon Profiler's own service resets it while it runs, so the property is set and the
+// service stopped in the same command, in that order. Both need root.
+//
+// This is a device change, so it is logged as one, with the value read before and after.
+void ClearQ3DProfilerLayer(IDeviceProtocolController *protocol, const rdcstr &url, bool root,
+                           GpuTraceCapabilities &gpu, TraceCaptureResult &result)
+{
+  {
+    rdcstr out;
+    const ResultDetails read =
+        protocol->ExecCommand(url, RootedCommand(root, QStringLiteral("getprop debug.egl.profiler"))
+                                       .toUtf8()
+                                       .data(),
+                              &out);
+    gpu.q3dProfilerProperty = QString::fromUtf8(out.c_str(), (int)out.size()).trimmed();
+    if(!read.OK())
+      Log(result, QStringLiteral("Q3D layer: could not read debug.egl.profiler: %1")
+                      .arg(Summarise(ToQStringDisplay(read.Message()), 160)));
+  }
+
+  gpu.q3dProfilerLayer = !gpu.q3dProfilerProperty.isEmpty() &&
+                         gpu.q3dProfilerProperty != QLatin1String("0");
+
+  if(!gpu.q3dProfilerLayer)
+  {
+    Log(result, QStringLiteral("Q3D layer: not active (debug.egl.profiler=%1)")
+                    .arg(gpu.q3dProfilerProperty.isEmpty() ? QStringLiteral("<unset>")
+                                                           : gpu.q3dProfilerProperty));
+    return;
+  }
+
+  Log(result, QStringLiteral("Q3D layer: active (debug.egl.profiler=%1)")
+                  .arg(gpu.q3dProfilerProperty));
+
+  if(!root)
+  {
+    result.warnings << QStringLiteral(
+        "Snapdragon Profiler's Q3D tools layer is active on this device (debug.egl.profiler=%1) and "
+        "this session has no root to turn it off. The layer is injected into every EGL process and "
+        "interposes the GL perf-monitor entry points, so Adreno counters will be refused rather than "
+        "sampled under it. Run `adb shell su -c 'setprop debug.egl.profiler 0'` and stop the "
+        "profiler, then capture again: GPU frequency, utilisation, command batches and the timeline "
+        "itself are unaffected by the layer.")
+                           .arg(gpu.q3dProfilerProperty);
+    return;
+  }
+
+  // Order matters: stop the service first, then set the property, then confirm. Setting it first is
+  // undone by the still-running service.
+  // The patterns are bracketed (`[s]dpservice`) on purpose: `pkill -f` matches against full command
+  // lines, and the shell running this very command has those names in its own command line - so the
+  // unbracketed form kills itself before the property is ever set, which is what a first attempt here
+  // did. The bracket makes the pattern's text differ from what it matches.
+  //
+  // No `-9`: this device's toybox `pkill` takes the signal as `-SIGNAL` and mis-parses `-9` into a
+  // pattern that matches every process, which kills this very shell before `setprop` runs. The default
+  // SIGTERM is enough for all three.
+  const QString clear =
+      QStringLiteral("pkill -f '[s]dpservice'; pkill -f '[p]luginGPU'; "
+                     "pkill -f '[S]napshotPlayer'; setprop debug.egl.profiler 0; "
+                     "getprop debug.egl.profiler");
+
+  rdcstr out;
+  const ResultDetails cleared =
+      protocol->ExecCommand(url, RootedCommand(true, clear).toUtf8().data(), &out);
+  const QString after = QString::fromUtf8(out.c_str(), (int)out.size()).trimmed();
+
+  if(!cleared.OK())
+  {
+    result.warnings << QStringLiteral(
+        "Snapdragon Profiler's Q3D tools layer is active on this device and clearing it failed (%1). "
+        "Adreno counters will be refused while it is loaded; stop the profiler, run `adb shell su -c "
+        "'setprop debug.egl.profiler 0'` and capture again.")
+                           .arg(Summarise(ToQStringDisplay(cleared.Message()), 160));
+    return;
+  }
+
+  Log(result, QStringLiteral("Q3D layer: cleared (debug.egl.profiler was %1, now %2; Snapdragon "
+                             "Profiler service stopped). Processes started from here on are not "
+                             "injected with libq3dtools.")
+                  .arg(gpu.q3dProfilerProperty,
+                       after.isEmpty() ? QStringLiteral("<unset>") : after));
+  gpu.q3dProfilerLayer = !after.isEmpty() && after != QLatin1String("0");
 }
 
 // Locates `traceconv`. Returns an empty string when it cannot be found, and never guesses a
@@ -653,7 +922,17 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
   //     its own user, and the file is root-owned mode 0644 - so a device can list the event as
   //     available and still record nothing for it, without any error anywhere.
   // -----------------------------------------------------------------------------------------------
-  result.gpu = ProbeGpuCapabilities(protocol, urlStr, root, opts.gpuDetail, result);
+  // Before the GPU probe, because everything downstream of it - the counter backend especially -
+  // is affected by whether the Q3D tools layer is loaded in this device's EGL processes.
+  ClearQ3DProfilerLayer(protocol, urlStr, root, result.gpu, result);
+  {
+    // The probe fills the same struct, so the layer's fields are carried across it rather than lost.
+    const bool q3dLayer = result.gpu.q3dProfilerLayer;
+    const QString q3dProperty = result.gpu.q3dProfilerProperty;
+    result.gpu = ProbeGpuCapabilities(protocol, urlStr, root, opts.gpuDetail, result);
+    result.gpu.q3dProfilerLayer = q3dLayer;
+    result.gpu.q3dProfilerProperty = q3dProperty;
+  }
   const GpuTraceCapabilities &gpu = result.gpu;
 
   // GPU lanes: the lanes exist exactly when their events were enabled, and the reason they do not is
@@ -703,6 +982,20 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
         "are %1. The corresponding GPU lanes may be incomplete; see the Capture Log for each event "
         "and its reason.")
                            .arg(missingGpuEvents.join(QStringLiteral(", ")));
+  }
+
+  // Utilisation and clock are called out separately from the other GPU lanes: their absence is the
+  // easiest thing to misread as "the GPU was idle", and there are two independent sources for them.
+  if(!gpu.eventNames.contains(QLatin1String("kgsl_gpubusy")) && !(gpu.gpuBusyReadable && root))
+  {
+    result.warnings << QStringLiteral(
+        "No GPU utilisation or clock lane: the kernel's kgsl_gpubusy/kgsl_clk tracepoints could not "
+        "be enabled, and the live sampler needs root to write its samples into the trace "
+        "(/sys/class/kgsl/kgsl-3d0/gpubusy itself is %1). Absence of these lanes means nothing "
+        "measured the GPU, not that it was idle.")
+                           .arg(gpu.gpuBusyReadable ? QStringLiteral("readable, but this session has "
+                                                                     "no root")
+                                                    : QStringLiteral("not readable either"));
   }
 
   if(!gpu.perfcounterNode)
@@ -869,9 +1162,24 @@ TraceCaptureResult RunTraceCapture(IDeviceProtocolController *protocol, const QS
     Log(result, QStringLiteral("recording: %1 (blocking for the configured duration)")
                     .arg(command));
 
+    // The sampler is started first, so its markers are already flowing when the ftrace buffer opens;
+    // markers written before that are simply not in the trace, which costs the first few intervals and
+    // nothing else. It has to be a separate command because the record below blocks this channel.
+    QString liveSampler;
+    if(gpu.gpuBusyReadable)
+      liveSampler = StartLiveGpuSampler(protocol, urlStr, root, deviceDir, opts.durationMs, result);
+    else
+      Log(result, QStringLiteral("live GPU sampler: not started (%1 is not readable on this device)")
+                      .arg(QStringLiteral("/sys/class/kgsl/kgsl-3d0/gpubusy")));
+
     rdcstr out;
     const ResultDetails rec = protocol->ExecCommand(urlStr,
                                                     command.toUtf8().data(), &out);
+
+    // Stopped before anything else is inspected: whatever happened to the recording, the sampler must
+    // not outlive it and write into a later trace.
+    StopLiveGpuSampler(protocol, urlStr, liveSampler, result);
+    result.liveGpuSampler = !liveSampler.isEmpty();
 
     const QString recOut = ToQStringDisplay(out);
     if(!recOut.trimmed().isEmpty())

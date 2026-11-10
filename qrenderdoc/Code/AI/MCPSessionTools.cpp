@@ -363,14 +363,18 @@ public:
         {QStringLiteral("enabledEvents"), QJsonArray::fromStringList(result.gpu.eventNames)},
         {QStringLiteral("gpuClock"), result.gpu.gpuClock},
         {QStringLiteral("gpuBusyPercent"), result.gpu.gpuBusyPercent},
-        {QStringLiteral("gpuMaxClock"), result.gpu.gpuMaxClock}};
+        {QStringLiteral("gpuMaxClock"), result.gpu.gpuMaxClock},
+        {QStringLiteral("gpuBusyReadable"), result.gpu.gpuBusyReadable},
+        {QStringLiteral("liveGpuSampler"), result.liveGpuSampler},
+        {QStringLiteral("q3dProfilerLayer"), result.gpu.q3dProfilerLayer},
+        {QStringLiteral("q3dProfilerProperty"), result.gpu.q3dProfilerProperty}};
     QJsonObject out{{QStringLiteral("ok"), result.success}, {QStringLiteral("success"), result.success},
         {QStringLiteral("localTracePath"), result.localTracePath},
         {QStringLiteral("localTimelinePath"), result.localTimelinePath},
         {QStringLiteral("localLogPath"), result.localLogPath},
         {QStringLiteral("error"), result.error}, {QStringLiteral("warnings"), warnings},
         {QStringLiteral("gpu"), gpu}, {QStringLiteral("log"), log},
-        {QStringLiteral("analysisHint"), QStringLiteral("Pass localTimelinePath to renderdoc_analyzeSystemTrace for the summary; add includeSpans/includeSamples for lane contents, and beginSec/endSec or trackFilter/seriesFilter to narrow it. Per-frame GPU time is frames[].gpuBusySec, and gpu reports whether the GPU counters were usable at all; that time needs gpuDetail 'commands', so a trace taken at 'metrics' reports it as null and says so in gpuBusyHint.")}};
+        {QStringLiteral("analysisHint"), QStringLiteral("Pass localTimelinePath to renderdoc_analyzeSystemTrace for the summary; add includeSpans/includeSamples for lane contents, and beginSec/endSec or trackFilter/seriesFilter to narrow it. Per-frame GPU time is frames[].gpuBusySec, and gpu reports whether the GPU counters were usable at all; that time needs gpuDetail 'commands', so a trace taken at 'metrics' reports it as null and says so in gpuBusyHint. gpu.liveGpuSampler says whether the capture's own GPU Busy/Frequency sampler ran, which is what adds the '(sampled)' series when the KGSL tracepoints cannot be enabled; gpu.q3dProfilerLayer records whether Snapdragon Profiler's Q3D layer was active and had to be cleared before recording.")}};
     return ToolResult::Success(out);
   }
 

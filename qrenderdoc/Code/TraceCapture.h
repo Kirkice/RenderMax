@@ -127,6 +127,17 @@ struct GpuTraceCapabilities
   bool rootAvailable = false;
   // `/sys/class/kgsl/kgsl-3d0/gpuclk` and `gpu_busy_percentage` were readable.
   bool sysfsReadable = false;
+  // `debug.egl.profiler` was not set to 0 when the capture started, meaning Snapdragon Profiler's Q3D
+  // tools layer is being injected into every EGL process on this device. The layer interposes the GL
+  // perf-monitor entry points the counter sampling uses, so it is reported rather than ignored; with
+  // root the capture turns it off before recording.
+  bool q3dProfilerLayer = false;
+  // The property's value as read, kept verbatim for the capture log.
+  QString q3dProfilerProperty;
+  // `/sys/class/kgsl/kgsl-3d0/gpubusy` was readable, which is what the live sampler needs: it is the
+  // same busy/elapsed accounting the kernel's `kgsl_gpubusy` tracepoint publishes, so a device whose
+  // tracepoints cannot be enabled can still have GPU utilisation on the timeline.
+  bool gpuBusyReadable = false;
   // `/sys/class/kgsl/kgsl-3d0/perfcounter` exists. This is the node SDP reads its per-stage GPU
   // counters from (`% Shader ALU Capacity Utilized`, `% Texture Fetch Stall`, ...), so its absence is
   // exactly why those metrics cannot be produced here.
@@ -139,6 +150,7 @@ struct GpuTraceCapabilities
   // be read back as either "they were not asked for" or "the device refused them".
   GpuTraceDetail requestedDetail = GpuTraceDetail::Metrics;
   // Raw probe values, kept verbatim for the capture log.
+  QString gpubusy;
   QString gpuClock;
   QString gpuBusyPercent;
   QString gpuMaxClock;
@@ -158,6 +170,10 @@ struct TraceCaptureResult
   QString localLogPath;
   // The path the trace had while on the device, kept for diagnostics.
   QString deviceTracePath;
+  // True when the live GPU sampler was started for this recording. Its samples arrive through the
+  // trace's own marker event, so they share the trace clock; how many of them landed is reported by
+  // the importer, not here.
+  bool liveGpuSampler = false;
   QString traceconvPath;
   // Non-empty only on failure, and always names the step that failed plus the tool's own output.
   QString error;

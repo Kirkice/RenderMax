@@ -245,6 +245,12 @@ struct TraceGpuStats
   // `bw_hwmon_meas` records for bus masters that are not the GPU. Kept so a trace that carries
   // bandwidth data can say so even when none of it belongs to the GPU.
   int bandwidthOtherDevices = 0;
+  // Samples the capture's live GPU sampler wrote into the trace, and how many of them bracketed a
+  // window with an advancing elapsed counter. Both are zero for a trace captured without the sampler
+  // (no root, or a device without `/sys/class/kgsl/kgsl-3d0/gpubusy`), which is a different fact from
+  // a GPU that measured as idle.
+  int liveGpuSamples = 0;
+  int liveGpuWindowSamples = 0;
   // Fixed base the Adreno counters are divided by (the value SDP uses). Reported so the arithmetic
   // is checkable from outside instead of being an unexplained constant.
   double tickHz = 19.2e6;
