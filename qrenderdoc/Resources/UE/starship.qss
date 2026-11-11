@@ -67,8 +67,16 @@ QTreeView::branch:has-children:open { image: url(:/UE/chevron-down.svg); }
 QTreeView::item:hover, QTableView::item:hover, QListView::item:hover { background: #383838; }
 QTreeView::item:selected, QTableView::item:selected, QListView::item:selected { background: #0070E0; color: white; }
 QTreeView::item:selected:!active, QTableView::item:selected:!active, QListView::item:selected:!active { background: #3F3F3F; }
-QGroupBox { color: #C0C0C0; background: transparent; border: 0; margin-top: 9px; padding-top: 5px; }
-QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #C0C0C0; }
+/* Group boxes are the regions in the pipeline state and the mesh viewer, so they need an outline:
+   the title sits in the top margin, above the frame, and is masked over the border it would cross. */
+QGroupBox { color: #C0C0C0; background: transparent; border: 1px solid #383838; border-radius: 3px; margin-top: 9px; padding-top: 5px; }
+QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #C0C0C0; background: #242424; }
+/* The mesh view has no frame of its own and its outline would be painted over by the render view, so
+   it is wrapped in a frame with a 1px margin and the border is drawn there. */
+QFrame#renderFrame { border: 1px solid #383838; border-radius: 2px; }
+/* The input and output thumbnail strips in the texture viewer are borderless scroll areas, which
+   leaves their region indistinguishable from the tool window around them. */
+ThumbnailStrip QScrollArea { border: 1px solid #383838; border-radius: 2px; }
 QCheckBox, QRadioButton { color: #C0C0C0; spacing: 6px; }
 QCheckBox:disabled, QRadioButton:disabled { color: #606060; }
 QCheckBox::indicator { width: 12px; height: 12px; background: #0F0F0F; border: 1px solid #383838; border-radius: 2px; }
