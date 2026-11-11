@@ -23,902 +23,312 @@
  ******************************************************************************/
 
 #include "TerminalViewer.h"
+#include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
-#include <QApplication>
 #include <QDir>
 #include <QFile>
-#include <QFileInfo>
-#include <QGuiApplication>
 #include <QHBoxLayout>
-#include <QKeyEvent>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
-#include <QLineEdit>
-#include <QPlainTextEdit>
-#include <QProcess>
 #include <QProcessEnvironment>
-#include <QScrollBar>
-#include <QSpacerItem>
 #include <QStandardPaths>
-#include <QStyle>
-#include <QTextCharFormat>
-#include <QTextCodec>
-#include <QTextCursor>
-#include <QTextStream>
-#include <QTime>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include "Code/QRDUtils.h"
 #include "Code/Resources.h"
+#ifdef WIN32
+#include <windows.h>
+#include <wrl.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include "3rdparty/terminal/WebView2.h"
+#include "3rdparty/terminal/WebView2EnvironmentOptions.h"
+using Microsoft::WRL::ComPtr;
+using Microsoft::WRL::Callback;
+#endif
 
-// The marker the shell echoes after each command. It is filtered out of the output and used to
-// learn the working directory and to know the command finished.
-static const QString MARKER_PREFIX = lit("RMPROMPT:");
+struct TerminalViewer::Native
+{
+#ifdef WIN32
+  ComPtr<ICoreWebView2Controller> controller;
+  ComPtr<ICoreWebView2> web;
+  HANDLE input = NULL, output = NULL, process = NULL, job = NULL;
+  HANDLE pseudo = NULL;
+  typedef HRESULT (WINAPI *CreateFn)(COORD, HANDLE, HANDLE, DWORD, HANDLE *);
+  typedef HRESULT (WINAPI *ResizeFn)(HANDLE, COORD);
+  typedef void (WINAPI *CloseFn)(HANDLE);
+  CreateFn create = NULL;
+  ResizeFn resize = NULL;
+  CloseFn close = NULL;
+  HMODULE loader = NULL;
+  std::thread writer;
+  std::mutex mutex;
+  std::condition_variable wake;
+  QByteArray inputQueue;
+  bool stopping = false;
+#endif
+  bool ready = false;
+  bool initialNavigation = true;
+  int cols = 100, rows = 30;
+  int sequence = 0, pending = 0;
+};
 
-static const int SCROLLBACK_LINES = 5000;
-static const int MIN_FONT_SIZE = 6;
-static const int MAX_FONT_SIZE = 32;
-
-TerminalViewer::TerminalViewer(QWidget *parent) : QFrame(parent)
+TerminalViewer::TerminalViewer(QWidget *parent) : QFrame(parent), n(new Native)
 {
   setObjectName(lit("terminalViewer"));
-
-  setupColours();
-  createUi();
-  populateShells();
-
-  startShell();
+  setWindowTitle(tr("Terminal Viewer"));
+  QVBoxLayout *layout = new QVBoxLayout(this);
+  layout->setContentsMargins(0,0,0,0);
+  layout->setSpacing(0);
+  QFrame *bar = new QFrame(this);
+  bar->setObjectName(lit("terminalToolbar"));
+  QHBoxLayout *tools = new QHBoxLayout(bar);
+  m_Shell = new QComboBox(bar);
+  const QString root = QProcessEnvironment::systemEnvironment().value(lit("SystemRoot"), lit("C:/Windows"));
+  m_Shell->addItem(tr("Windows PowerShell"), QDir(root).filePath(lit("System32/WindowsPowerShell/v1.0/powershell.exe")));
+  const QString pwsh = QStandardPaths::findExecutable(lit("pwsh"));
+  if(!pwsh.isEmpty()) m_Shell->addItem(tr("PowerShell 7"), pwsh);
+  tools->addWidget(m_Shell);
+  m_Status = new QLabel(tr("Loading terminal..."), bar);
+  tools->addWidget(m_Status,1);
+  QToolButton *restart = new QToolButton(bar);
+  restart->setIcon(Icons::arrow_refresh());
+  restart->setAutoRaise(true);
+  restart->setToolTip(tr("Restart PowerShell"));
+  tools->addWidget(restart);
+  connect(restart,&QToolButton::clicked,this,&TerminalViewer::restartShell);
+  connect(m_Shell,QOverload<int>::of(&QComboBox::activated),this,[this](int){restartShell();});
+  layout->addWidget(bar);
+  m_Host = new QWidget(this);
+  m_Host->setAttribute(Qt::WA_NativeWindow);
+  m_Host->installEventFilter(this);
+  layout->addWidget(m_Host,1);
+  m_Timer = new QTimer(this);
+  m_Timer->setInterval(15);
+  connect(m_Timer,&QTimer::timeout,this,&TerminalViewer::poll);
+  // Dock placement may recreate the native HWND; create WebView only after docking completes.
+  QTimer::singleShot(0, this, &TerminalViewer::initialise);
 }
 
 TerminalViewer::~TerminalViewer()
 {
   stopShell();
-}
-
-void TerminalViewer::setupColours()
-{
-  const bool dark = IsDarkTheme();
-
-  m_TextColour = dark ? QColor(0xD4, 0xD4, 0xD4) : QColor(0x1F, 0x1F, 0x1F);
-  m_NoticeColour = dark ? QColor(0x80, 0x80, 0x80) : QColor(0x70, 0x70, 0x70);
-  m_CommandColour = dark ? QColor(0x6F, 0xCF, 0x97) : QColor(0x1B, 0x5E, 0x20);
-
-  m_AnsiColour = m_TextColour;
-
-  // The 16 ANSI colours, adjusted so none of them vanish into the page. Programs pick these by
-  // index, so the mapping has to keep the usual meaning: red stays red, bright stays brighter.
-  static const QColor darkTable[16] = {
-      QColor(0x60, 0x60, 0x60), QColor(0xE0, 0x6C, 0x75), QColor(0x98, 0xC3, 0x79),
-      QColor(0xE5, 0xC0, 0x7B), QColor(0x61, 0xAF, 0xEF), QColor(0xC6, 0x78, 0xDD),
-      QColor(0x56, 0xB6, 0xC2), QColor(0xDC, 0xDF, 0xE4), QColor(0x8A, 0x8A, 0x8A),
-      QColor(0xFF, 0x7B, 0x86), QColor(0xB5, 0xE8, 0x90), QColor(0xFF, 0xD6, 0x8A),
-      QColor(0x7F, 0xC4, 0xFF), QColor(0xE2, 0x9B, 0xF5), QColor(0x6F, 0xD6, 0xE2),
-      QColor(0xFF, 0xFF, 0xFF),
-  };
-
-  static const QColor lightTable[16] = {
-      QColor(0x00, 0x00, 0x00), QColor(0xC9, 0x1B, 0x00), QColor(0x1B, 0x7F, 0x1B),
-      QColor(0x9A, 0x6A, 0x00), QColor(0x1E, 0x5F, 0xBF), QColor(0xA6, 0x26, 0xA4),
-      QColor(0x0E, 0x7C, 0x86), QColor(0x38, 0x3A, 0x42), QColor(0x5C, 0x5C, 0x5C),
-      QColor(0xE0, 0x3E, 0x3E), QColor(0x1F, 0x9C, 0x3E), QColor(0xB5, 0x7F, 0x00),
-      QColor(0x3B, 0x78, 0xD8), QColor(0xC1, 0x3B, 0xC1), QColor(0x0E, 0x9A, 0xA7),
-      QColor(0x00, 0x00, 0x00),
-  };
-
-  for(int i = 0; i < 16; i++)
-    m_AnsiTable[i] = dark ? darkTable[i] : lightTable[i];
-
-  m_FontSize = Formatter::FixedFont().pointSize();
-
-  if(m_FontSize <= 0)
-    m_FontSize = 10;
-}
-
-void TerminalViewer::createUi()
-{
-  QVBoxLayout *layout = new QVBoxLayout(this);
-  layout->setContentsMargins(0, 0, 0, 0);
-  layout->setSpacing(0);
-
-  // toolbar -------------------------------------------------------------
-  QFrame *toolbar = new QFrame(this);
-  toolbar->setObjectName(lit("terminalToolbar"));
-  toolbar->setFrameShape(QFrame::NoFrame);
-
-  QHBoxLayout *toolbarLayout = new QHBoxLayout(toolbar);
-  toolbarLayout->setContentsMargins(8, 2, 8, 2);
-  toolbarLayout->setSpacing(6);
-
-  QLabel *shellLabel = new QLabel(tr("Shell:"), toolbar);
-  shellLabel->setObjectName(lit("terminalShellLabel"));
-
-  m_ShellCombo = new QComboBox(toolbar);
-  m_ShellCombo->setObjectName(lit("terminalShellCombo"));
-  m_ShellCombo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-  connect(m_ShellCombo, QOverload<int>::of(&QComboBox::activated), this, &TerminalViewer::changeShell);
-
-  m_StatusLabel = new QLabel(toolbar);
-  m_StatusLabel->setObjectName(lit("terminalStatus"));
-
-  m_RestartButton = new QToolButton(toolbar);
-  m_RestartButton->setObjectName(lit("terminalRestart"));
-  m_RestartButton->setIcon(Icons::arrow_refresh());
-  m_RestartButton->setToolTip(tr("Restart the shell process, dropping its session state"));
-  m_RestartButton->setAutoRaise(true);
-  m_RestartButton->setIconSize(QSize(16, 16));
-  connect(m_RestartButton, &QToolButton::clicked, this, &TerminalViewer::restartShell);
-
-  m_ClearButton = new QToolButton(toolbar);
-  m_ClearButton->setObjectName(lit("terminalClear"));
-  m_ClearButton->setIcon(Icons::del());
-  m_ClearButton->setToolTip(tr("Clear the output (Ctrl+L)"));
-  m_ClearButton->setAutoRaise(true);
-  m_ClearButton->setIconSize(QSize(16, 16));
-  connect(m_ClearButton, &QToolButton::clicked, this, &TerminalViewer::clearOutput);
-
-  m_CopyButton = new QToolButton(toolbar);
-  m_CopyButton->setObjectName(lit("terminalCopy"));
-  m_CopyButton->setIcon(Icons::copy());
-  m_CopyButton->setToolTip(tr("Copy the selection, or the whole output when nothing is selected"));
-  m_CopyButton->setAutoRaise(true);
-  m_CopyButton->setIconSize(QSize(16, 16));
-  connect(m_CopyButton, &QToolButton::clicked, this, &TerminalViewer::copyOutput);
-
-  m_SaveButton = new QToolButton(toolbar);
-  m_SaveButton->setObjectName(lit("terminalSave"));
-  m_SaveButton->setIcon(Icons::save());
-  m_SaveButton->setToolTip(tr("Save the output to a text file"));
-  m_SaveButton->setAutoRaise(true);
-  m_SaveButton->setIconSize(QSize(16, 16));
-  connect(m_SaveButton, &QToolButton::clicked, this, &TerminalViewer::saveOutput);
-
-  toolbarLayout->addWidget(shellLabel);
-  toolbarLayout->addWidget(m_ShellCombo);
-  toolbarLayout->addWidget(m_StatusLabel);
-  toolbarLayout->addItem(new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Minimum));
-  toolbarLayout->addWidget(m_CopyButton);
-  toolbarLayout->addWidget(m_SaveButton);
-  toolbarLayout->addWidget(m_ClearButton);
-  toolbarLayout->addWidget(m_RestartButton);
-
-  // output --------------------------------------------------------------
-  m_Output = new QPlainTextEdit(this);
-  m_Output->setObjectName(lit("terminalOutput"));
-  m_Output->setReadOnly(true);
-  m_Output->setUndoRedoEnabled(false);
-  m_Output->setFrameShape(QFrame::NoFrame);
-  m_Output->setLineWrapMode(QPlainTextEdit::NoWrap);
-  m_Output->setMaximumBlockCount(SCROLLBACK_LINES);
-  m_Output->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-  m_Output->installEventFilter(this);
-
-  QFont fixed = Formatter::FixedFont();
-  fixed.setPointSize(m_FontSize);
-  m_Output->setFont(fixed);
-  m_Output->document()->setDefaultFont(fixed);
-
-  // input ---------------------------------------------------------------
-  QFrame *inputFrame = new QFrame(this);
-  inputFrame->setObjectName(lit("terminalInputFrame"));
-  inputFrame->setFrameShape(QFrame::NoFrame);
-
-  QHBoxLayout *inputLayout = new QHBoxLayout(inputFrame);
-  inputLayout->setContentsMargins(8, 2, 8, 2);
-  inputLayout->setSpacing(6);
-
-  m_PromptLabel = new QLabel(inputFrame);
-  m_PromptLabel->setObjectName(lit("terminalPrompt"));
-  m_PromptLabel->setFont(fixed);
-  m_PromptLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-
-  m_Input = new QLineEdit(inputFrame);
-  m_Input->setObjectName(lit("terminalInput"));
-  m_Input->setFont(fixed);
-  m_Input->setFrame(false);
-  m_Input->setPlaceholderText(tr("Type a command and press Enter"));
-  m_Input->installEventFilter(this);
-  connect(m_Input, &QLineEdit::returnPressed, this, &TerminalViewer::submitInput);
-
-  inputLayout->addWidget(m_PromptLabel);
-  inputLayout->addWidget(m_Input, 1);
-
-  layout->addWidget(toolbar);
-  layout->addWidget(m_Output, 1);
-  layout->addWidget(inputFrame);
-
-  setFocusProxy(m_Input);
-  setMinimumSize(360, 180);
-
-  setWindowTitle(tr("Terminal Viewer"));
-
-  setPromptPath(QDir::currentPath());
-}
-
-void TerminalViewer::populateShells()
-{
-  m_Shells.clear();
-
 #ifdef WIN32
-  const QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-  const QString systemRoot = environment.value(lit("SystemRoot"), lit("C:/Windows"));
-
-  // Windows PowerShell. Its stdin and stdout follow the console codepage, hence the preamble that
-  // switches stdout to UTF-8 and the local 8-bit encoding for the commands themselves.
-  const QString powerShell =
-      QDir(systemRoot).absoluteFilePath(lit("System32/WindowsPowerShell/v1.0/powershell.exe"));
-
-  if(QFileInfo::exists(powerShell))
-  {
-    TerminalShell shell;
-    shell.name = tr("Windows PowerShell");
-    shell.program = powerShell;
-    shell.arguments = QStringList() << lit("-NoLogo") << lit("-NoProfile") << lit("-Command")
-                                    << lit("-");
-    shell.preamble = lit("[Console]::OutputEncoding=[Text.Encoding]::UTF8");
-    shell.marker = lit("Write-Output (\"RMPROMPT:\" + (Get-Location).Path)");
-    shell.inputUtf8 = false;
-    shell.powershell = true;
-    m_Shells.push_back(shell);
-  }
-
-  // PowerShell 7, if it is installed. Same protocol, but it understands ANSI output rendering so
-  // the colours it normally strips when redirected can come through.
-  QString pwsh = QStandardPaths::findExecutable(lit("pwsh"));
-
-  if(pwsh.isEmpty())
-  {
-    const QString candidate = lit("C:/Program Files/PowerShell/7/pwsh.exe");
-
-    if(QFileInfo::exists(candidate))
-      pwsh = candidate;
-  }
-
-  if(!pwsh.isEmpty())
-  {
-    TerminalShell shell;
-    shell.name = tr("PowerShell 7");
-    shell.program = pwsh;
-    shell.arguments = QStringList() << lit("-NoLogo") << lit("-NoProfile") << lit("-Command")
-                                    << lit("-");
-    shell.preamble = lit("$PSStyle.OutputRendering='Ansi'; "
-                         "[Console]::OutputEncoding=[Text.Encoding]::UTF8");
-    shell.marker = lit("Write-Output (\"RMPROMPT:\" + (Get-Location).Path)");
-    shell.inputUtf8 = false;
-    shell.powershell = true;
-    m_Shells.push_back(shell);
-  }
-
-  const QString comSpec = environment.value(lit("ComSpec"), lit("cmd.exe"));
-
-  if(QFileInfo::exists(comSpec))
-  {
-    TerminalShell shell;
-    shell.name = tr("Command Prompt");
-    shell.program = comSpec;
-    // /D skips the user's AutoRun commands, and /K with echo off turns off the prompt echo of the
-    // commands piped in on stdin and the startup banner.
-    shell.arguments = QStringList() << lit("/Q") << lit("/D") << lit("/K") << lit("@echo off");
-    shell.marker = lit("echo RMPROMPT:%CD%");
-    // cmd writes its output in the console codepage even after chcp 65001, so rather than fight it
-    // both directions stay in the local 8-bit encoding.
-    shell.inputUtf8 = false;
-    shell.outputUtf8 = false;
-    shell.powershell = false;
-    m_Shells.push_back(shell);
-  }
-#else
-  TerminalShell shell;
-  shell.name = tr("Shell");
-  shell.program = QProcessEnvironment::systemEnvironment().value(lit("SHELL"), lit("/bin/sh"));
-  shell.arguments = QStringList() << lit("-i");
-  shell.marker = lit("echo RMPROMPT:$PWD");
-  shell.inputUtf8 = true;
-  shell.powershell = false;
-  m_Shells.push_back(shell);
+  if(n->controller) n->controller->Close();
+  // The loader remains loaded: asynchronous WebView callbacks may still be unwinding.
 #endif
-
-  m_ShellCombo->blockSignals(true);
-  m_ShellCombo->clear();
-
-  for(const TerminalShell &shell : m_Shells)
-    m_ShellCombo->addItem(shell.name);
-
-  m_ShellCombo->blockSignals(false);
+  delete n;
 }
 
-void TerminalViewer::changeShell(int index)
+void TerminalViewer::initialise()
 {
-  if(index < 0 || index >= m_Shells.count())
-    return;
+#ifdef WIN32
+  HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+  n->create = (Native::CreateFn)GetProcAddress(kernel,"CreatePseudoConsole");
+  n->resize = (Native::ResizeFn)GetProcAddress(kernel,"ResizePseudoConsole");
+  n->close = (Native::CloseFn)GetProcAddress(kernel,"ClosePseudoConsole");
+  if(!n->create || !n->resize || !n->close)
+  { m_Status->setText(tr("ConPTY requires Windows 10 1809 or later.")); return; }
+  const QString loader = QDir(QCoreApplication::applicationDirPath()).filePath(lit("WebView2Loader.dll"));
+  n->loader = LoadLibraryW((LPCWSTR)loader.utf16());
+  typedef HRESULT (STDAPICALLTYPE *EnvironmentFn)(PCWSTR,PCWSTR,ICoreWebView2EnvironmentOptions *,ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *);
+  EnvironmentFn createEnvironment = n->loader ? (EnvironmentFn)GetProcAddress(n->loader,"CreateCoreWebView2EnvironmentWithOptions") : NULL;
+  if(!createEnvironment) { m_Status->setText(tr("WebView2Loader.dll is missing.")); return; }
+  QPointer<TerminalViewer> self(this);
+  const QString cache = QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath(lit("TerminalWebView2"));
+  // Terminal ANSI RGB values are sRGB, not document colors to transform through
+  // the monitor ICC profile. Match native terminal output, including solid fills.
+  auto options = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+  options->put_AdditionalBrowserArguments(L"--force-color-profile=srgb");
+  HRESULT result = createEnvironment(NULL,(LPCWSTR)cache.utf16(),options.Get(),
+    Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>([self](HRESULT hr,ICoreWebView2Environment *env)->HRESULT {
+      if(!self) return S_OK;
+      if(FAILED(hr) || !env) {self->m_Status->setText(tr("WebView2 Runtime is unavailable."));return S_OK;}
+      return env->CreateCoreWebView2Controller((HWND)self->m_Host->winId(),
+        Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>([self](HRESULT error,ICoreWebView2Controller *controller)->HRESULT {
+          if(!self) {if(controller) controller->Close();return S_OK;}
+          if(FAILED(error)||!controller){self->m_Status->setText(tr("Could not create terminal renderer."));return S_OK;}
+          self->n->controller=controller;
+          controller->get_CoreWebView2(&self->n->web);
+          ComPtr<ICoreWebView2Settings> settings;
+          self->n->web->get_Settings(&settings);
+          settings->put_AreDevToolsEnabled(FALSE);
+          settings->put_AreDefaultContextMenusEnabled(FALSE);
+          settings->put_IsWebMessageEnabled(TRUE);
+          settings->put_IsScriptEnabled(TRUE);
+          EventRegistrationToken token;
+          self->n->web->add_WebMessageReceived(Callback<ICoreWebView2WebMessageReceivedEventHandler>([self](ICoreWebView2 *,ICoreWebView2WebMessageReceivedEventArgs *args)->HRESULT {
+            if(!self)return S_OK;
+            LPWSTR json=NULL;args->get_WebMessageAsJson(&json);
+            if(json){self->message(QString::fromWCharArray(json));CoTaskMemFree(json);}return S_OK;
+          }).Get(),&token);
+          self->n->web->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>([self](ICoreWebView2 *,ICoreWebView2NavigationStartingEventArgs *args)->HRESULT {
+            LPWSTR uri=NULL;args->get_Uri(&uri);
+            if(!self || !self->n->initialNavigation)
+              args->put_Cancel(TRUE);
+            if(self) self->n->initialNavigation=false;
+            CoTaskMemFree(uri);return S_OK;
+          }).Get(),&token);
+          QFile html(lit(":/terminal/terminal.html")),js(lit(":/terminal/xterm.js")),css(lit(":/terminal/xterm.css"));
+          html.open(QIODevice::ReadOnly);js.open(QIODevice::ReadOnly);css.open(QIODevice::ReadOnly);
+          QString page=QString::fromUtf8(html.readAll());
+          page.replace(lit("/*XTERM_CSS*/"),QString::fromUtf8(css.readAll()));
+          page.replace(lit("/*XTERM_JS*/"),QString::fromUtf8(js.readAll()));
+          self->resizeRenderer();
+          HRESULT navigation = self->n->web->NavigateToString((LPCWSTR)page.utf16());
+          if(FAILED(navigation)) self->m_Status->setText(lit("Renderer navigation failed: %1").arg((qulonglong)(unsigned long)navigation));
+          return S_OK;
+        }).Get());
+    }).Get());
+  if(FAILED(result))m_Status->setText(tr("Could not initialise WebView2."));
+#else
+  m_Status->setText(tr("This terminal requires Windows."));
+#endif
+}
 
-  restartShell();
+void TerminalViewer::send(const QJsonObject &object)
+{
+#ifdef WIN32
+  if(n->web){const QString json=QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));n->web->PostWebMessageAsJson((LPCWSTR)json.utf16());}
+#endif
+}
+
+void TerminalViewer::message(const QString &json)
+{
+  const QJsonObject object=QJsonDocument::fromJson(json.toUtf8()).object();
+  const QString type=object.value(lit("type")).toString();
+  if(type==lit("error")) m_Status->setText(object.value(lit("data")).toString());
+  else if(type==lit("ready")){n->ready=true;restartShell();}
+  else if(type==lit("ack")){if(object.value(lit("id")).toInt()==n->pending)n->pending=0;}
+  else if(type==lit("copy"))QApplication::clipboard()->setText(object.value(lit("data")).toString());
+  else if(type==lit("paste"))send(QJsonObject{{lit("type"),lit("paste")},{lit("data"),QApplication::clipboard()->text()}});
+#ifdef WIN32
+  else if(type==lit("resize")){
+    n->cols=qBound(2,object.value(lit("cols")).toInt(),500);
+    n->rows=qBound(1,object.value(lit("rows")).toInt(),300);
+    if(n->pseudo)n->resize(n->pseudo,COORD{(SHORT)n->cols,(SHORT)n->rows});
+  }
+  else if(type==lit("input") && n->input){
+    const QByteArray bytes=object.value(lit("data")).toString().toUtf8();
+    std::lock_guard<std::mutex> lock(n->mutex);
+    if(n->inputQueue.size()+bytes.size()<=1024*1024)
+    { n->inputQueue+=bytes; n->wake.notify_one(); }
+    else m_Status->setText(tr("Input queue full; paste rejected."));
+  }
+#endif
 }
 
 void TerminalViewer::restartShell()
 {
-  startShell();
-}
-
-void TerminalViewer::startShell()
-{
+  if(!n->ready)return;
   stopShell();
-
-  const int index = m_ShellCombo->currentIndex();
-
-  if(index < 0 || index >= m_Shells.count())
-    return;
-
-  const TerminalShell &shell = m_Shells[index];
-  const QString startDir = m_PromptPath.isEmpty() ? QDir::currentPath() : m_PromptPath;
-
-  m_Process = new QProcess(this);
-  m_Process->setProcessChannelMode(QProcess::MergedChannels);
-  m_Process->setWorkingDirectory(QDir(startDir).exists() ? startDir : QDir::currentPath());
-
-  connect(m_Process, &QProcess::readyReadStandardOutput, this, &TerminalViewer::readOutput);
-
-  connect(m_Process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-          [this](int exitCode, QProcess::ExitStatus status) {
-            if(m_Process == NULL || sender() != m_Process)
-              return;
-
-            m_Started = false;
-            setBusy(false);
-
-            if(status == QProcess::CrashExit)
-              appendNotice(tr("[the shell process crashed]"));
-            else
-              appendNotice(tr("[the shell exited with code %1]").arg(exitCode));
-
-            setPromptPath(QString());
-          });
-
-  connect(m_Process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-    if(m_Process == NULL || sender() != m_Process)
-      return;
-
-    if(error == QProcess::FailedToStart)
+  send(QJsonObject{{lit("type"),lit("reset")}});
+#ifdef WIN32
+  HANDLE childInput=NULL,childOutput=NULL;
+  if(!CreatePipe(&childInput,&n->input,NULL,0)||!CreatePipe(&n->output,&childOutput,NULL,0)){
+    if(childInput)CloseHandle(childInput);if(childOutput)CloseHandle(childOutput);stopShell();m_Status->setText(tr("Could not create terminal pipes."));return;}
+  HRESULT hr=n->create(COORD{(SHORT)n->cols,(SHORT)n->rows},childInput,childOutput,0,&n->pseudo);
+  CloseHandle(childInput);CloseHandle(childOutput);
+  if(FAILED(hr)){stopShell();m_Status->setText(tr("Could not create ConPTY."));return;}
+  SIZE_T size=0;InitializeProcThreadAttributeList(NULL,1,0,&size);
+  QByteArray storage((int)size,0);
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes=(LPPROC_THREAD_ATTRIBUTE_LIST)storage.data();
+  bool attributesReady=InitializeProcThreadAttributeList(attributes,1,0,&size)!=FALSE;
+  const DWORD_PTR pseudoAttribute=0x00020016;
+  if(!attributesReady || !UpdateProcThreadAttribute(attributes,0,pseudoAttribute,n->pseudo,sizeof(HANDLE),NULL,NULL)){
+    if(attributesReady)DeleteProcThreadAttributeList(attributes);stopShell();m_Status->setText(tr("Could not configure ConPTY."));return;}
+  STARTUPINFOEXW info={};info.StartupInfo.cb=sizeof(info);info.lpAttributeList=attributes;
+  const QString program=QDir::toNativeSeparators(m_Shell->currentData().toString());
+  std::wstring command=(lit("\"")+program+lit("\" -NoLogo -NoProfile")).toStdWString();
+  std::wstring directory=QDir::toNativeSeparators(QDir::currentPath()).toStdWString();
+  PROCESS_INFORMATION process={};
+  n->job=CreateJobObjectW(NULL,NULL);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  bool ok=n->job && SetInformationJobObject(n->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) &&
+    CreateProcessW((LPCWSTR)program.utf16(),&command[0],NULL,NULL,FALSE,EXTENDED_STARTUPINFO_PRESENT|CREATE_SUSPENDED,NULL,directory.c_str(),&info.StartupInfo,&process);
+  DeleteProcThreadAttributeList(attributes);
+  if(ok){n->process=process.hProcess;ok=AssignProcessToJobObject(n->job,process.hProcess) && ResumeThread(process.hThread)!=(DWORD)-1;CloseHandle(process.hThread);}
+  if(!ok){stopShell();m_Status->setText(tr("Could not start PowerShell in ConPTY."));return;}
+  n->stopping=false;
+  n->writer=std::thread([this]() {
+    for(;;)
     {
-      m_Started = false;
-      setBusy(false);
-      appendNotice(tr("[failed to start the shell process]"));
+      QByteArray bytes;
+      {
+        std::unique_lock<std::mutex> lock(n->mutex);
+        n->wake.wait(lock,[this](){return n->stopping || !n->inputQueue.isEmpty();});
+        if(n->stopping) return;
+        bytes.swap(n->inputQueue);
+      }
+      int offset=0;
+      while(offset<bytes.size())
+      {
+        {std::lock_guard<std::mutex> lock(n->mutex);if(n->stopping)return;}
+        DWORD written=0;
+        if(!WriteFile(n->input,bytes.constData()+offset,bytes.size()-offset,&written,NULL) || !written)return;
+        offset+=written;
+      }
     }
   });
+  m_Status->setText(tr("PowerShell - ConPTY"));m_Timer->start();
+#endif
+}
 
-  m_Process->start(shell.program, shell.arguments);
-
-  if(!m_Process->waitForStarted(5000))
-  {
-    appendNotice(tr("[failed to start %1]").arg(shell.program));
-    return;
-  }
-
-  m_Started = true;
-  m_OutputUtf8 = shell.outputUtf8;
-
-  appendNotice(tr("%1 in %2").arg(shell.name, QDir::toNativeSeparators(m_Process->workingDirectory())));
-
-  // Silent: it only sets up the encodings the reader below relies on.
-  writeLine(shell.preamble);
-  sendMarker();
-
-  m_Input->setFocus();
+void TerminalViewer::poll()
+{
+#ifdef WIN32
+  if(n->output && !n->pending){DWORD available=0;if(PeekNamedPipe(n->output,NULL,0,NULL,&available,NULL)&&available){
+    QByteArray bytes(qMin((int)available,32768),0);DWORD read=0;
+    if(ReadFile(n->output,bytes.data(),bytes.size(),&read,NULL)&&read){bytes.resize(read);n->pending=++n->sequence;
+      send(QJsonObject{{lit("type"),lit("output")},{lit("data"),QString::fromLatin1(bytes.toBase64())},{lit("id"),n->pending}});}
+  }}
+  if(n->process && WaitForSingleObject(n->process,0)!=WAIT_TIMEOUT){m_Timer->stop();m_Status->setText(tr("PowerShell exited. Use Restart."));}
+#endif
 }
 
 void TerminalViewer::stopShell()
 {
-  m_Started = false;
-
-  if(m_Process == NULL)
-    return;
-
-  QProcess *process = m_Process;
-  m_Process = NULL;
-
-  process->disconnect(this);
-
-  if(process->state() != QProcess::NotRunning)
+  m_Timer->stop();n->pending=0;
+#ifdef WIN32
+  if(n->job){TerminateJobObject(n->job,0);CloseHandle(n->job);n->job=NULL;}
+  if(n->process){TerminateProcess(n->process,0);CloseHandle(n->process);n->process=NULL;}
   {
-    process->kill();
-    process->waitForFinished(3000);
+    std::lock_guard<std::mutex> lock(n->mutex);
+    n->stopping=true;
+    n->inputQueue.clear();
   }
-
-  delete process;
-
-  m_OutputBuffer.clear();
-  setBusy(false);
-}
-
-void TerminalViewer::writeLine(const QString &line)
-{
-  if(m_Process == NULL || m_Process->state() != QProcess::Running)
-    return;
-
-  const int index = qBound(0, m_ShellCombo->currentIndex(), m_Shells.count() - 1);
-
-  if(index < 0 || m_Shells.isEmpty())
-    return;
-
-  const TerminalShell &shell = m_Shells[index];
-
-  QByteArray bytes = shell.inputUtf8 ? line.toUtf8() : line.toLocal8Bit();
-  bytes += "\r\n";
-
-  m_Process->write(bytes);
-}
-
-void TerminalViewer::sendMarker()
-{
-  const int index = qBound(0, m_ShellCombo->currentIndex(), m_Shells.count() - 1);
-
-  if(index < 0 || m_Shells.isEmpty())
-    return;
-
-  writeLine(m_Shells[index].marker);
-}
-
-void TerminalViewer::readOutput()
-{
-  if(m_Process == NULL)
-    return;
-
-  m_OutputBuffer += m_Process->readAllStandardOutput();
-
-  // Only decode whole lines: a UTF-8 sequence split across two reads would otherwise decode to
-  // replacement characters in the first half and garbage in the second.
-  const int lastNewline = m_OutputBuffer.lastIndexOf('\n');
-
-  if(lastNewline < 0)
-    return;
-
-  QByteArray complete = m_OutputBuffer.left(lastNewline + 1);
-  m_OutputBuffer.remove(0, lastNewline + 1);
-
-  QString text = m_OutputUtf8 ? QString::fromUtf8(complete)
-                              : QTextCodec::codecForLocale()->toUnicode(complete);
-  text.replace(lit("\r\n"), lit("\n"));
-
-  const QStringList lines = text.split(QLatin1Char('\n'));
-
-  // The trailing element is empty because the text ends with a newline.
-  QString visible;
-
-  for(int i = 0; i + 1 < lines.count(); i++)
+  n->wake.notify_one();
+  if(n->writer.joinable())
   {
-    const QString &line = lines[i];
-
-    if(line.startsWith(MARKER_PREFIX))
-    {
-      if(!visible.isEmpty())
-      {
-        appendOutput(visible);
-        visible.clear();
-      }
-
-      setPromptPath(line.mid(MARKER_PREFIX.length()).trimmed());
-      setBusy(false);
-      continue;
-    }
-
-    visible += line;
-    visible += QLatin1Char('\n');
+    HANDLE thread=(HANDLE)n->writer.native_handle();
+    while(WaitForSingleObject(thread,10)==WAIT_TIMEOUT)
+      CancelSynchronousIo(thread);
+    n->writer.join();
   }
-
-  if(!visible.isEmpty())
-    appendOutput(visible);
+  if(n->input){CloseHandle(n->input);n->input=NULL;}
+  // Close the read endpoint first so ConPTY cannot block trying to flush to an undrained pipe.
+  if(n->output){CloseHandle(n->output);n->output=NULL;}
+  if(n->pseudo){n->close(n->pseudo);n->pseudo=NULL;}
+#endif
 }
 
-void TerminalViewer::appendOutput(const QString &text)
+void TerminalViewer::resizeRenderer()
 {
-  // SGR is the only escape class that changes how the text looks; anything else (cursor movement,
-  // window titles, erase-line) is meaningless in a widget that is a scrollback rather than a
-  // screen, so it is dropped.
-  int start = 0;
-  int pos = 0;
-
-  while(pos < text.length())
-  {
-    if(text[pos] != QChar(27))
-    {
-      pos++;
-      continue;
-    }
-
-    if(pos > start)
-      appendChunk({text.mid(start, pos - start), m_AnsiColour, m_AnsiBold});
-
-    const int next = applyEscape(text, pos);
-
-    // A dangling escape at the very end of a chunk: skip the byte rather than leave it in the text.
-    pos = next > pos ? next : pos + 1;
-    start = pos;
-  }
-
-  if(start < text.length())
-    appendChunk({text.mid(start), m_AnsiColour, m_AnsiBold});
+#ifdef WIN32
+  if(n->controller){RECT rect={};GetClientRect((HWND)m_Host->winId(),&rect);n->controller->put_Bounds(rect);}
+#endif
 }
 
-int TerminalViewer::applyEscape(const QString &text, int pos)
+bool TerminalViewer::eventFilter(QObject *watched,QEvent *event)
 {
-  // text[pos] is the escape character.
-  if(pos + 1 >= text.length())
-    return pos + 1;
-
-  const QChar kind = text[pos + 1];
-
-  if(kind == QLatin1Char('['))
-  {
-    int i = pos + 2;
-    QString params;
-
-    while(i < text.length() && (text[i] < QChar(0x40) || text[i] > QChar(0x7E)))
-    {
-      params += text[i];
-      i++;
-    }
-
-    if(i >= text.length())
-      return i;
-
-    if(text[i] == QLatin1Char('m'))
-      applySgr(params);
-
-    return i + 1;
-  }
-
-  if(kind == QLatin1Char(']'))
-  {
-    // OSC runs to BEL or to the string terminator.
-    int i = pos + 2;
-
-    while(i < text.length() && text[i] != QChar(7))
-      i++;
-
-    return i + 1;
-  }
-
-  return pos + 2;
+  if(watched==m_Host && event->type()==QEvent::Resize)resizeRenderer();
+  return QFrame::eventFilter(watched,event);
 }
-
-void TerminalViewer::applySgr(const QString &params)
-{
-  const QStringList parts = params.split(QLatin1Char(';'), QString::SkipEmptyParts);
-
-  if(parts.isEmpty())
-  {
-    // A bare ESC[m is a reset.
-    m_AnsiColour = m_TextColour;
-    m_AnsiBold = false;
-    return;
-  }
-
-  for(int i = 0; i < parts.count(); i++)
-  {
-    bool ok = false;
-    const int code = parts[i].toInt(&ok);
-
-    if(!ok)
-      continue;
-
-    if(code == 0)
-    {
-      m_AnsiColour = m_TextColour;
-      m_AnsiBold = false;
-    }
-    else if(code == 1)
-    {
-      m_AnsiBold = true;
-    }
-    else if(code == 22)
-    {
-      m_AnsiBold = false;
-    }
-    else if(code >= 30 && code <= 37)
-    {
-      m_AnsiColour = m_AnsiTable[code - 30];
-    }
-    else if(code == 39)
-    {
-      m_AnsiColour = m_TextColour;
-    }
-    else if(code >= 90 && code <= 97)
-    {
-      m_AnsiColour = m_AnsiTable[code - 90 + 8];
-    }
-    else if(code == 38)
-    {
-      // Extended foreground colour. Only the 256-colour and true-colour forms are worth following;
-      // both consume the following parameters.
-      if(i + 2 < parts.count() && parts[i + 1].toInt() == 5)
-      {
-        const int index = parts[i + 2].toInt();
-
-        if(index >= 0 && index < 16)
-        {
-          m_AnsiColour = m_AnsiTable[index];
-        }
-        else if(index >= 16 && index < 232)
-        {
-          // 6x6x6 colour cube.
-          const int cube = index - 16;
-          const int steps[6] = {0, 95, 135, 175, 215, 255};
-          m_AnsiColour = QColor(steps[cube / 36], steps[(cube / 6) % 6], steps[cube % 6]);
-        }
-        else if(index >= 232)
-        {
-          const int grey = 8 + (index - 232) * 10;
-          m_AnsiColour = QColor(grey, grey, grey);
-        }
-
-        i += 2;
-      }
-      else if(i + 4 < parts.count() && parts[i + 1].toInt() == 2)
-      {
-        m_AnsiColour = QColor(qBound(0, parts[i + 2].toInt(), 255),
-                              qBound(0, parts[i + 3].toInt(), 255),
-                              qBound(0, parts[i + 4].toInt(), 255));
-        i += 4;
-      }
-    }
-    // 40-49 and 100-107 set the background. Deliberately ignored: the page is drawn by the theme and
-    // a program's block background would fight the selection colour.
-  }
-}
-
-void TerminalViewer::appendChunk(const TerminalChunk &chunk)
-{
-  if(chunk.text.isEmpty())
-    return;
-
-  QScrollBar *scrollBar = m_Output->verticalScrollBar();
-  const bool atEnd = scrollBar->value() + 4 >= scrollBar->maximum();
-
-  QTextCharFormat format;
-  format.setForeground(chunk.colour.isValid() ? chunk.colour : m_TextColour);
-
-  if(chunk.bold)
-    format.setFontWeight(QFont::Bold);
-
-  QTextCursor cursor(m_Output->document());
-  cursor.movePosition(QTextCursor::End);
-  cursor.insertText(chunk.text, format);
-
-  if(atEnd)
-    scrollBar->setValue(scrollBar->maximum());
-}
-
-void TerminalViewer::appendNotice(const QString &text)
-{
-  appendChunk({lit("[%1] %2\n").arg(QTime::currentTime().toString(lit("hh:mm:ss"))).arg(text),
-               m_NoticeColour, false});
-}
-
-void TerminalViewer::setPromptPath(const QString &path)
-{
-  m_PromptPath = path;
-
-  const int index = qBound(0, m_ShellCombo->currentIndex(), m_Shells.count() - 1);
-  const bool powershell = (index >= 0 && index < m_Shells.count()) ? m_Shells[index].powershell : true;
-
-  if(path.isEmpty())
-    m_PromptLabel->setText(powershell ? lit("PS>") : lit(">"));
-  else if(powershell)
-    m_PromptLabel->setText(lit("PS %1>").arg(path));
-  else
-    m_PromptLabel->setText(lit("%1>").arg(path));
-
-  m_PromptLabel->setToolTip(path);
-}
-
-void TerminalViewer::setBusy(bool busy)
-{
-  m_Busy = busy;
-
-  if(!m_Started)
-  {
-    m_StatusLabel->setText(tr("Not running"));
-    m_StatusLabel->setProperty("state", lit("error"));
-  }
-  else if(busy)
-  {
-    m_StatusLabel->setText(tr("Running"));
-    m_StatusLabel->setProperty("state", lit("busy"));
-  }
-  else
-  {
-    m_StatusLabel->setText(tr("Ready"));
-    m_StatusLabel->setProperty("state", lit("ok"));
-  }
-
-  m_StatusLabel->style()->unpolish(m_StatusLabel);
-  m_StatusLabel->style()->polish(m_StatusLabel);
-}
-
-void TerminalViewer::runCommand(const QString &command)
-{
-  if(!m_Started)
-  {
-    appendNotice(tr("the shell is not running, use the restart button"));
-    return;
-  }
-
-  if(!command.isEmpty())
-  {
-    appendChunk({lit("%1 %2\n").arg(m_PromptLabel->text(), command), m_CommandColour, false});
-    writeLine(command);
-    setBusy(true);
-  }
-
-  // Always finish with the marker, even for an empty command: it refreshes the prompt so a bare
-  // Enter still shows where the shell is.
-  sendMarker();
-}
-
-void TerminalViewer::submitInput()
-{
-  const QString command = m_Input->text();
-  m_Input->clear();
-
-  if(!command.trimmed().isEmpty())
-  {
-    if(m_History.isEmpty() || m_History.last() != command)
-      m_History.append(command);
-
-    m_HistoryIndex = m_History.count();
-    m_HistoryDraft.clear();
-  }
-
-  runCommand(command);
-
-  m_Input->setFocus();
-}
-
-void TerminalViewer::clearOutput()
-{
-  m_Output->clear();
-  m_AnsiColour = m_TextColour;
-  m_AnsiBold = false;
-}
-
-void TerminalViewer::copyOutput()
-{
-  QTextCursor cursor = m_Output->textCursor();
-
-  if(cursor.hasSelection())
-    m_Output->copy();
-  else
-    QGuiApplication::clipboard()->setText(m_Output->toPlainText());
-}
-
-void TerminalViewer::saveOutput()
-{
-  const QString path = RDDialog::getSaveFileName(this, tr("Save Terminal Output"),
-                                                 QDir::homePath(),
-                                                 tr("Text files (*.txt);;All files (*)"));
-
-  if(path.isEmpty())
-    return;
-
-  QFile file(path);
-
-  if(!file.open(QIODevice::WriteOnly | QIODevice::Text))
-  {
-    RDDialog::critical(this, tr("Error saving output"),
-                       tr("Could not open '%1' for writing:\n\n%2").arg(path, file.errorString()));
-    return;
-  }
-
-  QTextStream stream(&file);
-  stream.setCodec("UTF-8");
-  stream << m_Output->toPlainText();
-}
-
-void TerminalViewer::zoomFont(int delta)
-{
-  const int size = qBound(MIN_FONT_SIZE, m_FontSize + delta, MAX_FONT_SIZE);
-
-  if(size == m_FontSize)
-    return;
-
-  m_FontSize = size;
-
-  QFont font = Formatter::FixedFont();
-  font.setPointSize(m_FontSize);
-
-  m_Output->setFont(font);
-  m_Output->document()->setDefaultFont(font);
-  m_Input->setFont(font);
-  m_PromptLabel->setFont(font);
-}
-
-bool TerminalViewer::eventFilter(QObject *watched, QEvent *event)
-{
-  if(event->type() == QEvent::KeyPress)
-  {
-    QKeyEvent *key = (QKeyEvent *)event;
-    const Qt::KeyboardModifiers modifiers = key->modifiers();
-
-    if(watched == m_Input)
-    {
-      // History walks with the arrow keys, like the shell's own console would.
-      if(modifiers == Qt::NoModifier && key->key() == Qt::Key_Up)
-      {
-        if(m_History.isEmpty())
-          return true;
-
-        if(m_HistoryIndex >= m_History.count())
-          m_HistoryDraft = m_Input->text();
-
-        m_HistoryIndex = qMax(0, m_HistoryIndex - 1);
-        m_Input->setText(m_History[m_HistoryIndex]);
-        m_Input->setCursorPosition(m_Input->text().length());
-        return true;
-      }
-      else if(modifiers == Qt::NoModifier && key->key() == Qt::Key_Down)
-      {
-        if(m_History.isEmpty())
-          return true;
-
-        if(m_HistoryIndex < m_History.count() - 1)
-        {
-          m_HistoryIndex++;
-          m_Input->setText(m_History[m_HistoryIndex]);
-        }
-        else
-        {
-          m_HistoryIndex = m_History.count();
-          m_Input->setText(m_HistoryDraft);
-        }
-
-        m_Input->setCursorPosition(m_Input->text().length());
-        return true;
-      }
-    }
-
-    // Ctrl+C is left alone in the input line, where it means copy. Ctrl+Shift+C is the shortcut for
-    // taking the output instead.
-    if(modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && key->key() == Qt::Key_C)
-    {
-      copyOutput();
-      return true;
-    }
-
-    if(modifiers == Qt::ControlModifier)
-    {
-      if(key->key() == Qt::Key_L)
-      {
-        clearOutput();
-        return true;
-      }
-
-      if(watched == m_Input)
-      {
-        if(key->key() == Qt::Key_U)
-        {
-          m_Input->clear();
-          return true;
-        }
-        else if(key->key() == Qt::Key_Equal || key->key() == Qt::Key_Plus)
-        {
-          zoomFont(1);
-          return true;
-        }
-        else if(key->key() == Qt::Key_Minus)
-        {
-          zoomFont(-1);
-          return true;
-        }
-      }
-    }
-  }
-
-  return QFrame::eventFilter(watched, event);
-}
-
 void TerminalViewer::showEvent(QShowEvent *event)
 {
-  QFrame::showEvent(event);
-
-  if(m_Input)
-    m_Input->setFocus();
+  QFrame::showEvent(event);resizeRenderer();send(QJsonObject{{lit("type"),lit("focus")}});
 }

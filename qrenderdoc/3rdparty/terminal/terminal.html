@@ -1,0 +1,16 @@
+<!doctype html><html><head><meta charset="utf-8"><style>/*XTERM_CSS*/
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000000}#terminal{position:absolute;inset:8px}.xterm-viewport{scrollbar-color:#555 #000000}</style></head><body><div id="terminal"></div><script>window.onerror=(message)=>chrome.webview.postMessage({type:'error',data:String(message)});</script><script>/*XTERM_JS*/
+</script><script>
+'use strict';
+const term=new Terminal({fontFamily:'Cascadia Mono, Consolas, monospace',fontSize:14,scrollback:5000,cursorBlink:true,allowProposedApi:false,theme:{background:'#000000',foreground:'#d4d4d4',cursor:'#eeeeee',selectionBackground:'#264f78'}});
+term.open(document.getElementById('terminal'));
+const send=m=>chrome.webview.postMessage(m);
+let decoder=new TextDecoder('utf-8');
+function fit(){const d=term._core._renderService.dimensions.css.cell; if(!d.width||!d.height)return;const box=document.getElementById('terminal');const cols=Math.max(2,Math.floor((box.clientWidth-16)/d.width)),rows=Math.max(1,Math.floor(box.clientHeight/d.height));if(cols!==term.cols||rows!==term.rows)term.resize(cols,rows);send({type:'resize',cols:term.cols,rows:term.rows});}
+term.onData(data=>send({type:'input',data}));
+term.onResize(({cols,rows})=>send({type:'resize',cols,rows}));
+term.attachCustomKeyEventHandler(e=>{if(e.type==='keydown'&&e.ctrlKey&&e.shiftKey&&e.code==='KeyC'){send({type:'copy',data:term.getSelection()});return false;}if(e.type==='keydown'&&e.ctrlKey&&e.shiftKey&&e.code==='KeyV'){send({type:'paste'});return false;}return true;});
+chrome.webview.addEventListener('message',e=>{const m=e.data;if(m.type==='output'){const b=Uint8Array.from(atob(m.data),c=>c.charCodeAt(0));term.write(decoder.decode(b,{stream:true}),()=>send({type:'ack',id:m.id}));}else if(m.type==='reset'){decoder=new TextDecoder('utf-8');term.reset();term.focus();fit();}else if(m.type==='paste'){term.paste(m.data);}else if(m.type==='focus')term.focus();});
+let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(fit,50);});
+send({type:'ready'});requestAnimationFrame(()=>{fit();term.focus();});
+</script></body></html>

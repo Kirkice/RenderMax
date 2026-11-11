@@ -1861,7 +1861,7 @@
     <None Include="Code\pyrenderdoc\cosmetics.i" />
     <None Include="Code\pyrenderdoc\parse_reflection.py" />
     <CustomBuild Include="Resources\resources.qrc">
-      <AdditionalInputs>Resources\resources.qrc;Resources\logo.svg;Resources\UE\*.svg;Resources\UE\*.png;Resources\UE\starship.qss;Resources\SDP\*.png;Resources\Line\*.svg;Code\pyrenderdoc\parse_reflection.py;$(QtBinDir)\rcc.exe;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs>Resources\resources.qrc;3rdparty\terminal\terminal.html;3rdparty\terminal\xterm.js;3rdparty\terminal\xterm.css;Resources\logo.svg;Resources\UE\*.svg;Resources\UE\*.png;Resources\UE\starship.qss;Resources\SDP\*.png;Resources\Line\*.svg;Code\pyrenderdoc\parse_reflection.py;$(QtBinDir)\rcc.exe;%(AdditionalInputs)</AdditionalInputs>
       <Command>"$(QtBinDir)\rcc.exe" -name resources Resources\resources.qrc -o "$(IntDir)generated\qrc_resources.cpp"</Command>
       <Message>RCC resources.qrc</Message>
       <Outputs>$(IntDir)generated\qrc_resources.cpp</Outputs>
@@ -2177,4 +2177,7 @@
   </ItemGroup>
   <Import Project="custom_qt.props" />
   <Import Project="malioc.props" />
+  <Target Name="CopyTerminalWebViewLoader" AfterTargets="Build">
+    <Copy SourceFiles="$(ProjectDir)3rdparty/terminal/WebView2Loader.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'$(Platform)' == 'x64'" />
+  </Target>
 </Project>

@@ -502,3 +502,7 @@ HEADERS += $$_PRO_FILE_PWD_/3rdparty/scintilla/lexlib/*.h \
     $$_PRO_FILE_PWD_/3rdparty/scintilla/qt/ScintillaEdit/*.h \
     $$_PRO_FILE_PWD_/3rdparty/scintilla/qt/ScintillaEditBase/*.h
 
+
+win32:contains(QT_ARCH, x86_64) {
+    QMAKE_POST_LINK += $$QMAKE_COPY $$shell_path($$PWD/3rdparty/terminal/WebView2Loader.dll) $$shell_path($$OUT_PWD/WebView2Loader.dll) $$escape_expand(\n\t)
+}

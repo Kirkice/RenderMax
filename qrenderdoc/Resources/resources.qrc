@@ -131,4 +131,9 @@
         <file>SDP/trace-zoom.png</file>
         <file>SDP/trace-zoom-on.png</file>
     </qresource>
+ <qresource prefix="/terminal">
+  <file alias="terminal.html">../3rdparty/terminal/terminal.html</file>
+  <file alias="xterm.js">../3rdparty/terminal/xterm.js</file>
+  <file alias="xterm.css">../3rdparty/terminal/xterm.css</file>
+ </qresource>
 </RCC>

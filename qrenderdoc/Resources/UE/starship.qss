@@ -132,7 +132,3 @@ QFrame#terminalToolbar QLabel { color: #808080; padding: 0 2px; }
 QFrame#terminalToolbar QLabel#terminalStatus[state="ok"] { color: #6FCF97; }
 QFrame#terminalToolbar QLabel#terminalStatus[state="busy"] { color: #D7BA7D; }
 QFrame#terminalToolbar QLabel#terminalStatus[state="error"] { color: #FF8585; }
-QPlainTextEdit#terminalOutput { background: #1E1E1E; color: #D4D4D4; border: 0; selection-background-color: #0F4C81; selection-color: #FFFFFF; }
-QFrame#terminalInputFrame { background: #1A1A1A; border: 0; border-top: 1px solid #383838; }
-QFrame#terminalInputFrame QLabel#terminalPrompt { color: #6FCF97; }
-QFrame#terminalInputFrame QLineEdit#terminalInput { background: transparent; border: 0; color: #D4D4D4; selection-background-color: #0F4C81; selection-color: #FFFFFF; }
