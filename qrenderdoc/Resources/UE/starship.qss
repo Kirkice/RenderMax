@@ -53,6 +53,9 @@ QPushButton:focus, QToolButton:focus { border-color: #808080; }
 QPushButton:disabled, QToolButton:disabled { color: #606060; background: #2F2F2F; }
 QToolBar QToolButton, QToolButton[autoRaise="true"] { color: #C0C0C0; background: transparent; border: 1px solid transparent; padding: 2px; }
 QToolButton::menu-indicator { image: url(:/UE/chevron-down.svg); width: 12px; height: 12px; }
+/* The arrow is drawn inside the button on top of whatever else is there, so a button that only
+   carries an icon needs the arrow's width on either side of that icon to keep them apart. */
+QToolButton[popupMode="1"], QToolButton[popupMode="2"] { min-width: 30px; }
 QToolBar QToolButton:hover, QToolButton[autoRaise="true"]:hover { background: #383838; }
 QToolBar QToolButton:checked, QToolButton[autoRaise="true"]:checked { background: #0050A0; }
 QHeaderView::section { color: #C0C0C0; background: #2F2F2F; border: 0; border-right: 1px solid #242424; border-bottom: 1px solid #0F0F0F; padding: 4px 6px; font-weight: bold; }

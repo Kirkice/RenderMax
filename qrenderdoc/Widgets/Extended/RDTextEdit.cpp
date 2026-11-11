@@ -24,11 +24,13 @@
 
 #include "RDTextEdit.h"
 #include <QAbstractItemView>
+#include <QComboBox>
 #include <QCompleter>
 #include <QKeyEvent>
 #include <QPainter>
 #include <QScrollBar>
 #include <QStringListModel>
+#include <QSvgRenderer>
 #include "Code/QRDUtils.h"
 
 RDTextEdit::RDTextEdit(QWidget *parent) : QTextEdit(parent)
@@ -88,19 +90,12 @@ void RDTextEdit::setDropDown()
 
   m_Drop = new RDTextEditDropDownButton(this);
   m_Drop->setToolButtonStyle(Qt::ToolButtonIconOnly);
-  m_Drop->setArrowType(Qt::DownArrow);
   QObject::connect(m_Drop, &QToolButton::clicked, [this]() { emit(dropDownClicked()); });
 
-  QStyleOptionComboBox opt;
-  opt.rect = rect();
-  QRect r = style()->subControlRect(QStyle::CC_ComboBox, &opt, QStyle::SC_ComboBoxArrow, this);
-
-  setViewportMargins(0, 0, r.width(), 0);
-  setMinimumHeight(r.height() + 2);
-
-  m_Drop->setFixedSize(r.size());
-
   updateDropButtonGeometry();
+
+  // leave room for the arrow so the text never runs underneath it
+  setMinimumHeight(m_Drop->height() + 2);
 }
 
 void RDTextEdit::setHoverTrack()
@@ -382,13 +377,27 @@ void RDTextEdit::resizeEvent(QResizeEvent *e)
 
 void RDTextEdit::updateDropButtonGeometry()
 {
-  if(m_Drop)
-  {
-    QRect r = contentsRect();
-    r.setLeft(r.right() - m_Drop->rect().width() + 1);
-    r.setSize(m_Drop->size());
-    m_Drop->setGeometry(r);
-  }
+  if(!m_Drop)
+    return;
+
+  // Size and place the button exactly like a combo box places its drop-down, using a combo box to
+  // ask the style: as large as the arrow cell, flush inside the frame. This has to be recomputed on
+  // every resize, because the height of the cell follows the height of the widget.
+  QComboBox reference;
+  QStyleOptionComboBox opt;
+  opt.initFrom(&reference);
+  opt.rect = rect();
+  opt.editable = true;
+  const QRect cell =
+      reference.style()->subControlRect(QStyle::CC_ComboBox, &opt, QStyle::SC_ComboBoxArrow,
+                                       &reference);
+
+  m_Drop->setFixedSize(cell.size());
+  m_Drop->setGeometry(QRect(rect().right() - cell.width(), (height() - cell.height()) / 2,
+                            cell.width(), cell.height()));
+
+  if(viewportMargins().right() != cell.width())
+    setViewportMargins(0, 0, cell.width(), 0);
 }
 
 bool RDTextEdit::event(QEvent *e)
@@ -412,25 +421,42 @@ RDTextEditDropDownButton::~RDTextEditDropDownButton()
 {
 }
 
-void RDTextEditDropDownButton::paintEvent(QPaintEvent *e)
+void RDTextEditDropDownButton::paintEvent(QPaintEvent *)
 {
+  // Draw the drop-down on the widget that takes the clicks. The size comes from
+  // RDTextEdit::updateDropButtonGeometry(), which asks the style for the same cell a combo box gets,
+  // and the arrow is the same chevron-down.svg that the combo boxes draw - so the two look the same
+  // side by side in every style and theme.
+  // 12x12 logical pixels is the size the stylesheets give ::down-arrow
+  const int arrow = qMin(12, qMin(width(), height()));
+  // the stylesheets centre a smaller image by rounding up, so round up here too
+  const QRect arrowRect(QPoint((width() - arrow + 1) / 2, (height() - arrow + 1) / 2),
+                        QSize(arrow, arrow));
+
+  // .. and the icon itself is a white line drawing, which only reads on a dark background
+  QColor colour = palette().color(QPalette::WindowText);
+  if(palette().color(QPalette::Base).lightness() < 128)
+    colour = Qt::white;
+
+  QSvgRenderer svg(QStringLiteral(":/UE/chevron-down.svg"));
+
+  const qreal dpr = devicePixelRatioF();
+  QImage image(arrowRect.size() * dpr, QImage::Format_ARGB32_Premultiplied);
+  image.fill(Qt::transparent);
+  {
+    QPainter icon(&image);
+    svg.render(&icon, QRectF(QPointF(0, 0), QSizeF(image.size())));
+    icon.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    icon.fillRect(image.rect(), colour);
+  }
+  image.setDevicePixelRatio(dpr);
+
   QPainter p(this);
 
-  QStyleOptionToolButton butt;
+  // the separator between the text and the drop-down, as on a combo box
+  p.setPen(palette().color(QPalette::Mid));
+  p.drawLine(0, 0, 0, height() - 1);
 
-  initStyleOption(&butt);
-
-  QStyleOptionComboBox opt;
-
-  opt.direction = butt.direction;
-  opt.rect = butt.rect;
-  opt.fontMetrics = butt.fontMetrics;
-  opt.palette = butt.palette;
-  opt.state = butt.state;
-  opt.subControls = QStyle::SC_ComboBoxArrow;
-  opt.activeSubControls = QStyle::SC_ComboBoxArrow;
-  opt.editable = true;
-  opt.frame = false;
-
-  style()->drawComplexControl(QStyle::CC_ComboBox, &opt, &p, this);
+  p.setRenderHint(QPainter::SmoothPixmapTransform);
+  p.drawImage(arrowRect.topLeft(), image);
 }
