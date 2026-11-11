@@ -256,7 +256,7 @@
     <bool>true</bool>
    </property>
   </widget>
-  <widget class="QFrame" name="toolbar">
+  <widget class="QFrame" name="shaderToolbar">
    <property name="geometry">
     <rect>
      <x>20</x>
@@ -443,16 +443,6 @@
       </property>
       <property name="autoRaise">
        <bool>true</bool>
-      </property>
-     </widget>
-    </item>
-    <item>
-     <widget class="QLabel" name="editStatusLabel">
-      <property name="toolTip">
-       <string>The replay currently has the original shader active</string>
-      </property>
-      <property name="text">
-       <string>Status: Original Shader Active</string>
       </property>
      </widget>
     </item>

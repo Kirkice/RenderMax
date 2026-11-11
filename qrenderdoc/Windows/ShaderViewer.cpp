@@ -35,6 +35,8 @@
 #include <QPainter>
 #include <QPen>
 #include <QRegularExpression>
+#include <QStyle>
+#include <QTimer>
 #include <QSet>
 #include <QShortcut>
 #include <QToolTip>
@@ -233,6 +235,20 @@ ShaderViewer::ShaderViewer(ICaptureContext &ctx, QWidget *parent)
 {
   ui->setupUi(this);
 
+  // Coalesce the work that has to re-scan the whole source: nesting colours and the
+  // symbol outline would otherwise run on every single keystroke.
+  m_CodeRefreshTimer = new QTimer(this);
+  m_CodeRefreshTimer->setSingleShot(true);
+  m_CodeRefreshTimer->setInterval(250);
+  QObject::connect(m_CodeRefreshTimer, &QTimer::timeout, [this]() {
+    if(!m_CodeEditor)
+      return;
+
+    updateRainbowBrackets(m_CodeEditor);
+    rebuildSymbolOutline(m_CodeEditor);
+    updateStatusLineCount(m_CodeEditor);
+  });
+
   ui->constants->setFont(Formatter::PreferredFont());
   ui->accessedResources->setFont(Formatter::PreferredFont());
   ui->debugVars->setFont(Formatter::PreferredFont());
@@ -327,11 +343,14 @@ ShaderViewer::ShaderViewer(ICaptureContext &ctx, QWidget *parent)
     ui->snippets->setMenu(snippetsMenu);
   }
 
+  setupStatusBar();
+
   QVBoxLayout *layout = new QVBoxLayout(this);
   layout->setSpacing(3);
   layout->setContentsMargins(3, 3, 3, 3);
-  layout->addWidget(ui->toolbar);
+  layout->addWidget(ui->shaderToolbar);
   layout->addWidget(ui->docking);
+  layout->addWidget(m_StatusBar);
 
   m_Ctx.AddCaptureViewer(this);
 }
@@ -347,6 +366,7 @@ void ShaderViewer::editShader(ResourceId id, ShaderStage stage, const QString &e
 
   m_Stage = stage;
   m_Flags = flags;
+  updateStatusStage();
 
   m_CustomShader = (id == ResourceId());
   m_EditingShader = id;
@@ -424,7 +444,8 @@ void ShaderViewer::editShader(ResourceId id, ShaderStage stage, const QString &e
     ui->refresh->setText(tr("Refresh"));
     ui->resetEdits->hide();
     ui->unrefresh->hide();
-    ui->editStatusLabel->hide();
+    m_StatusMode->hide();
+    m_StatusCompile->hide();
   }
   else
   {
@@ -459,6 +480,13 @@ void ShaderViewer::editShader(ResourceId id, ShaderStage stage, const QString &e
     ScintillaEdit *scintilla = AddFileScintilla(name, text, shaderEncoding);
 
     scintilla->setReadOnly(false);
+
+    updateRainbowBrackets(scintilla);
+    if(m_CodeEditor == NULL)
+    {
+      m_CodeEditor = scintilla;
+      rebuildSymbolOutline(scintilla);
+    }
 
     QObject::connect(scintilla, &ScintillaEdit::modified,
                      [this](int type, int, int, int, const QByteArray &, int, int, int) {
@@ -558,6 +586,7 @@ void ShaderViewer::debugShader(const ShaderReflection *shader, ResourceId pipeli
   if(m_ShaderDetails)
   {
     m_Stage = m_ShaderDetails->stage;
+    updateStatusStage();
 
     QPointer<ShaderViewer> me(this);
 
@@ -699,7 +728,8 @@ void ShaderViewer::debugShader(const ShaderReflection *shader, ResourceId pipeli
   ui->refresh->hide();
   ui->unrefresh->hide();
   ui->resetEdits->hide();
-  ui->editStatusLabel->hide();
+  m_StatusMode->hide();
+  m_StatusCompile->hide();
   ui->snippets->hide();
   ui->editSep->hide();
 
@@ -1722,6 +1752,41 @@ ScintillaEdit *ShaderViewer::MakeEditor(const QString &name, const QString &text
     ret->styleSetBack(COMPILE_ERROR_STYLE, SCINTILLA_COLOUR(68, 71, 90));
     ret->styleSetFore(COMPILE_ERROR_STYLE, SCINTILLA_COLOUR(255, 85, 85));
     ret->annotationSetVisible(ANNOTATION_BOXED);
+
+    // Bracket nesting colours reuse Scintilla's text-foreground indicator so the
+    // glyph itself is tinted instead of getting a box drawn around it.
+    static const int rainbowDark[RAINBOW_COLOURS][3] = {
+        {255, 121, 198}, {241, 250, 140}, {139, 233, 253},
+        {189, 147, 249}, {80, 250, 123},  {255, 184, 108},
+    };
+    static const int rainbowLight[RAINBOW_COLOURS][3] = {
+        {170, 0, 110}, {140, 110, 0}, {0, 110, 140},
+        {110, 60, 170}, {0, 130, 60}, {190, 90, 0},
+    };
+    const bool darkTheme = IsDarkTheme();
+    for(int i = 0; i < RAINBOW_COLOURS; i++)
+    {
+      const int *col = darkTheme ? rainbowDark[i] : rainbowLight[i];
+      ret->indicSetStyle(RAINBOW_INDICATOR + i, INDIC_TEXTFORE);
+      ret->indicSetFore(RAINBOW_INDICATOR + i, SCINTILLA_COLOUR(col[0], col[1], col[2]));
+    }
+
+    QObject::connect(ret, &ScintillaEdit::updateUi, [this, ret]() {
+      if(ret->readOnly())
+        return;
+
+      setStatusEditor(ret);
+      updateStatusPosition(ret);
+    });
+
+    QObject::connect(ret, &ScintillaEdit::modified,
+                     [this, ret](int, int, int, int, const QByteArray &, int, int, int) {
+                       if(ret->readOnly())
+                         return;
+
+                       m_CodeEditor = ret;
+                       m_CodeRefreshTimer->start();
+                     });
   }
 
   ret->setTabWidth(4);
@@ -4131,12 +4196,12 @@ void ShaderViewer::updateEditState()
     // check if the shader is replaced and update the status
     if(m_Ctx.IsResourceReplaced(m_EditingShader))
     {
-      statusString = tr("Status: Edited Shader Active");
+      statusString = tr("Edited Shader Active");
       statusTooltip = tr("The replay currently has the original shader active");
     }
     else
     {
-      statusString = tr("Status: Original Shader Active");
+      statusString = tr("Original Shader Active");
       statusTooltip = tr("The replay currently has an edited version of the shader active");
 
       // if we expected it to be saved something went wrong
@@ -4149,8 +4214,8 @@ void ShaderViewer::updateEditState()
       }
     }
 
-    ui->editStatusLabel->setText(statusString);
-    ui->editStatusLabel->setToolTip(statusTooltip);
+    m_StatusMode->setText(statusString);
+    m_StatusMode->setToolTip(statusTooltip);
 
     if(m_Modified)
     {
@@ -6171,7 +6236,317 @@ void ShaderViewer::ShowErrors(const rdcstr &errors)
     diagnosticSource->annotationSetStyle(lineNumber, COMPILE_ERROR_STYLE);
   }
 
+  int errorCount = 0;
+  for(const QString &diagnostic : errorLines)
+    if(diagnostic.contains(lit("error"), Qt::CaseInsensitive))
+      errorCount++;
+
+  if(errorCount > 0)
+    setCompileStatus(tr("%n error(s)", "", errorCount), "error");
+  else if(errors.isEmpty())
+    setCompileStatus(tr("Compiled"), "ok");
+  else
+    setCompileStatus(tr("Compiled with warnings"), "warn");
+
   updateEditState();
+}
+
+static QFrame *makeStatusSeparator(QWidget *parent)
+{
+  QFrame *sep = new QFrame(parent);
+  sep->setObjectName(lit("shaderStatusSep"));
+  sep->setFrameShape(QFrame::VLine);
+  sep->setFrameShadow(QFrame::Plain);
+  sep->setFixedSize(1, 12);
+  return sep;
+}
+
+void ShaderViewer::setupStatusBar()
+{
+  m_StatusBar = new QFrame(this);
+  m_StatusBar->setObjectName(lit("shaderStatusBar"));
+  m_StatusBar->setFrameShape(QFrame::NoFrame);
+  m_StatusBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  m_StatusBar->setFixedHeight(24);
+
+  QHBoxLayout *bar = new QHBoxLayout(m_StatusBar);
+  bar->setSpacing(8);
+  bar->setContentsMargins(8, 0, 8, 0);
+
+  const QFont statusFont = Formatter::PreferredFont();
+
+  m_StatusStage = new QLabel(m_StatusBar);
+  m_StatusStage->setObjectName(lit("shaderStatusStage"));
+  m_StatusStage->setFont(statusFont);
+  bar->addWidget(m_StatusStage);
+
+  bar->addWidget(makeStatusSeparator(m_StatusBar));
+
+  m_StatusSymbols = new QComboBox(m_StatusBar);
+  m_StatusSymbols->setObjectName(lit("shaderStatusSymbols"));
+  m_StatusSymbols->setFont(statusFont);
+  m_StatusSymbols->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  m_StatusSymbols->setMinimumContentsLength(18);
+  m_StatusSymbols->setMaximumWidth(300);
+  m_StatusSymbols->setToolTip(
+      tr("Jump to a function, #define, struct or uniform in the current file"));
+  bar->addWidget(m_StatusSymbols);
+
+  QObject::connect(m_StatusSymbols, OverloadedSlot<int>::of(&QComboBox::activated),
+                   [this](int index) { jumpToSymbol(index); });
+
+  bar->addItem(new QSpacerItem(20, 10, QSizePolicy::Expanding, QSizePolicy::Minimum));
+
+  m_StatusPos = new QLabel(m_StatusBar);
+  m_StatusPos->setObjectName(lit("shaderStatusPos"));
+  m_StatusPos->setFont(statusFont);
+  m_StatusPos->setToolTip(tr("Caret line and column"));
+  bar->addWidget(m_StatusPos);
+
+  bar->addWidget(makeStatusSeparator(m_StatusBar));
+
+  m_StatusLines = new QLabel(m_StatusBar);
+  m_StatusLines->setObjectName(lit("shaderStatusLines"));
+  m_StatusLines->setFont(statusFont);
+  bar->addWidget(m_StatusLines);
+
+  bar->addWidget(makeStatusSeparator(m_StatusBar));
+
+  m_StatusMode = new QLabel(m_StatusBar);
+  m_StatusMode->setObjectName(lit("shaderStatusMode"));
+  m_StatusMode->setFont(statusFont);
+  m_StatusMode->setToolTip(tr("The replay currently has the original shader active"));
+  bar->addWidget(m_StatusMode);
+
+  bar->addWidget(makeStatusSeparator(m_StatusBar));
+
+  m_StatusCompile = new QLabel(m_StatusBar);
+  m_StatusCompile->setObjectName(lit("shaderStatusCompile"));
+  m_StatusCompile->setFont(statusFont);
+  m_StatusCompile->setProperty("state", lit("idle"));
+  m_StatusCompile->setText(tr("Not compiled"));
+  bar->addWidget(m_StatusCompile);
+}
+
+void ShaderViewer::updateStatusStage()
+{
+  if(!m_StatusStage)
+    return;
+
+  m_StatusStage->setText(ToQStr(m_Stage, m_Ctx.APIProps().pipelineType));
+}
+
+void ShaderViewer::setStatusEditor(ScintillaEdit *editor)
+{
+  if(!editor || m_CodeEditor == editor)
+    return;
+
+  m_CodeEditor = editor;
+
+  updateStatusPosition(editor);
+  updateStatusLineCount(editor);
+  rebuildSymbolOutline(editor);
+  updateRainbowBrackets(editor);
+}
+
+void ShaderViewer::updateStatusPosition(ScintillaEdit *editor)
+{
+  if(!editor || !m_StatusPos)
+    return;
+
+  const sptr_t pos = editor->currentPos();
+  const sptr_t line = editor->lineFromPosition(pos);
+
+  m_StatusPos->setText(tr("Ln %1, Col %2").arg(line + 1).arg(editor->column(pos) + 1));
+}
+
+void ShaderViewer::updateStatusLineCount(ScintillaEdit *editor)
+{
+  if(!editor || !m_StatusLines)
+    return;
+
+  m_StatusLines->setText(tr("%1 lines").arg((int)editor->lineCount()));
+}
+
+void ShaderViewer::setCompileStatus(const QString &text, const char *state)
+{
+  if(!m_StatusCompile)
+    return;
+
+  m_StatusCompile->setText(text);
+  m_StatusCompile->setProperty("state", QString::fromLatin1(state));
+
+  // The colour comes from the stylesheet, which only re-evaluates the selector when
+  // the widget is repolished after the property changes.
+  m_StatusCompile->style()->unpolish(m_StatusCompile);
+  m_StatusCompile->style()->polish(m_StatusCompile);
+}
+
+void ShaderViewer::rebuildSymbolOutline(ScintillaEdit *editor)
+{
+  if(!m_StatusSymbols)
+    return;
+
+  m_StatusSymbols->clear();
+  m_SymbolLines.clear();
+
+  if(!editor)
+    return;
+
+  m_StatusSymbols->addItem(tr("Go to symbol..."));
+  m_SymbolLines.push_back(-1);
+
+  const QString text = QString::fromUtf8(editor->getText(editor->textLength() + 1));
+  const QStringList lines = text.split(QLatin1Char('\n'));
+
+  const QRegularExpression defineExpr(lit("^\\s*#\\s*define\\s+([A-Za-z_]\\w*)"));
+  const QRegularExpression typeExpr(
+      lit("^\\s*(?:struct|cbuffer|class|interface)\\s+([A-Za-z_]\\w*)"));
+  const QRegularExpression uniformExpr(
+      lit("^\\s*uniform\\s+[A-Za-z_]\\w*\\s+([A-Za-z_]\\w*)\\s*(?:\\[[^\\]]*\\])?\\s*;"));
+  const QRegularExpression functionExpr(
+      lit("^[A-Za-z_][\\w\\s\\*&<>,\\[\\]]\\s([A-Za-z_]\\w*)\\s*\\([^;{}]*\\)\\s*$"));
+
+  for(int i = 0; i < lines.count() && m_SymbolLines.size() < 500; i++)
+  {
+    const QString line = lines[i];
+    if(line.trimmed().isEmpty())
+      continue;
+
+    QRegularExpressionMatch match;
+    QString label;
+
+    if((match = defineExpr.match(line)).hasMatch())
+      label = tr("#define %1").arg(match.captured(1));
+    else if((match = typeExpr.match(line)).hasMatch())
+      label = tr("struct %1").arg(match.captured(1));
+    else if((match = uniformExpr.match(line)).hasMatch())
+      label = tr("uniform %1").arg(match.captured(1));
+    else if((match = functionExpr.match(line)).hasMatch())
+    {
+      // Function-looking lines also catch control flow statements, which the
+      // completion list would just be noise here.
+      const QString name = match.captured(1);
+      if(name == lit("if") || name == lit("for") || name == lit("while") ||
+         name == lit("switch") || name == lit("return") || name == lit("else") ||
+         name == lit("do") || name == lit("discard"))
+        continue;
+
+      label = tr("%1()").arg(name);
+    }
+    else
+      continue;
+
+    m_StatusSymbols->addItem(label);
+    m_SymbolLines.push_back(i);
+  }
+
+  m_StatusSymbols->setCurrentIndex(0);
+}
+
+void ShaderViewer::jumpToSymbol(int index)
+{
+  if(index <= 0 || !m_StatusSymbols || !m_CodeEditor)
+    return;
+
+  const int line = m_SymbolLines.value(index, -1);
+  if(line < 0)
+    return;
+
+  m_CodeEditor->gotoLine(line);
+  m_CodeEditor->scrollCaret();
+  m_CodeEditor->setFocus(true);
+
+  m_StatusSymbols->setCurrentIndex(0);
+}
+
+void ShaderViewer::updateRainbowBrackets(ScintillaEdit *editor)
+{
+  if(!editor || editor->readOnly())
+    return;
+
+  const sptr_t length = editor->textLength();
+
+  for(int i = 0; i < RAINBOW_COLOURS; i++)
+  {
+    editor->setIndicatorCurrent(RAINBOW_INDICATOR + i);
+    editor->indicatorClearRange(0, length);
+  }
+
+  const QByteArray text = editor->getText(length + 1);
+
+  // 0 = code, 1 = line comment, 2 = block comment, 3 = string, 4 = character literal.
+  int state = 0;
+  int depth = 0;
+
+  for(int i = 0; i < text.size(); i++)
+  {
+    const char c = text[i];
+    const char next = (i + 1 < text.size()) ? text[i + 1] : '\0';
+
+    if(state == 1)
+    {
+      if(c == '\n')
+        state = 0;
+      continue;
+    }
+    else if(state == 2)
+    {
+      if(c == '*' && next == '/')
+      {
+        state = 0;
+        i++;
+      }
+      continue;
+    }
+    else if(state == 3 || state == 4)
+    {
+      if(c == '\\')
+        i++;
+      else if((state == 3 && c == '"') || (state == 4 && c == '\''))
+        state = 0;
+      continue;
+    }
+
+    if(c == '/' && next == '/')
+    {
+      state = 1;
+      i++;
+      continue;
+    }
+    else if(c == '/' && next == '*')
+    {
+      state = 2;
+      i++;
+      continue;
+    }
+    else if(c == '"')
+    {
+      state = 3;
+      continue;
+    }
+    else if(c == '\'')
+    {
+      state = 4;
+      continue;
+    }
+
+    if(c == '(' || c == '[' || c == '{')
+    {
+      editor->setIndicatorCurrent(RAINBOW_INDICATOR + (depth % RAINBOW_COLOURS));
+      editor->indicatorFillRange(i, 1);
+      depth++;
+    }
+    else if(c == ')' || c == ']' || c == '}')
+    {
+      if(depth > 0)
+        depth--;
+
+      editor->setIndicatorCurrent(RAINBOW_INDICATOR + (depth % RAINBOW_COLOURS));
+      editor->indicatorFillRange(i, 1);
+    }
+  }
+
 }
 
 void ShaderViewer::AddWatch(const rdcstr &variable)

@@ -25,6 +25,8 @@
 #pragma once
 
 #include <QFrame>
+#include <QPointer>
+#include <QTimer>
 #include <QSemaphore>
 #include <QSet>
 #include <QStyledItemDelegate>
@@ -357,6 +359,11 @@ private:
   static const int INDICATOR_COMPILE_ERROR = 8;
   static const int COMPILE_ERROR_STYLE = 40;
 
+  // Nesting colours for brackets. The low indicators are already claimed by find,
+  // regex highlighting and compile errors, so these sit above the debug markers.
+  static const int RAINBOW_INDICATOR = 24;
+  static const int RAINBOW_COLOURS = 6;
+
   QString targetName(const ShaderProcessingTool &disasm);
 
   void addFileList();
@@ -413,6 +420,27 @@ private:
   const ShaderVariable *GetDebugVariable(const DebugVariableReference &r);
 
   void updateEditState();
+
+  void setupStatusBar();
+  void updateStatusStage();
+  void setStatusEditor(ScintillaEdit *editor);
+  void updateStatusPosition(ScintillaEdit *editor);
+  void updateStatusLineCount(ScintillaEdit *editor);
+  void setCompileStatus(const QString &text, const char *state);
+  void rebuildSymbolOutline(ScintillaEdit *editor);
+  void jumpToSymbol(int index);
+  void updateRainbowBrackets(ScintillaEdit *editor);
+
+  QFrame *m_StatusBar = NULL;
+  QLabel *m_StatusStage = NULL;
+  QComboBox *m_StatusSymbols = NULL;
+  QLabel *m_StatusPos = NULL;
+  QLabel *m_StatusLines = NULL;
+  QLabel *m_StatusMode = NULL;
+  QLabel *m_StatusCompile = NULL;
+  QTimer *m_CodeRefreshTimer = NULL;
+  QPointer<ScintillaEdit> m_CodeEditor;
+  QList<int> m_SymbolLines;
 
   enum StepMode
   {

@@ -81,7 +81,22 @@ ThumbnailStrip QScrollArea { border: 1px solid #383838; border-radius: 2px; }
    toolbar: one hairline separates them from the code and the labels recede behind the fields. */
 QWidget#compilationGroup { background: #1A1A1A; border-top: 1px solid #383838; }
 QWidget#compilationGroup QLabel { color: #808080; }
-QLabel#editStatusLabel { color: #808080; padding-left: 6px; }
+/* The shader window status strip sits under a hairline and keeps its labels dimmer than
+   their values, so the code above stays the loudest thing in the window. */
+QFrame#shaderStatusBar { background: #1A1A1A; border-top: 1px solid #383838; }
+QFrame#shaderStatusBar QLabel { color: #808080; }
+QFrame#shaderStatusBar QLabel#shaderStatusStage { color: #C0C0C0; }
+QFrame#shaderStatusBar QLabel#shaderStatusCompile[state="ok"] { color: #6FCF97; }
+QFrame#shaderStatusBar QLabel#shaderStatusCompile[state="warn"] { color: #D7BA7D; }
+QFrame#shaderStatusBar QLabel#shaderStatusCompile[state="error"] { color: #FF8585; }
+QFrame#shaderStatusSep { background: #383838; border: 0; }
+QFrame#shaderStatusBar QComboBox { background: transparent; border: 1px solid transparent; padding: 0 4px; }
+QFrame#shaderStatusBar QComboBox:hover { background: #242424; border: 1px solid #383838; }
+/* Applying changes is the one action that leaves the window, so it is the only accented
+   button in the shader toolbar. */
+QFrame#shaderToolbar QToolButton#refresh { background: #0050A0; border: 1px solid #0070E0; border-radius: 2px; color: #FFFFFF; padding: 1px 8px; }
+QFrame#shaderToolbar QToolButton#refresh:hover { background: #0070E0; }
+QFrame#shaderToolbar QToolButton#refresh:pressed { background: #003C78; }
 QCheckBox, QRadioButton { color: #C0C0C0; spacing: 6px; }
 QCheckBox:disabled, QRadioButton:disabled { color: #606060; }
 QCheckBox::indicator { width: 12px; height: 12px; background: #0F0F0F; border: 1px solid #383838; border-radius: 2px; }
