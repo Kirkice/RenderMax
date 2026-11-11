@@ -2,7 +2,14 @@
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000000}#terminal{position:absolute;inset:8px}.xterm-viewport{scrollbar-color:#555 #000000}</style></head><body><div id="terminal"></div><script>window.onerror=(message)=>chrome.webview.postMessage({type:'error',data:String(message)});</script><script>/*XTERM_JS*/
 </script><script>
 'use strict';
-const term=new Terminal({fontFamily:'Cascadia Mono, Consolas, monospace',fontSize:14,scrollback:5000,cursorBlink:true,allowProposedApi:false,theme:{background:'#000000',foreground:'#d4d4d4',cursor:'#eeeeee',selectionBackground:'#264f78'}});
+// Windows Terminal's default Campbell palette. Indexed ANSI colors are not RGB
+// literals: leaving xterm's Tango defaults here changes shell and TUI colors.
+const term=new Terminal({fontFamily:'Cascadia Mono, Consolas, monospace',fontSize:14,scrollback:5000,cursorBlink:true,allowProposedApi:false,minimumContrastRatio:1,drawBoldTextInBrightColors:true,theme:{
+background:'#000000',foreground:'#cccccc',cursor:'#ffffff',selectionBackground:'#ffffff40',
+black:'#0c0c0c',red:'#c50f1f',green:'#13a10e',yellow:'#c19c00',
+blue:'#0037da',magenta:'#881798',cyan:'#3a96dd',white:'#cccccc',
+brightBlack:'#767676',brightRed:'#e74856',brightGreen:'#16c60c',brightYellow:'#f9f1a5',
+brightBlue:'#3b78ff',brightMagenta:'#b4009e',brightCyan:'#61d6d6',brightWhite:'#f2f2f2'}});
 term.open(document.getElementById('terminal'));
 const send=m=>chrome.webview.postMessage(m);
 let decoder=new TextDecoder('utf-8');

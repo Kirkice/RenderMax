@@ -2178,6 +2178,6 @@
   <Import Project="custom_qt.props" />
   <Import Project="malioc.props" />
   <Target Name="CopyTerminalWebViewLoader" AfterTargets="Build">
-    <Copy SourceFiles="$(ProjectDir)3rdparty/terminal/WebView2Loader.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'$(Platform)' == 'x64'" />
+    <Copy SourceFiles="$(ProjectDir)3rdparty/terminal/WebView2Loader.dll;$(ProjectDir)3rdparty/terminal/conpty/conpty.dll;$(ProjectDir)3rdparty/terminal/conpty/OpenConsole.exe" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'$(Platform)' == 'x64'" />
   </Target>
 </Project>

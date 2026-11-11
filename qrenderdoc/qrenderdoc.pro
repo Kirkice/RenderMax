@@ -505,4 +505,6 @@ HEADERS += $$_PRO_FILE_PWD_/3rdparty/scintilla/lexlib/*.h \
 
 win32:contains(QT_ARCH, x86_64) {
     QMAKE_POST_LINK += $$QMAKE_COPY $$shell_path($$PWD/3rdparty/terminal/WebView2Loader.dll) $$shell_path($$OUT_PWD/WebView2Loader.dll) $$escape_expand(\n\t)
+    QMAKE_POST_LINK += $$QMAKE_COPY $$shell_path($$PWD/3rdparty/terminal/conpty/conpty.dll) $$shell_path($$OUT_PWD/conpty.dll) $$escape_expand(\n\t)
+    QMAKE_POST_LINK += $$QMAKE_COPY $$shell_path($$PWD/3rdparty/terminal/conpty/OpenConsole.exe) $$shell_path($$OUT_PWD/OpenConsole.exe) $$escape_expand(\n\t)
 }

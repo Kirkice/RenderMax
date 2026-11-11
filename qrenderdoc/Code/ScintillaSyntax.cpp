@@ -502,7 +502,7 @@ void ConfigureSyntax(ScintillaEdit *scintilla, int language)
   QColor text = scintilla->palette().color(QPalette::Text);
 
   if(darkTheme)
-    base = codeEditor ? QColor(40, 42, 54) : QColor(30, 30, 30);
+    base = QColor(30, 30, 30);
   if(codeEditor)
     text = QColor(248, 248, 242);
 

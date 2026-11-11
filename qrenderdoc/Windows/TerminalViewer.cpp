@@ -65,6 +65,7 @@ struct TerminalViewer::Native
   ResizeFn resize = NULL;
   CloseFn close = NULL;
   HMODULE loader = NULL;
+  HMODULE conpty = NULL;
   std::thread writer;
   std::mutex mutex;
   std::condition_variable wake;
@@ -127,12 +128,13 @@ TerminalViewer::~TerminalViewer()
 void TerminalViewer::initialise()
 {
 #ifdef WIN32
-  HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-  n->create = (Native::CreateFn)GetProcAddress(kernel,"CreatePseudoConsole");
-  n->resize = (Native::ResizeFn)GetProcAddress(kernel,"ResizePseudoConsole");
-  n->close = (Native::CloseFn)GetProcAddress(kernel,"ClosePseudoConsole");
+  const QString conptyPath = QDir(QCoreApplication::applicationDirPath()).filePath(lit("conpty.dll"));
+  n->conpty = LoadLibraryW((LPCWSTR)conptyPath.utf16());
+  n->create = n->conpty ? (Native::CreateFn)GetProcAddress(n->conpty,"ConptyCreatePseudoConsole") : NULL;
+  n->resize = n->conpty ? (Native::ResizeFn)GetProcAddress(n->conpty,"ConptyResizePseudoConsole") : NULL;
+  n->close = n->conpty ? (Native::CloseFn)GetProcAddress(n->conpty,"ConptyClosePseudoConsole") : NULL;
   if(!n->create || !n->resize || !n->close)
-  { m_Status->setText(tr("ConPTY requires Windows 10 1809 or later.")); return; }
+  { m_Status->setText(tr("Could not load bundled conpty.dll. Windows 10 1809 or later is required.")); return; }
   const QString loader = QDir(QCoreApplication::applicationDirPath()).filePath(lit("WebView2Loader.dll"));
   n->loader = LoadLibraryW((LPCWSTR)loader.utf16());
   typedef HRESULT (STDAPICALLTYPE *EnvironmentFn)(PCWSTR,PCWSTR,ICoreWebView2EnvironmentOptions *,ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *);
@@ -245,11 +247,26 @@ void TerminalViewer::restartShell()
   const QString program=QDir::toNativeSeparators(m_Shell->currentData().toString());
   std::wstring command=(lit("\"")+program+lit("\" -NoLogo -NoProfile")).toStdWString();
   std::wstring directory=QDir::toNativeSeparators(QDir::currentPath()).toStdWString();
+  // Advertise the renderer's actual capabilities, not a borrowed WT_SESSION.
+  // Keep this child-local so launching a terminal cannot alter RenderMax's environment.
+  QProcessEnvironment environment=QProcessEnvironment::systemEnvironment();
+  environment.insert(lit("TERM"),lit("xterm-256color"));
+  environment.insert(lit("COLORTERM"),lit("truecolor"));
+  environment.insert(lit("TERM_PROGRAM"),lit("RenderMax"));
+  QStringList variables=environment.toStringList();
+  variables.sort(Qt::CaseInsensitive);
+  std::wstring environmentBlock;
+  for(const QString &variable : variables)
+  {
+    environmentBlock+=variable.toStdWString();
+    environmentBlock.push_back(L'\0');
+  }
+  environmentBlock.push_back(L'\0');
   PROCESS_INFORMATION process={};
   n->job=CreateJobObjectW(NULL,NULL);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   bool ok=n->job && SetInformationJobObject(n->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) &&
-    CreateProcessW((LPCWSTR)program.utf16(),&command[0],NULL,NULL,FALSE,EXTENDED_STARTUPINFO_PRESENT|CREATE_SUSPENDED,NULL,directory.c_str(),&info.StartupInfo,&process);
+    CreateProcessW((LPCWSTR)program.utf16(),&command[0],NULL,NULL,FALSE,EXTENDED_STARTUPINFO_PRESENT|CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT,&environmentBlock[0],directory.c_str(),&info.StartupInfo,&process);
   DeleteProcThreadAttributeList(attributes);
   if(ok){n->process=process.hProcess;ok=AssignProcessToJobObject(n->job,process.hProcess) && ResumeThread(process.hThread)!=(DWORD)-1;CloseHandle(process.hThread);}
   if(!ok){stopShell();m_Status->setText(tr("Could not start PowerShell in ConPTY."));return;}

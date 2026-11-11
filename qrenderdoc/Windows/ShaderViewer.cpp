@@ -1814,10 +1814,10 @@ void ShaderViewer::configureShaderIntelligence(ScintillaEdit *editor, int langua
   editor->autoCSetDropRestOfWord(true);
   editor->autoCSetOrder(SC_ORDER_PERFORMSORT);
 
-  // VS Code Dracula editor.lineHighlightBackground (#44475A75).
+  // Subtle current-line feedback on the Slate editing surface.
   editor->setCaretLineVisible(true);
-  editor->setCaretLineBack(SCINTILLA_COLOUR(68, 71, 90));
-  editor->setCaretLineBackAlpha(117);
+  editor->setCaretLineBack(SCINTILLA_COLOUR(42, 42, 42));
+  editor->setCaretLineBackAlpha(255);
   editor->setMouseDwellTime(500);
 
   QObject::connect(editor, &ScintillaEdit::charAdded, [this, editor](int ch) {
