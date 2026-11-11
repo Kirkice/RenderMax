@@ -470,6 +470,10 @@ void ConfigureSyntax(ScintillaEdit *scintilla, int language)
 {
   scintilla->setCodePage(SC_CP_UTF8);
 
+  const bool darkTheme = IsDarkTheme();
+  const bool codeEditor =
+      language == SCLEX_HLSL || language == SCLEX_GLSL || language == SCLEX_BUFFER;
+
   bool hlsl = false;
   bool glsl = false;
   int lexLang = language;
@@ -484,10 +488,19 @@ void ConfigureSyntax(ScintillaEdit *scintilla, int language)
   // set the default style to base/text
   QColor base = scintilla->palette().color(QPalette::Base);
   QColor text = scintilla->palette().color(QPalette::Text);
+
+  // The dock chrome and the palette window colour are #242424/#0F0F0F, but a page
+  // that dark makes the text sit in a void and fights the surrounding panels. Lift
+  // only the editing page to #1E1E1E so it reads as a recessed surface inside the
+  // docks while the Dracula tokens keep their contrast.
+  if(darkTheme)
+    base = QColor(30, 30, 30);
+
   scintilla->styleSetBack(STYLE_DEFAULT, SC_COL(base));
   scintilla->styleSetFore(STYLE_DEFAULT, SC_COL(text));
 
-  scintilla->setCaretFore(SC_COL(text));
+  const QColor caretColour = darkTheme ? QColor(200, 200, 200) : text;
+  scintilla->setCaretFore(SC_COL(caretColour));
 
   // default all lexer styles up to STYLE_DEFAULT as the same, then override per-colour below
   for(sptr_t i = 0; i < STYLE_DEFAULT; i++)
@@ -499,12 +512,24 @@ void ConfigureSyntax(ScintillaEdit *scintilla, int language)
   // set highlight text colour
   QColor highlight = scintilla->palette().color(QPalette::Highlight);
   QColor highlightedText = scintilla->palette().color(QPalette::HighlightedText);
+
+  // The theme highlight is an opaque saturated blue that swallows the tokens it
+  // covers. Use the muted editor selection instead so the text stays readable.
+  if(darkTheme)
+    highlight = QColor(38, 79, 120);
   scintilla->setSelBack(true, SC_COL(highlight));
   scintilla->setSelFore(true, SC_COL(highlightedText));
 
-  // set margin colours
+  // set margin colours. In the dark theme the gutter is a shade darker than the
+  // page and the numbers are dimmed, so the ruler stays passive instead of
+  // competing with the code for attention.
   QColor window = scintilla->palette().color(QPalette::Window);
   QColor windowText = scintilla->palette().color(QPalette::WindowText);
+  if(darkTheme)
+  {
+    window = QColor(26, 26, 26);
+    windowText = QColor(110, 110, 110);
+  }
   for(sptr_t i = 0; i < 5; i++)
     scintilla->setMarginBackN(i, SC_COL(window));
   scintilla->styleSetBack(STYLE_LINENUMBER, SC_COL(window));
@@ -594,5 +619,33 @@ void ConfigureSyntax(ScintillaEdit *scintilla, int language)
     scintilla->styleSetFore(SCE_P_WORD2, blue);
     scintilla->styleSetBold(SCE_P_WORD, true);
     scintilla->styleSetBold(SCE_P_WORD2, true);
+  }
+
+  // Shared editor chrome. A 2px caret and a pixel of leading above and below each
+  // line make long shader listings easier to scan without changing the line
+  // height enough to lose readable rows.
+  scintilla->setCaretWidth(2);
+  scintilla->setExtraAscent(1);
+  scintilla->setExtraDescent(1);
+
+  scintilla->styleSetFore(STYLE_INDENTGUIDE, darkTheme ? SCINTILLA_COLOUR(51, 51, 51)
+                                                       : SCINTILLA_COLOUR(208, 208, 208));
+
+  if(codeEditor)
+  {
+    // Indent guides, spaces instead of tabs and brace feedback only make sense
+    // while editing code - the read-only listings keep their compact defaults.
+    scintilla->setIndentationGuides(SC_IV_LOOKBOTH);
+    scintilla->setUseTabs(false);
+    scintilla->setTabIndents(true);
+    scintilla->setBackSpaceUnIndents(true);
+
+    // Matched braces use Dracula's orange and unmatched ones its red, so the
+    // feedback belongs to the same palette as the tokens themselves.
+    scintilla->styleSetBold(STYLE_BRACELIGHT, true);
+    scintilla->styleSetFore(STYLE_BRACELIGHT, darkTheme ? SCINTILLA_COLOUR(255, 184, 108)
+                                                       : SCINTILLA_COLOUR(170, 90, 0));
+    scintilla->styleSetBold(STYLE_BRACEBAD, true);
+    scintilla->styleSetFore(STYLE_BRACEBAD, SCINTILLA_COLOUR(255, 85, 85));
   }
 }

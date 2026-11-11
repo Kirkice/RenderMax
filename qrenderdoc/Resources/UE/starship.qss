@@ -77,6 +77,11 @@ QFrame#renderFrame { border: 1px solid #383838; border-radius: 2px; }
 /* The input and output thumbnail strips in the texture viewer are borderless scroll areas, which
    leaves their region indistinguishable from the tool window around them. */
 ThumbnailStrip QScrollArea { border: 1px solid #383838; border-radius: 2px; }
+/* The shader compilation options are a settings strip under the editor rather than a second
+   toolbar: one hairline separates them from the code and the labels recede behind the fields. */
+QWidget#compilationGroup { background: #1A1A1A; border-top: 1px solid #383838; }
+QWidget#compilationGroup QLabel { color: #808080; }
+QLabel#editStatusLabel { color: #808080; padding-left: 6px; }
 QCheckBox, QRadioButton { color: #C0C0C0; spacing: 6px; }
 QCheckBox:disabled, QRadioButton:disabled { color: #606060; }
 QCheckBox::indicator { width: 12px; height: 12px; background: #0F0F0F; border: 1px solid #383838; border-radius: 2px; }

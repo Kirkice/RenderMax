@@ -1682,8 +1682,11 @@ ScintillaEdit *ShaderViewer::MakeEditor(const QString &name, const QString &text
   ScintillaEdit *ret = new ScintillaEdit(this);
 
   ret->setMarginLeft(4.0);
+  // Margin 1 carries the bookmark marker. Margin 2 would carry fold markers, but
+  // no shader editor enables folding, so keeping it at 16px only leaves a dead
+  // column between the line numbers and the first character of every line.
   ret->setMarginWidthN(1, 20.0);
-  ret->setMarginWidthN(2, 16.0);
+  ret->setMarginWidthN(2, 0.0);
   ret->setObjectName(name);
 
   QString editorFont = Formatter::FixedFont().family();
@@ -1748,10 +1751,11 @@ void ShaderViewer::configureShaderIntelligence(ScintillaEdit *editor, int langua
 
   // Subtle current-line and brace feedback on the Slate editing surface.
   editor->setCaretLineVisible(true);
-  // Dracula's line highlight is an outlined #44475A. Scintilla exposes a
-  // fill here, so use the same colour at low opacity to keep selection clear.
-  editor->setCaretLineBack(SCINTILLA_COLOUR(68, 71, 90));
-  editor->setCaretLineBackAlpha(72);
+  // Dracula outlines its current line in #44475A rather than filling it. On the
+  // #1E1E1E page a solid one-step-lighter #2A2A2A is the closest readable
+  // equivalent, and it leaves the #264F78 selection visible on top of it.
+  editor->setCaretLineBack(SCINTILLA_COLOUR(42, 42, 42));
+  editor->setCaretLineBackAlpha(255);
   editor->setMouseDwellTime(500);
 
   QObject::connect(editor, &ScintillaEdit::charAdded, [this, editor](int ch) {
