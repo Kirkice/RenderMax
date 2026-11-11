@@ -163,6 +163,7 @@
     <addaction name="action_API_Inspector"/>
     <addaction name="action_Comments"/>
     <addaction name="action_Counter_Viewer"/>
+    <addaction name="action_Diagnostic_Log"/>
     <addaction name="action_Errors_and_Warnings"/>
     <addaction name="action_Event_Browser"/>
     <addaction name="action_Launch_Application_Window"/>
@@ -287,6 +288,11 @@
   <action name="action_Mesh_Output">
    <property name="text">
     <string>&amp;Mesh Viewer</string>
+   </property>
+  </action>
+  <action name="action_Diagnostic_Log">
+   <property name="text">
+    <string>&amp;Diagnostic Log</string>
    </property>
   </action>
   <action name="action_Errors_and_Warnings">

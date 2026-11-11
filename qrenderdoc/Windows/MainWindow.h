@@ -145,7 +145,7 @@ public:
   void showPipelineViewer() { on_action_Pipeline_State_triggered(); }
   void showCaptureDialog() { on_action_Launch_Application_triggered(); }
   void showDebugMessageView() { on_action_Errors_and_Warnings_triggered(); }
-  void showDiagnosticLogView();
+  void showDiagnosticLogView() { on_action_Diagnostic_Log_triggered(); }
   void showCommentView() { on_action_Comments_triggered(); }
   void showStatisticsViewer() { on_action_Statistics_Viewer_triggered(); }
   void showTimelineBar() { on_action_Timeline_triggered(); }
@@ -173,6 +173,7 @@ private slots:
   void on_action_Pipeline_State_triggered();
   void on_action_Launch_Application_triggered();
   void on_action_Errors_and_Warnings_triggered();
+  void on_action_Diagnostic_Log_triggered();
   void on_action_Comments_triggered();
   void on_action_Statistics_Viewer_triggered();
   void on_action_Timeline_triggered();

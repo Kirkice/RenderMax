@@ -3417,7 +3417,7 @@ void MainWindow::on_action_Check_for_Updates_triggered()
   });
 }
 
-void MainWindow::showDiagnosticLogView()
+void MainWindow::on_action_Diagnostic_Log_triggered()
 {
   QWidget *logView = m_Ctx.GetDiagnosticLogView()->Widget();
 
