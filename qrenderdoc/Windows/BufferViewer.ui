@@ -361,9 +361,8 @@
              <property name="text">
               <string>Highlight Vertices</string>
              </property>
-             <property name="icon">
-              <iconset resource="../Resources/resources.qrc">
-               <normaloff>:/asterisk_orange.png</normaloff>:/asterisk_orange.png</iconset>
+             <property name="rdIcon" stdset="0">
+              <string>bookmark</string>
              </property>
              <property name="checkable">
               <bool>true</bool>

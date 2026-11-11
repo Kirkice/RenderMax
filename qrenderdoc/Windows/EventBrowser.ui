@@ -395,8 +395,8 @@
          <property name="text">
           <string/>
          </property>
-         <property name="pixmap">
-          <pixmap resource="../Resources/resources.qrc">:/asterisk_orange.png</pixmap>
+         <property name="rdIcon" stdset="0">
+          <string>bookmark</string>
          </property>
         </widget>
        </item>

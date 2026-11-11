@@ -37,7 +37,6 @@
   RESOURCE_DEF(arrow_refresh, "Line/arrow_refresh.svg")                        \
   RESOURCE_DEF(arrow_right, "Line/arrow_right.svg")                            \
   RESOURCE_DEF(arrow_undo, "Line/arrow_undo.svg")                              \
-  RESOURCE_DEF(asterisk_orange, "asterisk_orange.png")                         \
   RESOURCE_DEF(bookmark, "Line/bookmark.svg")                                  \
   RESOURCE_DEF(bug, "Line/bug.svg")                                            \
   RESOURCE_DEF(chart_curve, "Line/chart_curve.svg")                            \

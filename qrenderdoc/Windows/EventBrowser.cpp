@@ -751,7 +751,7 @@ struct EventItemModel : public QAbstractItemModel
       if(index == m_CurrentEID)
         return Icons::flag_green();
       else if(m_BookmarkIndices.contains(index))
-        return Icons::asterisk_orange();
+        return Icons::bookmark();
       else if(m_FindResults.contains(index))
         return Icons::ue_find();
       return QVariant();
