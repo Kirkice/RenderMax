@@ -236,6 +236,7 @@ SOURCES += Code/qrenderdoc.cpp \
     Widgets/Extended/RDTableView.cpp \
     Windows/DebugMessageView.cpp \
     Windows/LogView.cpp \
+    Windows/TerminalViewer.cpp \
     Windows/CommentView.cpp \
     Windows/StatisticsViewer.cpp \
     Windows/TimelineBar.cpp \
@@ -360,6 +361,7 @@ HEADERS += Code/CaptureContext.h \
     Widgets/Extended/RDTableView.h \
     Windows/DebugMessageView.h \
     Windows/LogView.h \
+    Windows/TerminalViewer.h \
     Windows/CommentView.h \
     Windows/StatisticsViewer.h \
     Windows/TimelineBar.h \

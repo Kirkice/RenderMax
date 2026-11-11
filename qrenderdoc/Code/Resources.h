@@ -82,6 +82,7 @@
   RESOURCE_DEF(plugin, "Line/plugin.svg")                                      \
   RESOURCE_DEF(plugin_add, "Line/plugin_add.svg")                              \
   RESOURCE_DEF(save, "Line/save.svg")                                          \
+  RESOURCE_DEF(terminal, "Line/terminal.svg")                                  \
   RESOURCE_DEF(text_add, "Line/text_add.svg")                                  \
   RESOURCE_DEF(tick, "Line/tick.svg")                                          \
   RESOURCE_DEF(time, "Line/time.svg")                                          \

@@ -52,6 +52,7 @@ class CaptureDialog;
 class LiveCapture;
 class MCPStatusDialog;
 class SystemTraceViewer;
+class TerminalViewer;
 class QNetworkAccessManager;
 
 namespace MCP
@@ -174,6 +175,7 @@ private slots:
   void on_action_Launch_Application_triggered();
   void on_action_Errors_and_Warnings_triggered();
   void on_action_Diagnostic_Log_triggered();
+  void on_action_Terminal_Viewer_triggered();
   void on_action_Comments_triggered();
   void on_action_Statistics_Viewer_triggered();
   void on_action_Timeline_triggered();
@@ -310,6 +312,13 @@ private:
   // *deletes* the widget. A raw pointer here would then be dangling.
   QPointer<SystemTraceViewer> m_SystemTraceViewer;
   QPointer<QWidget> m_SceneViewer;
+
+  // The terminal panel is docked with HideOnClose, so its shell process keeps running while the tab
+  // is closed and closing it only hides the view. A QPointer for the same reason as the trace panel:
+  // loading a layout that omits it force-closes and deletes the widget.
+  QPointer<TerminalViewer> m_TerminalViewer;
+
+  TerminalViewer *ensureTerminalViewer();
   QWidget *ensureSceneViewer();
 
   // Creates the panel on first use and returns the existing one afterwards. Also used as the tool

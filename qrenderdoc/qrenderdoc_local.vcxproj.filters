@@ -747,7 +747,13 @@
     <ClCompile Include="Windows\LogView.cpp">
       <Filter>Windows</Filter>
     </ClCompile>
+    <ClCompile Include="Windows\TerminalViewer.cpp">
+      <Filter>Windows</Filter>
+    </ClCompile>
     <ClCompile Include="$(IntDir)generated\moc_LogView.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="$(IntDir)generated\moc_TerminalViewer.cpp">
       <Filter>Generated Files</Filter>
     </ClCompile>
     <ClCompile Include="Widgets\ReplayOptionsSelector.cpp">
@@ -1623,6 +1629,9 @@
       <Filter>Windows</Filter>
     </CustomBuild>
     <CustomBuild Include="Windows\LogView.h">
+      <Filter>Windows</Filter>
+    </CustomBuild>
+    <CustomBuild Include="Windows\TerminalViewer.h">
       <Filter>Windows</Filter>
     </CustomBuild>
     <CustomBuild Include="Widgets\ReplayOptionsSelector.h">

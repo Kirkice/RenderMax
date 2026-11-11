@@ -172,6 +172,7 @@
     <addaction name="action_Python_Shell"/>
     <addaction name="action_Resource_Inspector"/>
     <addaction name="action_Statistics_Viewer"/>
+    <addaction name="action_Terminal_Viewer"/>
     <addaction name="action_Texture_Viewer"/>
     <addaction name="action_Timeline"/>
     <addaction name="separator"/>
@@ -298,6 +299,11 @@
   <action name="action_Errors_and_Warnings">
    <property name="text">
     <string>Errors and &amp;Warnings</string>
+   </property>
+  </action>
+  <action name="action_Terminal_Viewer">
+   <property name="text">
+    <string>&amp;Terminal Viewer</string>
    </property>
   </action>
   <action name="action_Timeline">

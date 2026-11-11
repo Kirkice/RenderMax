@@ -73,6 +73,7 @@
 #include "Windows/SceneViewer.h"
 #include "Windows/Dialogs/TipsDialog.h"
 #include "Windows/Dialogs/UpdateDialog.h"
+#include "Windows/TerminalViewer.h"
 #include "toolwindowmanager/ToolWindowManagerArea.h"
 #include "ui_MainWindow.h"
 #include "version.h"
@@ -3415,6 +3416,35 @@ void MainWindow::on_action_Check_for_Updates_triggered()
       }
     }
   });
+}
+
+void MainWindow::on_action_Terminal_Viewer_triggered()
+{
+  // The shell process belongs to the panel, so the panel is retained: opening the view again has to
+  // raise the running session rather than spawn a second shell. HideOnClose is what keeps the widget
+  // (and its process) alive when the tab is closed; without it the manager deletes the panel and the
+  // session with it.
+  TerminalViewer *terminal = ensureTerminalViewer();
+
+  if(ui->toolWindowManager->toolWindows().contains(terminal))
+  {
+    ui->toolWindowManager->setToolWindowProperties(terminal, ToolWindowManager::HideOnClose);
+    ToolWindowManager::raiseToolWindow(terminal);
+    return;
+  }
+
+  ui->toolWindowManager->addToolWindow(terminal, mainToolArea(), ToolWindowManager::HideOnClose);
+}
+
+TerminalViewer *MainWindow::ensureTerminalViewer()
+{
+  if(!m_TerminalViewer)
+  {
+    m_TerminalViewer = new TerminalViewer(ui->toolWindowManager);
+    m_TerminalViewer->setWindowIcon(Icons::terminal());
+  }
+
+  return m_TerminalViewer;
 }
 
 void MainWindow::on_action_Diagnostic_Log_triggered()

@@ -627,6 +627,7 @@
     <ClCompile Include="$(IntDir)generated\moc_D3D12PipelineStateViewer.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_DebugMessageView.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_LogView.cpp" />
+    <ClCompile Include="$(IntDir)generated\moc_TerminalViewer.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_CommentView.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_DescriptorViewer.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_EventBrowser.cpp" />
@@ -755,6 +756,7 @@
     <ClCompile Include="Windows\BufferViewer.cpp" />
     <ClCompile Include="Windows\DebugMessageView.cpp" />
     <ClCompile Include="Windows\LogView.cpp" />
+    <ClCompile Include="Windows\TerminalViewer.cpp" />
     <ClCompile Include="Windows\CommentView.cpp" />
     <ClCompile Include="Windows\DescriptorViewer.cpp" />
     <ClCompile Include="Windows\Dialogs\AboutDialog.cpp" />
@@ -1314,6 +1316,12 @@
       <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
     </CustomBuild>
     <CustomBuild Include="Windows\LogView.h">
+      <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
+      <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
+      <Message>MOC %(Filename).h</Message>
+      <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
+    </CustomBuild>
+    <CustomBuild Include="Windows\TerminalViewer.h">
       <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
       <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
       <Message>MOC %(Filename).h</Message>
