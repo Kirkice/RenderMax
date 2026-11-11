@@ -35,6 +35,7 @@
 
 class ScintillaEdit;
 
+QString CodeEditorFontFamily();
 void ConfigureSyntax(ScintillaEdit *scintilla, int language);
 
 // Language data shared by syntax highlighting and ShaderViewer's lightweight

@@ -200,9 +200,9 @@ PythonShell::PythonShell(ICaptureContext &ctx, QWidget *parent)
   {
     m_FindResults = new ScintillaEdit(this);
 
-    m_FindResults->styleSetFont(STYLE_DEFAULT, Formatter::FixedFont().family().toUtf8().data());
+    m_FindResults->styleSetFont(STYLE_DEFAULT, CodeEditorFontFamily().toUtf8().constData());
     m_FindResults->styleSetSize(STYLE_DEFAULT, Formatter::FixedFont().pointSize());
-    m_FindResults->styleSetFont(STYLE_ERROR, Formatter::FixedFont().family().toUtf8().data());
+    m_FindResults->styleSetFont(STYLE_ERROR, CodeEditorFontFamily().toUtf8().constData());
     m_FindResults->styleSetSize(STYLE_ERROR, Formatter::FixedFont().pointSize());
     m_FindResults->styleSetBack(STYLE_ERROR, IsDarkTheme() ? SCINTILLA_COLOUR(175, 70, 70)
                                                            : SCINTILLA_COLOUR(255, 150, 150));
@@ -217,11 +217,11 @@ PythonShell::PythonShell(ICaptureContext &ctx, QWidget *parent)
   m_FindReplace->setFindIndicator(2);
   m_FindReplace->setFindAllResultsDisplay(m_FindResults);
 
-  ui->lineInput->setFont(Formatter::FixedFont());
-  ui->helpSearch->setFont(Formatter::FixedFont());
-  ui->interactiveOutput->setFont(Formatter::FixedFont());
-  ui->scriptOutput->setFont(Formatter::FixedFont());
-  ui->helpText->setFont(Formatter::FixedFont());
+  ui->lineInput->setFont(QFont(CodeEditorFontFamily(), Formatter::FixedFont().pointSize()));
+  ui->helpSearch->setFont(QFont(CodeEditorFontFamily(), Formatter::FixedFont().pointSize()));
+  ui->interactiveOutput->setFont(QFont(CodeEditorFontFamily(), Formatter::FixedFont().pointSize()));
+  ui->scriptOutput->setFont(QFont(CodeEditorFontFamily(), Formatter::FixedFont().pointSize()));
+  ui->helpText->setFont(QFont(CodeEditorFontFamily(), Formatter::FixedFont().pointSize()));
 
   ui->outputGroup->setWindowTitle(tr("Output"));
   ui->helpGroup->setWindowTitle(tr("Help"));
@@ -300,13 +300,13 @@ PythonShell::PythonShell(ICaptureContext &ctx, QWidget *parent)
 
   m_ToolTip->installEventFilter(this);
 
-  m_ToolTip->setFont(Formatter::FixedFont());
+  m_ToolTip->setFont(QFont(CodeEditorFontFamily(), Formatter::FixedFont().pointSize()));
 
   m_CompletionTip = new RDToolTip(this);
-  m_CompletionTip->setFont(Formatter::FixedFont());
+  m_CompletionTip->setFont(QFont(CodeEditorFontFamily(), Formatter::FixedFont().pointSize()));
 
   m_InteractiveCompleter = new QCompleter(this);
-  m_InteractiveCompleter->popup()->setFont(Formatter::FixedFont());
+  m_InteractiveCompleter->popup()->setFont(QFont(CodeEditorFontFamily(), Formatter::FixedFont().pointSize()));
   m_InteractiveCompleter->popup()->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
   m_InteractiveCompleter->popup()->setTextElideMode(Qt::ElideNone);
   m_InteractiveCompleter->setCompletionMode(QCompleter::UnfilteredPopupCompletion);
@@ -824,9 +824,9 @@ EditorWrapper *PythonShell::makeEditor(rdcstr filename, rdcstr text)
 
   m_FindReplace->configureFindIndicator(sc);
 
-  sc->styleSetFont(STYLE_DEFAULT, Formatter::FixedFont().family().toUtf8().data());
+  sc->styleSetFont(STYLE_DEFAULT, CodeEditorFontFamily().toUtf8().constData());
   sc->styleSetSize(STYLE_DEFAULT, Formatter::FixedFont().pointSize());
-  sc->styleSetFont(STYLE_ERROR, Formatter::FixedFont().family().toUtf8().data());
+  sc->styleSetFont(STYLE_ERROR, CodeEditorFontFamily().toUtf8().constData());
   sc->styleSetSize(STYLE_ERROR, Formatter::FixedFont().pointSize());
   sc->styleSetBack(STYLE_ERROR,
                    IsDarkTheme() ? SCINTILLA_COLOUR(175, 70, 70) : SCINTILLA_COLOUR(255, 150, 150));

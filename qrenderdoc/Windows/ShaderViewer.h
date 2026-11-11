@@ -361,6 +361,7 @@ private:
 
   // Nesting colours for brackets. The low indicators are already claimed by find,
   // regex highlighting and compile errors, so these sit above the debug markers.
+  static const int FUNCTION_COLOUR_INDICATOR = 23;
   static const int RAINBOW_INDICATOR = 24;
   static const int RAINBOW_COLOURS = 6;
 

@@ -25,6 +25,7 @@
 #include "ScintillaSyntax.h"
 #include "Code/QRDUtils.h"
 #include <QRegularExpression>
+#include <QFontDatabase>
 #include <QSet>
 #include "scintilla/include/SciLexer.h"
 #include "scintilla/include/qt/ScintillaEdit.h"
@@ -466,9 +467,20 @@ QString ShaderFunctionDocumentation(int language, const QString &function)
   return docs.value(function);
 }
 
+QString CodeEditorFontFamily()
+{
+  const QStringList available = QFontDatabase().families();
+  for(const QString &family : QStringList() << lit("Consolas") << lit("Courier New"))
+    if(available.contains(family, Qt::CaseInsensitive))
+      return family;
+  return QFontDatabase::systemFont(QFontDatabase::FixedFont).family();
+}
+
 void ConfigureSyntax(ScintillaEdit *scintilla, int language)
 {
   scintilla->setCodePage(SC_CP_UTF8);
+  const QByteArray editorFont = CodeEditorFontFamily().toUtf8();
+  scintilla->styleSetFont(STYLE_DEFAULT, editorFont.constData());
 
   const bool darkTheme = IsDarkTheme();
   const bool codeEditor =
@@ -489,12 +501,10 @@ void ConfigureSyntax(ScintillaEdit *scintilla, int language)
   QColor base = scintilla->palette().color(QPalette::Base);
   QColor text = scintilla->palette().color(QPalette::Text);
 
-  // The dock chrome and the palette window colour are #242424/#0F0F0F, but a page
-  // that dark makes the text sit in a void and fights the surrounding panels. Lift
-  // only the editing page to #1E1E1E so it reads as a recessed surface inside the
-  // docks while the Dracula tokens keep their contrast.
   if(darkTheme)
-    base = QColor(30, 30, 30);
+    base = codeEditor ? QColor(40, 42, 54) : QColor(30, 30, 30);
+  if(codeEditor)
+    text = QColor(248, 248, 242);
 
   scintilla->styleSetBack(STYLE_DEFAULT, SC_COL(base));
   scintilla->styleSetFore(STYLE_DEFAULT, SC_COL(text));
@@ -505,6 +515,7 @@ void ConfigureSyntax(ScintillaEdit *scintilla, int language)
   // default all lexer styles up to STYLE_DEFAULT as the same, then override per-colour below
   for(sptr_t i = 0; i < STYLE_DEFAULT; i++)
   {
+    scintilla->styleSetFont(i, editorFont.constData());
     scintilla->styleSetBack(i, SC_COL(base));
     scintilla->styleSetFore(i, SC_COL(text));
   }
@@ -576,7 +587,7 @@ void ConfigureSyntax(ScintillaEdit *scintilla, int language)
     scintilla->styleSetItalic(SCE_C_WORD2, true);
     scintilla->styleSetFore(SCE_C_PREPROCESSOR, draculaPink);
     scintilla->styleSetBold(SCE_C_PREPROCESSOR, false);
-    scintilla->styleSetFore(SCE_C_OPERATOR, draculaPink);
+    scintilla->styleSetFore(SCE_C_OPERATOR, draculaForeground);
     scintilla->styleSetFore(SCE_C_IDENTIFIER, draculaForeground);
     scintilla->styleSetFore(SCE_C_GLOBALCLASS, draculaCyan);
     scintilla->styleSetFore(SCE_C_REGEX, draculaOrange);

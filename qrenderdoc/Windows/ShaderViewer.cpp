@@ -1719,15 +1719,7 @@ ScintillaEdit *ShaderViewer::MakeEditor(const QString &name, const QString &text
   ret->setMarginWidthN(2, 0.0);
   ret->setObjectName(name);
 
-  QString editorFont = Formatter::FixedFont().family();
-  if(lang == SCLEX_HLSL || lang == SCLEX_GLSL)
-  {
-    // Match VS Code's default Windows editor font for shader source. Keep the
-    // configured system monospace font as a portable fallback.
-    QFontDatabase fontDatabase;
-    if(fontDatabase.families().contains(lit("Consolas"), Qt::CaseInsensitive))
-      editorFont = lit("Consolas");
-  }
+  const QString editorFont = CodeEditorFontFamily();
   ret->styleSetFont(STYLE_DEFAULT, editorFont.toUtf8().data());
   ret->styleSetSize(STYLE_DEFAULT, Formatter::FixedFont().pointSize());
 
@@ -1752,6 +1744,9 @@ ScintillaEdit *ShaderViewer::MakeEditor(const QString &name, const QString &text
     ret->styleSetBack(COMPILE_ERROR_STYLE, SCINTILLA_COLOUR(68, 71, 90));
     ret->styleSetFore(COMPILE_ERROR_STYLE, SCINTILLA_COLOUR(255, 85, 85));
     ret->annotationSetVisible(ANNOTATION_BOXED);
+
+    ret->indicSetStyle(FUNCTION_COLOUR_INDICATOR, INDIC_TEXTFORE);
+    ret->indicSetFore(FUNCTION_COLOUR_INDICATOR, SCINTILLA_COLOUR(80, 250, 123));
 
     // Bracket nesting colours reuse Scintilla's text-foreground indicator so the
     // glyph itself is tinted instead of getting a box drawn around it.
@@ -1797,6 +1792,11 @@ ScintillaEdit *ShaderViewer::MakeEditor(const QString &name, const QString &text
   ret->colourise(0, -1);
 
   SetTextAndUpdateMargin0(ret, text);
+  if(lang == SCLEX_HLSL || lang == SCLEX_GLSL)
+  {
+    ret->colourise(0, -1);
+    updateRainbowBrackets(ret);
+  }
 
   ret->emptyUndoBuffer();
 
@@ -1814,13 +1814,10 @@ void ShaderViewer::configureShaderIntelligence(ScintillaEdit *editor, int langua
   editor->autoCSetDropRestOfWord(true);
   editor->autoCSetOrder(SC_ORDER_PERFORMSORT);
 
-  // Subtle current-line and brace feedback on the Slate editing surface.
+  // VS Code Dracula editor.lineHighlightBackground (#44475A75).
   editor->setCaretLineVisible(true);
-  // Dracula outlines its current line in #44475A rather than filling it. On the
-  // #1E1E1E page a solid one-step-lighter #2A2A2A is the closest readable
-  // equivalent, and it leaves the #264F78 selection visible on top of it.
-  editor->setCaretLineBack(SCINTILLA_COLOUR(42, 42, 42));
-  editor->setCaretLineBackAlpha(255);
+  editor->setCaretLineBack(SCINTILLA_COLOUR(68, 71, 90));
+  editor->setCaretLineBackAlpha(117);
   editor->setMouseDwellTime(500);
 
   QObject::connect(editor, &ScintillaEdit::charAdded, [this, editor](int ch) {
@@ -6462,10 +6459,12 @@ void ShaderViewer::jumpToSymbol(int index)
 
 void ShaderViewer::updateRainbowBrackets(ScintillaEdit *editor)
 {
-  if(!editor || editor->readOnly())
+  if(!editor)
     return;
 
   const sptr_t length = editor->textLength();
+  editor->setIndicatorCurrent(FUNCTION_COLOUR_INDICATOR);
+  editor->indicatorClearRange(0, length);
 
   for(int i = 0; i < RAINBOW_COLOURS; i++)
   {
@@ -6528,6 +6527,28 @@ void ShaderViewer::updateRainbowBrackets(ScintillaEdit *editor)
     else if(c == '\'')
     {
       state = 4;
+      continue;
+    }
+
+    // Lexical function-name highlighting: do not recolor keywords, constructors,
+    // comments, or strings. Full VS Code semantic classification needs a language server.
+    if((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_')
+    {
+      const int start = i;
+      while(i + 1 < text.size() &&
+            ((text[i + 1] >= 'a' && text[i + 1] <= 'z') ||
+             (text[i + 1] >= 'A' && text[i + 1] <= 'Z') ||
+             (text[i + 1] >= '0' && text[i + 1] <= '9') || text[i + 1] == '_'))
+        i++;
+      int nextToken = i + 1;
+      while(nextToken < text.size() && (text[nextToken] == ' ' || text[nextToken] == '\t'))
+        nextToken++;
+      if(nextToken < text.size() && text[nextToken] == '(' &&
+         (editor->styleAt(start) & 127) == SCE_C_IDENTIFIER)
+      {
+        editor->setIndicatorCurrent(FUNCTION_COLOUR_INDICATOR);
+        editor->indicatorFillRange(start, i - start + 1);
+      }
       continue;
     }
 
