@@ -244,11 +244,11 @@ DECLARE_REFLECTION_STRUCT(BugReport);
                                                                                                    \
   DOCUMENT(                                                                                        \
       "The style to load for the UI. Possible values include 'Native', 'RDLight', 'RDDark', 'UEStyle'. " \
-      "If empty, UEStyle will be chosen as the default dark editor theme. "                          \
-      "light-on-dark or dark-on-light theme of the application native style."                      \
+      "Defaults to 'UEStyle', the dark Unreal-inspired editor theme. A stored style"               \
+      " that is no longer recognised also falls back to it."                                       \
       ""                                                                                           \
       ":type: str");                                                                               \
-  CONFIG_SETTING_VAL(public, QString, rdcstr, UIStyle, "")                                         \
+  CONFIG_SETTING_VAL(public, QString, rdcstr, UIStyle, "UEStyle")                                  \
                                                                                                    \
   DOCUMENT(                                                                                        \
       "The path to the last capture to be opened, which is useful as a default location for "      \
