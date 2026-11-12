@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include "MainWindow.h"
+#include "RenderGraphViewer.h"
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -185,6 +186,17 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
     FreeLibrary(dwm);
   }
 #endif
+
+  QAction *renderGraph = ui->menu_Window->addAction(tr("RenderGraph Viewer"));
+  renderGraph->setShortcut(QKeySequence(tr("Ctrl+Shift+G")));
+  connect(renderGraph, &QAction::triggered, this, [this] {
+    QWidget *viewer = ensureRenderGraphViewer();
+    if(!ui->toolWindowManager->toolWindows().contains(viewer))
+      ui->toolWindowManager->addToolWindow(viewer, mainToolArea(), ToolWindowManager::HideOnClose);
+    else if(!ui->toolWindowManager->areaOf(viewer))
+      ui->toolWindowManager->moveToolWindow(viewer, mainToolArea());
+    ToolWindowManager::raiseToolWindow(viewer);
+  });
 
   QAction *scene = ui->menu_Window->addAction(tr("Scene Viewer"));
   connect(scene, &QAction::triggered, this, [this] {
@@ -607,6 +619,10 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
     // never created this session, so re-create the very same retained instance here.
     if(objectName == lit("sceneViewer") || objectName == lit("sceneView"))
       return ensureSceneViewer();
+    if(objectName == lit("renderGraphViewer"))
+      return ensureRenderGraphViewer();
+    if(objectName == lit("terminalViewer"))
+      return ensureTerminalViewer();
     if(objectName == lit("systemTraceViewer"))
       return ensureSystemTraceViewer()->Widget();
 
@@ -787,7 +803,7 @@ void MainWindow::on_action_Open_Capture_triggered()
 {
   QString filename = RDDialog::getOpenFileName(
       this, tr("Select file to open"), m_Ctx.Config().LastCaptureFilePath,
-      tr("Capture Files (*.rdc);;RenderMax System Trace (*.rdt);;Image Files (*.dds *.hdr *.exr *.bmp *.jpg "
+      tr("Capture Files (*.rdc *.rdt);;RenderMax System Trace (*.rdt);;Image Files (*.dds *.hdr *.exr *.bmp *.jpg "
          "*.jpeg *.png *.tga *.gif *.psd);;All Files (*)"));
 
   if(filename.isEmpty()) return;
@@ -1964,6 +1980,20 @@ void MainWindow::LoadInitialLayout()
   // This runs *after* LoadLayout, so a layout that already contains the panel simply re-registers
   // it (with the normalised HideOnClose property) rather than adding a second dock for it.
   dockSystemTraceViewer(false);
+
+  // Resident tools are registered after layout restoration, retaining existing dock locations.
+  const QList<QWidget *> resident = {ensureSceneViewer(), ensureTerminalViewer(), ensureRenderGraphViewer()};
+  for(QWidget *viewer : resident)
+  {
+    if(!ui->toolWindowManager->toolWindows().contains(viewer))
+      ui->toolWindowManager->addToolWindow(viewer, mainToolArea(), ToolWindowManager::HideOnClose);
+    else
+    {
+      ui->toolWindowManager->setToolWindowProperties(viewer, ToolWindowManager::HideOnClose);
+      if(!ui->toolWindowManager->areaOf(viewer))
+        ui->toolWindowManager->moveToolWindow(viewer, mainToolArea());
+    }
+  }
 }
 
 bool MainWindow::ErrorReportsAllowed()
@@ -3078,6 +3108,16 @@ void MainWindow::on_action_Open_RGP_Profile_triggered()
   }
 
   m_Ctx.OpenRGPProfile(path);
+}
+
+QWidget *MainWindow::ensureRenderGraphViewer()
+{
+  if(m_RenderGraphViewer.isNull())
+  {
+    m_RenderGraphViewer = new RenderGraphViewer(m_Ctx, ui->toolWindowManager);
+    m_RenderGraphViewer->setObjectName(lit("renderGraphViewer"));
+  }
+  return m_RenderGraphViewer.data();
 }
 
 QWidget *MainWindow::ensureSceneViewer()

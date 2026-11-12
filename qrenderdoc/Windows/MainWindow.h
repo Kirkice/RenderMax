@@ -312,6 +312,7 @@ private:
   // *deletes* the widget. A raw pointer here would then be dangling.
   QPointer<SystemTraceViewer> m_SystemTraceViewer;
   QPointer<QWidget> m_SceneViewer;
+  QPointer<QWidget> m_RenderGraphViewer;
 
   // The terminal panel is docked with HideOnClose, so its shell process keeps running while the tab
   // is closed and closing it only hides the view. A QPointer for the same reason as the trace panel:
@@ -320,6 +321,7 @@ private:
 
   TerminalViewer *ensureTerminalViewer();
   QWidget *ensureSceneViewer();
+  QWidget *ensureRenderGraphViewer();
 
   // Creates the panel on first use and returns the existing one afterwards. Also used as the tool
   // window manager's create callback so a saved layout can re-create the tab; keeping it here (and

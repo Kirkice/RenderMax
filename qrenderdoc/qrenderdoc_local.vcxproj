@@ -831,6 +831,10 @@
     <ClCompile Include="Windows\PixelHistoryView.cpp" />
     <ClCompile Include="Windows\PerformanceCounterViewer.cpp" />
     <ClCompile Include="Windows\StatisticsViewer.cpp" />
+    <ClCompile Include="Windows\RenderGraphViewer.cpp" />
+    <ClCompile Include="Code\RenderGraph.cpp" />
+    <ClInclude Include="Windows\RenderGraphViewer.h" />
+    <ClInclude Include="Code\RenderGraph.h" />
     <ClCompile Include="Windows\TimelineBar.cpp" />
     <ClCompile Include="Windows\TextureViewer.cpp" />
     <ClCompile Include="3rdparty\toolwindowmanager\ToolWindowManager.cpp">

@@ -239,6 +239,8 @@ SOURCES += Code/qrenderdoc.cpp \
     Windows/TerminalViewer.cpp \
     Windows/CommentView.cpp \
     Windows/StatisticsViewer.cpp \
+    Windows/RenderGraphViewer.cpp \
+    Code/RenderGraph.cpp \
     Windows/TimelineBar.cpp \
     Windows/Dialogs/SettingsDialog.cpp \
     Widgets/OrderedListEditor.cpp \
@@ -364,6 +366,8 @@ HEADERS += Code/CaptureContext.h \
     Windows/TerminalViewer.h \
     Windows/CommentView.h \
     Windows/StatisticsViewer.h \
+    Windows/RenderGraphViewer.h \
+    Code/RenderGraph.h \
     Windows/TimelineBar.h \
     Windows/Dialogs/SettingsDialog.h \
     Widgets/OrderedListEditor.h \

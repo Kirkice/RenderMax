@@ -56,6 +56,7 @@ public:
 private:
   QList<QLayoutItem *> m_Items;
   QRect m_PrevRect;
+  bool m_InGeometry = false;
   RDToolButton *m_ElidedItems;
 };
 

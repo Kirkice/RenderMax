@@ -50,8 +50,7 @@
               Type="expandable" />
             <RegistryValue Root="HKLM" Id="VerbIconRDC" Action="write"
               Key="Software\Classes\RenderDoc.RDCCapture.1\DefaultIcon"
-              Value='[#qrenderdocEXE]'
-              Type="expandable" />
+              Value='&quot;[#qrenderdocEXE]&quot;,0'              Type="expandable" />
             <RegistryValue Root="HKLM" Id="RDCProgIDCLSID" Action="write"
               Key="Software\Classes\RenderDoc.RDCCapture.1\CLSID"
               Value='{5D6BF029-A6BA-417A-8523-120492B1DCE3}'
@@ -357,6 +356,7 @@
       <Component Id="FileExtensionRDC" Guid="65374649-9C72-40A1-97EC-F92BAE7C80F4">
         <ProgId Id='RenderDoc.RDCCapture.1' Description='RenderMax Capture Log (.rdc)'>
           <Extension Id='rdc' />
+          <Extension Id='rdt' />
         </ProgId>
       </Component>
 
