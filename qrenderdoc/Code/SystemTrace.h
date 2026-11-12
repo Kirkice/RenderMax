@@ -26,6 +26,8 @@
 
 #include <stdint.h>
 
+#include <functional>
+
 #include <QString>
 #include <QMap>
 #include <QStringList>
@@ -361,6 +363,56 @@ struct SystemTrace
   QVector<TraceThreadTime> ThreadTimes(double windowBeginSec = 0.0,
                                        double windowEndSec = 0.0) const;
 };
+
+// A display-only snapshot of the trace most recently loaded into the System Trace viewer.
+//
+// Statistics has to describe a trace it did not import, and a trace is routinely hundreds of
+// megabytes of spans. Holding a second copy of the parse just to render a summary would double the
+// memory cost of the import, so the loader publishes this projection instead: counts, extents and
+// the GPU accounting that can be stated from the trace, with no spans, series samples or actions.
+//
+// Every field is copied from the trace as it was loaded. Nothing here is derived from a heuristic,
+// and an absent measurement stays absent instead of becoming zero: `loaded == false` means no trace
+// has been imported, which is a different statement from a trace that contained nothing.
+struct SystemTraceSummary
+{
+  bool loaded = false;
+  QString path;        // file the trace was imported from
+  QString formatName;  // importer provenance, e.g. "Perfetto/Systrace (traceconv json)"
+  QString timeUnit;    // declared unit of the trace's own timestamps
+  double spanSec = 0.0;
+  int counterLanes = 0;
+  int threadLanes = 0;
+  int spanCount = 0;
+  int frameBoundaries = 0;
+  // True when at least one boundary carried a frame number the source declared, rather than an
+  // ordinal derived from ordering.
+  bool declaredFrameNumbers = false;
+  // GPU command-stream accounting exactly as the importer recorded it.
+  TraceGpuStats gpuStats;
+  // The most frequent event types the importer recognised, largest first.
+  QVector<QPair<QString, int>> topEvents;
+  // The busiest threads by measured running time over the whole trace.
+  QVector<TraceThreadTime> topThreads;
+  QStringList warnings;
+  // Incremented on every publish, so a consumer can tell two identical summaries apart.
+  uint64_t serial = 0;
+};
+
+// Project a freshly imported trace into the summary above. Pure: it does not publish anything.
+SystemTraceSummary SummariseSystemTrace(const SystemTrace &trace, const QString &path);
+
+// The summary last published by the System Trace viewer, or a summary with `loaded == false`.
+const SystemTraceSummary &CurrentSystemTraceSummary();
+
+// Publish the summary. Called by the trace viewer once an import finishes, on the GUI thread, and
+// forwarded to Statistics through the callback below rather than by polling. An import that failed
+// publishes `loaded == false`, which is how a consumer learns the trace is gone.
+void PublishSystemTraceSummary(const SystemTrace &trace, const QString &path);
+
+// Register the single consumer notified after a publish or clear. Passing an empty function
+// unregisters. The callback runs on the thread that published, which is the GUI thread.
+void SetSystemTraceSummaryCallback(std::function<void()> callback);
 
 // Render the thread-time table as CSV, one row per thread: the same file the viewer's
 // "Export CSV..." button writes. `windowSec` is what the percentage columns are shares of, so the

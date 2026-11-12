@@ -4188,3 +4188,89 @@ SystemTrace ImportSystemTraceFile(const QString &path)
 
   return ImportSystraceText(path);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Published summary of the loaded trace.
+// ---------------------------------------------------------------------------------------------
+
+static SystemTraceSummary g_CurrentSummary;
+static std::function<void()> g_SummaryCallback;
+
+const SystemTraceSummary &CurrentSystemTraceSummary()
+{
+  return g_CurrentSummary;
+}
+
+void SetSystemTraceSummaryCallback(std::function<void()> callback)
+{
+  g_SummaryCallback = callback;
+}
+
+static void notifySummaryChanged()
+{
+  if(g_SummaryCallback)
+    g_SummaryCallback();
+}
+
+SystemTraceSummary SummariseSystemTrace(const SystemTrace &trace, const QString &path)
+{
+  SystemTraceSummary summary;
+  summary.loaded = trace.valid;
+  summary.path = path;
+  summary.formatName = trace.formatName;
+  summary.timeUnit = trace.timeUnit;
+  summary.spanSec = trace.SpanSec();
+  summary.spanCount = trace.SpanCount();
+  summary.frameBoundaries = trace.frameBoundaries.size();
+  summary.declaredFrameNumbers = trace.HasDeclaredFrameNumbers();
+  summary.gpuStats = trace.gpuStats;
+  summary.warnings = trace.warnings;
+
+  for(const TraceTrack &track : trace.tracks)
+  {
+    if(track.kind == TraceTrackKind::Counter)
+      summary.counterLanes++;
+    else
+      summary.threadLanes++;
+  }
+
+  // The trace's own event histogram, largest first; ties keep the importer's alphabetical order so
+  // the list is stable between loads of the same file.
+  QVector<QPair<QString, int>> events;
+  for(auto it = trace.eventCounts.constBegin(); it != trace.eventCounts.constEnd(); ++it)
+    events.push_back(qMakePair(it.key(), it.value()));
+  std::stable_sort(events.begin(), events.end(),
+                   [](const QPair<QString, int> &a, const QPair<QString, int> &b) {
+                     return a.second > b.second;
+                   });
+  for(int i = 0; i < events.size() && i < 6; i++)
+    summary.topEvents.push_back(events[i]);
+
+  // Whole-trace thread ranking by measured running time. The idle lane is kernel bookkeeping, not
+  // work, so it is excluded rather than allowed to top the list.
+  QVector<TraceThreadTime> threads = trace.ThreadTimes(0.0, 0.0);
+  std::stable_sort(threads.begin(), threads.end(),
+                   [](const TraceThreadTime &a, const TraceThreadTime &b) {
+                     return a.runningSec > b.runningSec;
+                   });
+  for(int i = 0; i < threads.size() && summary.topThreads.size() < 5; i++)
+  {
+    if(threads[i].runningSec <= 0.0)
+      continue;
+    // tid 0 is the per-CPU idle thread (`swapper/N`). Its running time is CPU idleness, so ranking it
+    // as the busiest thread would report an idle machine as the hardest worker.
+    if(threads[i].tid == 0)
+      continue;
+    summary.topThreads.push_back(threads[i]);
+  }
+
+  return summary;
+}
+
+void PublishSystemTraceSummary(const SystemTrace &trace, const QString &path)
+{
+  const uint64_t serial = g_CurrentSummary.serial + 1;
+  g_CurrentSummary = SummariseSystemTrace(trace, path);
+  g_CurrentSummary.serial = serial;
+  notifySummaryChanged();
+}

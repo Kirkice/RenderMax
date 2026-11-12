@@ -35,6 +35,8 @@
 #include <QProgressBar>
 #include <QProgressDialog>
 #include <QShortcut>
+#include <QStylePainter>
+#include <QStyleOptionToolButton>
 #include <QToolButton>
 #include <QToolTip>
 
@@ -127,6 +129,36 @@ void MainWindow::MakeNetworkRequest(QUrl url, std::function<void(QByteArray)> su
 
   // fire over onto the network thread
   emit networkRequestGet(url);
+}
+
+namespace
+{
+class ReplayContextButton : public QToolButton
+{
+protected:
+  void paintEvent(QPaintEvent *event) override
+  {
+    if(icon().cacheKey() != Icons::house().cacheKey())
+    {
+      QToolButton::paintEvent(event);
+      return;
+    }
+
+    QStyleOptionToolButton option;
+    initStyleOption(&option);
+    QPixmap blank(iconSize());
+    blank.fill(Qt::transparent);
+    option.icon = QIcon(blank);
+    QStylePainter painter(this);
+    painter.drawComplexControl(QStyle::CC_ToolButton, option);
+
+    // Keep the local-context house at a fixed 6px inset from the window's left edge.
+    const int x = mapFrom(window(), QPoint(6, 0)).x();
+    Icons::house().paint(&painter, QRect(x, (height() - iconSize().height()) / 2,
+                                       iconSize().width(), iconSize().height()),
+                         Qt::AlignCenter, isEnabled() ? QIcon::Normal : QIcon::Disabled);
+  }
+};
 }
 
 MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::MainWindow), m_Ctx(ctx)
@@ -259,7 +291,8 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
 
   FillRemotesMenu(contextChooserMenu, true);
 
-  contextChooser = new QToolButton(this);
+  contextChooser = new ReplayContextButton();
+  contextChooser->setParent(this);
   contextChooser->setText(tr("Replay Context: %1").arg(tr("Local")));
   contextChooser->setIcon(Icons::house());
   contextChooser->setAutoRaise(true);

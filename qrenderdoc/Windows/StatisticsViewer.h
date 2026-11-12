@@ -52,6 +52,12 @@ private:
   ICaptureContext &m_Ctx;
 
   QString m_Report;
+  class QScrollArea *m_Overview = nullptr;
+  class QScrollArea *m_TraceReport = nullptr;
+  uint64_t m_Generation = 0;
+
+  void BuildOverview();
+  void BuildTraceReport();
 
   void AppendDrawStatistics();
   void AppendDispatchStatistics();

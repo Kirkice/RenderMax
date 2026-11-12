@@ -3917,6 +3917,11 @@ void SystemTraceViewer::applyImportedTrace(const QString &path,
   m_TracePath->setText(path);
   m_Loaded = true;
 
+  // Statistics shows a trace overview without owning the import, so publish the projection here:
+  // this is the point where a trace becomes the document's current trace, whether it arrived from a
+  // file, an RDT archive or a remote launch.
+  PublishSystemTraceSummary(m_Trace, path);
+
   // Fill the informational side panels. These are static for a given import, so they are not
   // touched on every frame change.
   m_Series->clear();
