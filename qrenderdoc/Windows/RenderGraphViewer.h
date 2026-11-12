@@ -41,7 +41,7 @@ private:
   QComboBox *m_Mode;
   std::shared_ptr<RenderGraph::Snapshot> m_Graph;
   std::shared_ptr<std::atomic_bool> m_Cancelled;
-  uint64_t m_Generation = 0, m_PreviewGeneration = 0;
+  uint64_t m_Generation = 0, m_PreviewGeneration = 0, m_SelectionGeneration = 0;
   int m_Selected = -1;
   bool m_Selecting = false;
   bool AccessVisible(const RenderGraph::Access &access) const;

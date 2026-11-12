@@ -22,6 +22,7 @@
 #include <QTextBrowser>
 #include <QTreeWidget>
 #include <QWheelEvent>
+#include <QTimer>
 #include <QMouseEvent>
 #include <QScrollBar>
 #include <QStyleOptionGraphicsItem>
@@ -363,17 +364,26 @@ RenderGraphViewer::RenderGraphViewer(ICaptureContext &ctx, QWidget *parent)
   });
   QObject::connect(m_Scene,&QGraphicsScene::selectionChanged,this,[this] {
     if(m_Selecting) return;
+    const uint64_t selection = ++m_SelectionGeneration;
     const auto items = m_Scene->selectedItems(); if(items.isEmpty()) return;
-    QGraphicsItem *item = items.first();
-    if(item->data(1).toString() == lit("pass"))
-    {
-      const int pi = item->data(0).toInt();
-      Select(pi,m_Mode->currentIndex() == 1);
-      const uint32_t eid = m_Graph->passes[pi].primaryEvent ? m_Graph->passes[pi].primaryEvent : m_Graph->passes[pi].first;
-      if(eid) m_Ctx.SetEventID({this},eid,eid);
-      LoadResourcePreviews(-1);
-    }
-    else ShowLink(item->data(0).toInt());
+    // Never destroy graphics items or enter replay's nested event loop from Qt's
+    // selection/mouse dispatch. Carry IDs, not item pointers, into the queued callback.
+    const QString type = items.first()->data(1).toString();
+    const int index = items.first()->data(0).toInt();
+    const auto graph = m_Graph;
+    QTimer::singleShot(0,this,[this,selection,graph,type,index] {
+      if(selection != m_SelectionGeneration || !graph || graph != m_Graph) return;
+      if(type == lit("pass"))
+      {
+        if(index < 0 || index >= graph->passes.size()) return;
+        Select(index,m_Mode->currentIndex() == 1);
+        const auto &pass = graph->passes[index];
+        const uint32_t eid = pass.primaryEvent ? pass.primaryEvent : pass.first;
+        if(eid) m_Ctx.SetEventID({this},eid,eid);
+        if(selection == m_SelectionGeneration && graph == m_Graph) LoadResourcePreviews(-1);
+      }
+      else if(type == lit("link")) ShowLink(index);
+    });
   });
   OnCaptureClosed();
   m_Ctx.AddCaptureViewer(this);
@@ -390,6 +400,7 @@ void RenderGraphViewer::OnCaptureLoaded()
 }
 void RenderGraphViewer::OnCaptureClosed()
 {
+  ++m_SelectionGeneration;
   ++m_Generation; if(m_Cancelled) m_Cancelled->store(true);
   m_Timings.clear(); m_HasTimings = false; m_HistoryResource = -1;
   m_Mode->setCurrentIndex(0);
@@ -796,7 +807,17 @@ void RenderGraphViewer::Display()
     }
     item->pass.inputs = int(displayedInputs.size()); item->pass.outputs = int(displayedOutputs.size());
     item->setData(0,pi); item->setData(1,lit("pass"));
-    item->openFocus = [this,pi] { m_Selected = pi; m_OpenFocus->setEnabled(true); m_Mode->setCurrentIndex(1); Display(); Fit(); };
+    item->openFocus = [this,pi] {
+      const auto graph = m_Graph;
+      ++m_SelectionGeneration;
+      QTimer::singleShot(0,this,[this,pi,graph] {
+        if(!graph || graph != m_Graph || pi >= graph->passes.size()) return;
+        m_Selected = pi; m_OpenFocus->setEnabled(true);
+        if(m_Mode->currentIndex() != 1) m_Mode->setCurrentIndex(1);
+        else Display();
+        Select(pi,false); Fit();
+      });
+    };
     item->current = current != g.eventPass.end() && current->second == pi;
     if(!m_HasTimings) item->timing = tr("Not measured");
     else if(timing[pi].samples == 0) item->timing = tr("Not reported");
@@ -851,7 +872,12 @@ void RenderGraphViewer::DisplayFocus()
   auto passCard = [&](int pi, double x, double y, bool selected) {
     auto *item = new PassItem(g.passes[pi],palette()); item->setPos(x,y);
     item->setData(0,pi); item->setData(1,lit("pass")); item->timing = TimingText(pi);
-    item->openFocus = [this,pi] { m_Selected = pi; Select(pi,false); };
+    item->openFocus = [this,pi] {
+      const auto graph = m_Graph;
+      QTimer::singleShot(0,this,[this,pi,graph] {
+        if(graph && graph == m_Graph) Select(pi,false);
+      });
+    };
     item->current = pi == current; m_Scene->addItem(item); item->setSelected(selected);
   };
   auto resourceCard = [&](int ri, double x, double y, const QString &direction) {
@@ -1064,8 +1090,11 @@ void RenderGraphViewer::LoadResourcePreviews(int link)
         thumb->setToolTip(viewer->tr("%1 · preview EID %2 · mip 0 / slice 0\nClick to open texture").arg(resource.name).arg(eid));
         const ResourceId id = resource.id;
         thumb->open = [viewer,id] {
-          if(viewer && viewer->m_Ctx.IsCaptureLoaded())
-            viewer->m_Ctx.GetTextureViewer()->ViewTexture(id,CompType::Typeless,true);
+          if(!viewer) return;
+          QTimer::singleShot(0,viewer.data(),[viewer,id] {
+            if(viewer && viewer->m_Ctx.IsCaptureLoaded())
+              viewer->m_Ctx.GetTextureViewer()->ViewTexture(id,CompType::Typeless,true);
+          });
         };
         QPointF location = anchor+QPointF((index%4)*124,(index/4)*110);
         // Keep preview tiles off cards, group titles and other preview tiles.

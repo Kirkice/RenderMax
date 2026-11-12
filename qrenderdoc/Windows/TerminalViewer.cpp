@@ -72,6 +72,7 @@ struct TerminalViewer::Native
   QByteArray inputQueue;
   bool stopping = false;
 #endif
+  bool initialising = false;
   bool ready = false;
   bool initialNavigation = true;
   int cols = 100, rows = 30;
@@ -111,8 +112,7 @@ TerminalViewer::TerminalViewer(QWidget *parent) : QFrame(parent), n(new Native)
   m_Timer = new QTimer(this);
   m_Timer->setInterval(15);
   connect(m_Timer,&QTimer::timeout,this,&TerminalViewer::poll);
-  // Dock placement may recreate the native HWND; create WebView only after docking completes.
-  QTimer::singleShot(0, this, &TerminalViewer::initialise);
+  // Resident tabs start hidden. Initialise on first activation, after docking settles.
 }
 
 TerminalViewer::~TerminalViewer()
@@ -127,6 +127,8 @@ TerminalViewer::~TerminalViewer()
 
 void TerminalViewer::initialise()
 {
+  if(n->initialising || !isVisible()) return;
+  n->initialising = true;
 #ifdef WIN32
   const QString conptyPath = QDir(QCoreApplication::applicationDirPath()).filePath(lit("conpty.dll"));
   n->conpty = LoadLibraryW((LPCWSTR)conptyPath.utf16());
@@ -336,16 +338,38 @@ void TerminalViewer::stopShell()
 void TerminalViewer::resizeRenderer()
 {
 #ifdef WIN32
-  if(n->controller){RECT rect={};GetClientRect((HWND)m_Host->winId(),&rect);n->controller->put_Bounds(rect);}
+  if(n->controller)
+  {
+    const HWND host = (HWND)m_Host->winId();
+    HWND previous = NULL;
+    n->controller->get_ParentWindow(&previous);
+    if(previous != host) n->controller->put_ParentWindow(host);
+    RECT rect = {}; GetClientRect(host,&rect);
+    n->controller->put_Bounds(rect);
+    n->controller->put_IsVisible(m_Host->isVisible() ? TRUE : FALSE);
+    n->controller->NotifyParentWindowPositionChanged();
+  }
 #endif
 }
 
 bool TerminalViewer::eventFilter(QObject *watched,QEvent *event)
 {
-  if(watched==m_Host && event->type()==QEvent::Resize)resizeRenderer();
+  if(watched == m_Host && (event->type() == QEvent::Resize ||
+      event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+      event->type() == QEvent::WinIdChange || event->type() == QEvent::ParentChange))
+  {
+    // Native handles and visibility may not be final until Qt finishes docking.
+    QTimer::singleShot(0,this,[this] { resizeRenderer(); });
+  }
   return QFrame::eventFilter(watched,event);
 }
 void TerminalViewer::showEvent(QShowEvent *event)
 {
-  QFrame::showEvent(event);resizeRenderer();send(QJsonObject{{lit("type"),lit("focus")}});
+  QFrame::showEvent(event);
+  QTimer::singleShot(0,this,[this] {
+    if(!isVisible()) return;
+    initialise();
+    resizeRenderer();
+    send(QJsonObject{{lit("type"),lit("focus")}});
+  });
 }
