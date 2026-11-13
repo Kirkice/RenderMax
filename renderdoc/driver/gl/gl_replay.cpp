@@ -3774,17 +3774,13 @@ bool GLReplay::BeginSceneReplay(uint32_t anchor, uint32_t end,
     m_pDriver->ReplayLog(0, end, eReplay_Full);
     return false;
   }
-  for(int col = 0; col < 4; col++)
+  if(!m_pDriver->ReadSceneMatrix(program,m_pDriver->m_SceneReference))
   {
-    rdcstr name = StringFormat::Fmt("hlslcc_mtx4x4unity_MatrixVP[%d]", col);
-    GLint loc = GL.glGetUniformLocation(program, name.c_str());
-    if(loc < 0)
-    {
-      m_pDriver->ReplayLog(0, end, eReplay_Full);
-      return false;
-    }
-    GL.glGetUniformfv(program, loc, m_pDriver->m_SceneReference + col * 4);
+    m_pDriver->ReplayLog(0,end,eReplay_Full);
+    return false;
   }
+  m_pDriver->m_SceneBuffer = 0;
+  m_pDriver->m_SceneLocation = -1;
   m_SceneCachedAnchor = anchor;
   }
   Matrix4f original;

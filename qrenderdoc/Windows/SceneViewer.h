@@ -195,7 +195,7 @@ private:
         if(generation != m_Generation) return;
         m_Busy = false;
         m_Status->setText(!supported ? tr("No compatible camera binding was found in this replay.") :
-          anchor ? tr("Camera anchor EID %1 | Original-material BackBuffer replay").arg(anchor) :
+          anchor ? tr("Camera anchor requested: EID %1 | Hold RMB and drag to look. Requires a compatible shader matrix binding.").arg(anchor) :
           tr("Original BackBuffer. Select a main-scene draw and bind its camera."));
         if(m_Pending) Refresh();
       });

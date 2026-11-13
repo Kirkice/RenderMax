@@ -48,3 +48,12 @@ qrenderdoc/3rdparty/pyside
 .DS_Store
 plugins-*/
 __pycache__
+
+# Local build/test output (keep test source and fixtures versioned).
+/*.log
+/*.rdc
+/*.rdt
+/.local-tests/
+*.rej
+*.bak
+*.tmp

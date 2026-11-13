@@ -703,7 +703,12 @@ public:
   rdcarray<SceneCandidate> m_SceneCandidates;
   float m_SceneReference[16] = {};
   float m_SceneMatrix[16] = {};
+  bool ReadSceneMatrix(GLuint program, float *matrix);
+  void WriteSceneMatrix(const float *matrix);
   void SceneUniforms(bool restore);
+  GLuint m_SceneBuffer = 0;
+  GLintptr m_SceneBufferOffset = 0;
+  GLint m_SceneBufferStride = 16;
   GLuint m_SceneProgram = 0;
   GLint m_SceneLocation = -1;
   float m_SceneSaved[16] = {};

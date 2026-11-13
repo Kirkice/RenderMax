@@ -5461,31 +5461,84 @@ RDResult WrappedOpenGL::ContextReplayLog(CaptureState readType, uint32_t startEv
   return ResultCode::Succeeded;
 }
 
+bool WrappedOpenGL::ReadSceneMatrix(GLuint program, float *matrix)
+{
+  m_SceneProgram = program;
+  m_SceneBuffer = 0;
+  m_SceneLocation = -1;
+  if(!program) return false;
+  const char *name = "hlslcc_mtx4x4unity_MatrixVP[0]";
+  GLint loc = GL.glGetUniformLocation(program,name);
+  if(loc >= 0)
+  {
+    for(int col = 0; col < 4; ++col)
+    {
+      rdcstr element = StringFormat::Fmt("hlslcc_mtx4x4unity_MatrixVP[%d]",col);
+      GLint location = GL.glGetUniformLocation(program,element.c_str());
+      if(location < 0) return false;
+      GL.glGetUniformfv(program,location,matrix+col*4);
+    }
+    m_SceneLocation = loc;
+    return true;
+  }
+  GLuint index = GL_INVALID_INDEX;
+  GL.glGetUniformIndices(program,1,&name,&index);
+  if(index == GL_INVALID_INDEX) return false;
+  GLint block = -1, offset = 0, stride = 0, type = 0, size = 0;
+  GL.glGetActiveUniformsiv(program,1,&index,eGL_UNIFORM_BLOCK_INDEX,&block);
+  GL.glGetActiveUniformsiv(program,1,&index,eGL_UNIFORM_OFFSET,&offset);
+  GL.glGetActiveUniformsiv(program,1,&index,eGL_UNIFORM_ARRAY_STRIDE,&stride);
+  GL.glGetActiveUniformsiv(program,1,&index,eGL_UNIFORM_TYPE,&type);
+  GL.glGetActiveUniformsiv(program,1,&index,eGL_UNIFORM_SIZE,&size);
+  if(block < 0 || offset < 0 || stride < 16 || type != eGL_FLOAT_VEC4 || size < 4) return false;
+  GLint binding = 0, buffer = 0;
+  GL.glGetActiveUniformBlockiv(program,(GLuint)block,eGL_UNIFORM_BLOCK_BINDING,&binding);
+  GL.glGetIntegeri_v(eGL_UNIFORM_BUFFER_BINDING,binding,&buffer);
+  if(!buffer) return false;
+  GLint64 start = 0, length = 0;
+  GL.glGetInteger64i_v(eGL_UNIFORM_BUFFER_START,binding,&start);
+  GLint previous = 0;
+  GL.glGetIntegerv(eGL_COPY_READ_BUFFER_BINDING,&previous);
+  GL.glBindBuffer(eGL_COPY_READ_BUFFER,buffer);
+  GL.glGetBufferParameteri64v(eGL_COPY_READ_BUFFER,eGL_BUFFER_SIZE,&length);
+  GL.glBindBuffer(eGL_COPY_READ_BUFFER,previous);
+  if(start < 0 || start+offset+3*int64_t(stride)+16 > length) return false;
+  m_SceneBuffer = (GLuint)buffer;
+  m_SceneBufferOffset = (GLintptr)(start+offset);
+  m_SceneBufferStride = stride;
+  for(int col = 0; col < 4; ++col)
+    GL.glGetNamedBufferSubDataEXT(m_SceneBuffer,m_SceneBufferOffset+col*stride,16,matrix+col*4);
+  return true;
+}
+
+void WrappedOpenGL::WriteSceneMatrix(const float *matrix)
+{
+  if(m_SceneBuffer)
+  {
+    for(int col = 0; col < 4; ++col)
+      GL.glNamedBufferSubDataEXT(m_SceneBuffer,m_SceneBufferOffset+col*m_SceneBufferStride,16,matrix+col*4);
+  }
+  else if(m_SceneLocation >= 0)
+    GL.glProgramUniform4fv(m_SceneProgram,m_SceneLocation,4,matrix);
+}
+
 void WrappedOpenGL::SceneUniforms(bool restore)
 {
   if(restore)
   {
-    if(m_SceneLocation >= 0)
-      GL.glProgramUniform4fv(m_SceneProgram, m_SceneLocation, 4, m_SceneSaved);
+    WriteSceneMatrix(m_SceneSaved);
+    m_SceneBuffer = 0;
     m_SceneLocation = -1;
     return;
   }
-  m_SceneLocation = -1;
   GLint program = 0;
-  GL.glGetIntegerv(eGL_CURRENT_PROGRAM, &program);
-  if(!program)
-    return;
-  GLint loc = GL.glGetUniformLocation(program, "hlslcc_mtx4x4unity_MatrixVP[0]");
-  if(loc < 0)
-    return;
-  for(int col = 0; col < 4; col++)
-  {
-    rdcstr name = StringFormat::Fmt("hlslcc_mtx4x4unity_MatrixVP[%d]", col);
-    GLint el = GL.glGetUniformLocation(program, name.c_str());
-    if(el < 0)
-      return;
-    GL.glGetUniformfv(program, el, m_SceneSaved + col * 4);
-  }
+  GL.glGetIntegerv(eGL_CURRENT_PROGRAM,&program);
+  if(!ReadSceneMatrix(program,m_SceneSaved)) return;
+  // Keep the binding inactive until the matrix matches the selected camera.
+  const GLuint buffer = m_SceneBuffer;
+  const GLint location = m_SceneLocation;
+  m_SceneBuffer = 0;
+  m_SceneLocation = -1;
   if(m_SceneDiscover)
   {
     // An affine/orthographic VP has constant homogeneous W: the xyz part of
@@ -5520,8 +5573,9 @@ void WrappedOpenGL::SceneUniforms(bool restore)
        0.00001f * RDCMAX(1.0f, fabsf(m_SceneReference[i])))
       return;
   m_SceneProgram = program;
-  m_SceneLocation = loc;
-  GL.glProgramUniform4fv(program, loc, 4, m_SceneMatrix);
+  m_SceneBuffer = buffer;
+  m_SceneLocation = location;
+  WriteSceneMatrix(m_SceneMatrix);
 }
 
 bool WrappedOpenGL::ContextProcessChunk(ReadSerialiser &ser, GLChunk chunk)
