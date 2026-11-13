@@ -1,0 +1,6 @@
+{
+  "name": "RenderMax.CaptureReplay.Editor",
+  "references": ["RenderMax.CaptureReplay.Runtime"],
+  "includePlatforms": ["Editor"],
+  "autoReferenced": true
+}

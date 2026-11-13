@@ -1,0 +1,48 @@
+# Capture Shader Index
+
+Names are EID-based labels, NOT recovered original shader names.
+
+| Shader | Associated EIDs |
+|---|---|
+| E0063_Back_Opaque | 63 |
+| E0076_Back_Opaque | 76, 126, 138, 141, 168, 172 |
+| E0088_Back_Opaque | 88 |
+| E0102_Back_Opaque | 102, 112 |
+| E0152_Back_Opaque | 152 |
+| E0209_Off_Blended | 209, 1195, 1204, 1368 |
+| E0253_Off_Blended | 253, 554, 1357 |
+| E0226_Off_Blended | 226 |
+| E0281_Back_Opaque | 281 |
+| E0297_Back_Opaque | 297, 322, 333, 336 |
+| E0310_Back_Opaque | 310 |
+| E0370_Back_Opaque | 370 |
+| E0384_Back_Blended | 384, 394, 628, 638, 647, 1166 |
+| E0422_Back_Blended | 422, 442, 480 |
+| E0459_Off_Blended | 459, 469 |
+| E0500_Back_Blended | 500 |
+| E0525_Off_Blended | 525, 704, 729, 749, 774, 823 |
+| E0577_Back_Blended | 577 |
+| E0591_Back_Blended | 591 |
+| E0800_Off_Blended | 800 |
+| E1245_Off_Blended | 1245, 1252 |
+| E0608_Back_Blended | 608 |
+| E0675_Back_Blended | 675, 851 |
+| E0834_Off_Blended | 834, 835 |
+| E0840_Off_Blended | 840, 841 |
+| E0891_Back_Opaque | 891 |
+| E0931_Back_Opaque | 931 |
+| E1299_Back_Blended | 1299 |
+| E0977_Back_Opaque | 977 |
+| E1018_Back_Opaque | 1018, 1029 |
+| E1080_Back_Opaque | 1080, 1114, 1117 |
+| E1327_Back_Blended | 1327 |
+| E1135_Back_Opaque | 1135 |
+| E1222_Off_Blended | 1222 |
+| E1393_Off_Opaque | 1393 |
+| E1427_Off_Opaque | 1427, 1452, 1476, 1500, 1524, 1548, 1572 |
+| E1583_Off_Opaque | 1583, 1594, 1605, 1616, 1627, 1638 |
+| E1656_Off_Opaque | 1656 |
+| E1680_Off_Blended | 1680 |
+| E1696_Off_Blended | 1696, 1699, 1701, 1726, 1728, 1731, 1733, 1758, 1761, 1764, 1766, 1769, 1777, 1780, 1783, 1786 |
+| E1713_Off_Blended | 1713, 1745 |
+| E1806_Back_Opaque | 1806, 1811 |

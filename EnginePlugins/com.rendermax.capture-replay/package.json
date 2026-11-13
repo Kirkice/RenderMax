@@ -1,0 +1,8 @@
+{
+  "name": "com.rendermax.capture-replay",
+  "version": "0.1.0",
+  "displayName": "RenderMax Capture Replay",
+  "description": "Import and validate RenderMax GPU evidence packages. Capture replay tooling under development.",
+  "unity": "2019.4",
+  "author": { "name": "RenderMax" }
+}

@@ -1,0 +1,299 @@
+{
+    "shaders": [
+        {
+            "asset": "Assets/Phase2Batch/E0063_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0076_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0088_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0102_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0152_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0209_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0226_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0253_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0281_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0297_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0310_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0370_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0384_Back_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0422_Back_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0459_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0500_Back_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0525_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0577_Back_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0591_Back_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0608_Back_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0675_Back_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0800_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0834_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0840_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0891_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0931_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E0977_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1018_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1080_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1135_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1222_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1245_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1299_Back_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1327_Back_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1393_Off_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1427_Off_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1583_Off_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1656_Off_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1680_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1696_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1713_Off_Blended.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        },
+        {
+            "asset": "Assets/Phase2Batch/E1806_Back_Opaque.shader",
+            "backend": "OpenGLES3",
+            "errors": "",
+            "supported": true,
+            "passBound": true
+        }
+    ],
+    "limitation": "Compile/bind check only. No captured resources or visual equivalence validated."
+}

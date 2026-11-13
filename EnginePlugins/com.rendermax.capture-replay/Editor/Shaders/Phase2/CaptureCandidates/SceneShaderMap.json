@@ -1,0 +1,318 @@
+{
+  "entries": [
+    {
+      "shader": "E0063_Back_Opaque",
+      "eventIds": [
+        63
+      ]
+    },
+    {
+      "shader": "E0076_Back_Opaque",
+      "eventIds": [
+        76,
+        126,
+        138,
+        141,
+        168,
+        172
+      ]
+    },
+    {
+      "shader": "E0088_Back_Opaque",
+      "eventIds": [
+        88
+      ]
+    },
+    {
+      "shader": "E0102_Back_Opaque",
+      "eventIds": [
+        102,
+        112
+      ]
+    },
+    {
+      "shader": "E0152_Back_Opaque",
+      "eventIds": [
+        152
+      ]
+    },
+    {
+      "shader": "E0209_Off_Blended",
+      "eventIds": [
+        209,
+        1195,
+        1204,
+        1368
+      ]
+    },
+    {
+      "shader": "E0253_Off_Blended",
+      "eventIds": [
+        253,
+        554,
+        1357
+      ]
+    },
+    {
+      "shader": "E0226_Off_Blended",
+      "eventIds": [
+        226
+      ]
+    },
+    {
+      "shader": "E0281_Back_Opaque",
+      "eventIds": [
+        281
+      ]
+    },
+    {
+      "shader": "E0297_Back_Opaque",
+      "eventIds": [
+        297,
+        322,
+        333,
+        336
+      ]
+    },
+    {
+      "shader": "E0310_Back_Opaque",
+      "eventIds": [
+        310
+      ]
+    },
+    {
+      "shader": "E0370_Back_Opaque",
+      "eventIds": [
+        370
+      ]
+    },
+    {
+      "shader": "E0384_Back_Blended",
+      "eventIds": [
+        384,
+        394,
+        628,
+        638,
+        647,
+        1166
+      ]
+    },
+    {
+      "shader": "E0422_Back_Blended",
+      "eventIds": [
+        422,
+        442,
+        480
+      ]
+    },
+    {
+      "shader": "E0459_Off_Blended",
+      "eventIds": [
+        459,
+        469
+      ]
+    },
+    {
+      "shader": "E0500_Back_Blended",
+      "eventIds": [
+        500
+      ]
+    },
+    {
+      "shader": "E0525_Off_Blended",
+      "eventIds": [
+        525,
+        704,
+        729,
+        749,
+        774,
+        823
+      ]
+    },
+    {
+      "shader": "E0577_Back_Blended",
+      "eventIds": [
+        577
+      ]
+    },
+    {
+      "shader": "E0591_Back_Blended",
+      "eventIds": [
+        591
+      ]
+    },
+    {
+      "shader": "E0800_Off_Blended",
+      "eventIds": [
+        800
+      ]
+    },
+    {
+      "shader": "E1245_Off_Blended",
+      "eventIds": [
+        1245,
+        1252
+      ]
+    },
+    {
+      "shader": "E0608_Back_Blended",
+      "eventIds": [
+        608
+      ]
+    },
+    {
+      "shader": "E0675_Back_Blended",
+      "eventIds": [
+        675,
+        851
+      ]
+    },
+    {
+      "shader": "E0834_Off_Blended",
+      "eventIds": [
+        834,
+        835
+      ]
+    },
+    {
+      "shader": "E0840_Off_Blended",
+      "eventIds": [
+        840,
+        841
+      ]
+    },
+    {
+      "shader": "E0891_Back_Opaque",
+      "eventIds": [
+        891
+      ]
+    },
+    {
+      "shader": "E0931_Back_Opaque",
+      "eventIds": [
+        931
+      ]
+    },
+    {
+      "shader": "E1299_Back_Blended",
+      "eventIds": [
+        1299
+      ]
+    },
+    {
+      "shader": "E0977_Back_Opaque",
+      "eventIds": [
+        977
+      ]
+    },
+    {
+      "shader": "E1018_Back_Opaque",
+      "eventIds": [
+        1018,
+        1029
+      ]
+    },
+    {
+      "shader": "E1080_Back_Opaque",
+      "eventIds": [
+        1080,
+        1114,
+        1117
+      ]
+    },
+    {
+      "shader": "E1327_Back_Blended",
+      "eventIds": [
+        1327
+      ]
+    },
+    {
+      "shader": "E1135_Back_Opaque",
+      "eventIds": [
+        1135
+      ]
+    },
+    {
+      "shader": "E1222_Off_Blended",
+      "eventIds": [
+        1222
+      ]
+    },
+    {
+      "shader": "E1393_Off_Opaque",
+      "eventIds": [
+        1393
+      ]
+    },
+    {
+      "shader": "E1427_Off_Opaque",
+      "eventIds": [
+        1427,
+        1452,
+        1476,
+        1500,
+        1524,
+        1548,
+        1572
+      ]
+    },
+    {
+      "shader": "E1583_Off_Opaque",
+      "eventIds": [
+        1583,
+        1594,
+        1605,
+        1616,
+        1627,
+        1638
+      ]
+    },
+    {
+      "shader": "E1656_Off_Opaque",
+      "eventIds": [
+        1656
+      ]
+    },
+    {
+      "shader": "E1680_Off_Blended",
+      "eventIds": [
+        1680
+      ]
+    },
+    {
+      "shader": "E1696_Off_Blended",
+      "eventIds": [
+        1696,
+        1699,
+        1701,
+        1726,
+        1728,
+        1731,
+        1733,
+        1758,
+        1761,
+        1764,
+        1766,
+        1769,
+        1777,
+        1780,
+        1783,
+        1786
+      ]
+    },
+    {
+      "shader": "E1713_Off_Blended",
+      "eventIds": [
+        1713,
+        1745
+      ]
+    },
+    {
+      "shader": "E1806_Back_Opaque",
+      "eventIds": [
+        1806,
+        1811
+      ]
+    }
+  ]
+}
