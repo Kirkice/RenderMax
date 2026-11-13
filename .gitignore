@@ -57,3 +57,8 @@ __pycache__
 *.rej
 *.bak
 *.tmp
+
+# Versioned Windows Mali Offline Compiler runtime (not general build artifacts).
+!/tools/mali_offline_compiler/malioc.exe
+!/tools/mali_offline_compiler/graphics/*.dll
+!/tools/mali_offline_compiler/external/glslang.exe

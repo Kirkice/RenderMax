@@ -40,6 +40,7 @@ if [[ "$MaliOCEnabled" != "no" ]]; then
 	MALIOC_SOURCE="${MALIOC_ROOT}"
 	if [ -z "${MALIOC_SOURCE}" ]; then
 		for candidate in \
+			"${REPO_ROOT}/tools/mali_offline_compiler" \
 			"${REPO_ROOT}/mali_offline_compiler" \
 			"E:/Application/Arm Performance Studio 2024.6/mali_offline_compiler" \
 			"C:/Program Files/Arm/Arm Performance Studio 2024.6/mali_offline_compiler" \
@@ -55,6 +56,11 @@ if [[ "$MaliOCEnabled" != "no" ]]; then
 	if [ -n "${MALIOC_SOURCE}" ] && [ -f "${MALIOC_SOURCE}/malioc.exe" ] && [ -d "${MALIOC_SOURCE}/graphics" ] && [ -f "${MALIOC_SOURCE}/external/glslang.exe" ]; then
 		mkdir -p dist/Release64/mali_offline_compiler
 		cp -R "${MALIOC_SOURCE}/malioc.exe" "${MALIOC_SOURCE}/graphics" "${MALIOC_SOURCE}/external" dist/Release64/mali_offline_compiler/
+		if [ ! -f "${MALIOC_SOURCE}/license_terms/license_agreement.txt" ] || [ ! -f "${MALIOC_SOURCE}/license_terms/third_party_licenses/mali_offline_compiler/third_party_licenses.txt" ]; then
+			echo "ERROR: Mali runtime license files missing; use tools/mali_offline_compiler or provide the accompanying license_terms."
+			exit 1
+		fi
+		cp -R "${MALIOC_SOURCE}/license_terms" dist/Release64/mali_offline_compiler/
 		MALIOC_WIX_DEFINE="-dIncludeMaliOC=yes"
 		echo "Bundled Mali Offline Compiler from ${MALIOC_SOURCE} into the x64 package."
 	else

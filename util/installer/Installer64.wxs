@@ -170,6 +170,18 @@
 
           <?if $(var.IncludeMaliOC) = "yes" ?>
           <Directory Id='maliOfflineCompiler' Name='mali_offline_compiler'>
+            <Directory Id='maliLicenseTerms' Name='license_terms'>
+              <Component Id='MaliOfflineCompilerLicense' Win64='yes' Guid='DC45FB73-C20D-4BCB-BEE0-9BDA89E59792'>
+                <File Id='MaliLicenseAgreement' Name='license_agreement.txt' Source='dist/Release64/mali_offline_compiler/license_terms/license_agreement.txt' KeyPath='yes' />
+              </Component>
+              <Directory Id='maliThirdPartyLicenses' Name='third_party_licenses'>
+                <Directory Id='maliCompilerThirdPartyLicenses' Name='mali_offline_compiler'>
+                  <Component Id='MaliOfflineCompilerThirdPartyLicense' Win64='yes' Guid='A296BCE5-8BB2-46CE-BDB1-70D8ABF15047'>
+                    <File Id='MaliThirdPartyLicense' Name='third_party_licenses.txt' Source='dist/Release64/mali_offline_compiler/license_terms/third_party_licenses/mali_offline_compiler/third_party_licenses.txt' KeyPath='yes' />
+                  </Component>
+                </Directory>
+              </Directory>
+            </Directory>
             <Component Id='MaliOfflineCompiler' Win64="yes" Guid='916D4D24-FD38-471C-AC3B-2B98555236F1'>
               <File Id='maliocEXE' Name='malioc.exe' DiskId='1' Source='dist/Release64/mali_offline_compiler/malioc.exe' KeyPath='yes' />
             </Component>
@@ -461,6 +473,8 @@
         <ComponentRef Id='Shiboken2Deps' />
 
         <?if $(var.IncludeMaliOC) = "yes" ?>
+        <ComponentRef Id='MaliOfflineCompilerLicense' />
+        <ComponentRef Id='MaliOfflineCompilerThirdPartyLicense' />
         <ComponentRef Id='MaliOfflineCompiler' />
         <ComponentRef Id='MaliOfflineCompilerGraphics' />
         <ComponentRef Id='MaliOfflineCompilerExternal' />
