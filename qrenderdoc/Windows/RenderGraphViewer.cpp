@@ -24,6 +24,7 @@
 #include <QWheelEvent>
 #include <QTimer>
 #include <QMouseEvent>
+#include <QResizeEvent>
 #include <QScrollBar>
 #include <QStyleOptionGraphicsItem>
 #include <functional>
@@ -101,6 +102,9 @@ public:
 class GraphView : public QGraphicsView
 {
 public:
+  // Set when a fit was requested while the panel had no usable size (hidden tab, or a dock
+  // that was never laid out). It runs once the view is actually shown and sized.
+  std::function<void()> pendingFit;
   GraphView(QGraphicsScene *s) : QGraphicsView(s)
   {
     setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
@@ -111,7 +115,24 @@ public:
 private:
   QPoint m_Press, m_Last;
   bool m_Left = false, m_Middle = false, m_Panning = false;
+  void RunPendingFit()
+  {
+    if(!pendingFit || !isVisible() || viewport()->width() < 80 || viewport()->height() < 80) return;
+    auto fit = pendingFit;
+    pendingFit = nullptr;
+    fit();
+  }
 protected:
+  void showEvent(QShowEvent *e) override
+  {
+    QGraphicsView::showEvent(e);
+    QTimer::singleShot(0, this, [this] { RunPendingFit(); });
+  }
+  void resizeEvent(QResizeEvent *e) override
+  {
+    QGraphicsView::resizeEvent(e);
+    if(pendingFit) QTimer::singleShot(0, this, [this] { RunPendingFit(); });
+  }
   void mousePressEvent(QMouseEvent *e) override
   {
     m_Press = m_Last = e->pos(); m_Panning = false;
@@ -143,9 +164,14 @@ protected:
   }
   void wheelEvent(QWheelEvent *e) override
   {
-    const double factor = e->angleDelta().y() > 0 ? 1.12 : 1.0/1.12;
-    const double next = transform().m11() * factor;
-    if(next >= 0.05 && next <= 2.5) scale(factor, factor);
+    const double current = transform().m11();
+    double factor = e->angleDelta().y() > 0 ? 1.12 : 1.0/1.12;
+    // Clamp the resulting scale instead of rejecting the step. A large graph can legitimately
+    // fit far below the old 0.05 floor, and rejecting there left zoom completely dead.
+    const double next = current * factor;
+    if(next < 0.005) factor = 0.005 / current;
+    else if(next > 6.0) factor = 6.0 / current;
+    if(factor > 0.0 && std::fabs(factor - 1.0) > 1e-6) scale(factor, factor);
     e->accept();
   }
   void drawBackground(QPainter *p, const QRectF &r) override
@@ -539,7 +565,20 @@ void RenderGraphViewer::Build()
 }
 void RenderGraphViewer::Fit()
 {
-  if(!m_Scene->items().isEmpty()) m_View->fitInView(m_Scene->itemsBoundingRect().adjusted(-30,-30,30,30),Qt::KeepAspectRatio);
+  if(m_Scene->items().isEmpty()) return;
+  auto fitNow = [this] {
+    if(m_Scene->items().isEmpty()) return;
+    m_View->fitInView(m_Scene->itemsBoundingRect().adjusted(-30,-30,30,30),Qt::KeepAspectRatio);
+  };
+  // The viewer is a resident dock tab, so a graph built while that tab is hidden would be
+  // fitted against a tiny placeholder viewport and shrink to a few pixels wide.
+  auto *view = static_cast<GraphView *>(m_View);
+  if(!view->isVisible() || view->viewport()->width() < 80 || view->viewport()->height() < 80)
+  {
+    view->pendingFit = fitNow;
+    return;
+  }
+  fitNow();
 }
 bool RenderGraphViewer::AccessVisible(const RenderGraph::Access &a) const
 {
