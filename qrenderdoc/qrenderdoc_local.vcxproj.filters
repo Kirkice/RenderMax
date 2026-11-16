@@ -672,9 +672,6 @@
     <ClCompile Include="Styles\RDTweakedNativeStyle\RDTweakedNativeStyle.cpp">
       <Filter>Styles\RDTweakedNativeStyle</Filter>
     </ClCompile>
-    <ClCompile Include="Styles\StyleData.cpp">
-      <Filter>Styles</Filter>
-    </ClCompile>
     <ClCompile Include="Styles\UEStyle\UEStyle.cpp">
       <Filter>Styles</Filter>
     </ClCompile>
@@ -1144,9 +1141,6 @@
     </ClInclude>
     <ClInclude Include="Code\precompiled.h">
       <Filter>PCH</Filter>
-    </ClInclude>
-    <ClInclude Include="Styles\StyleData.h">
-      <Filter>Styles</Filter>
     </ClInclude>
     <ClInclude Include="Styles\UEStyle\UEStyle.h">
       <Filter>Styles</Filter>

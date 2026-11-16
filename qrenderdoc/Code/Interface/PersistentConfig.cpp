@@ -29,7 +29,7 @@
 #include <QStandardPaths>
 #include "Code/QRDUtils.h"
 #include "Code/Resources.h"
-#include "Styles/StyleData.h"
+#include "Styles/UEStyle/UEStyle.h"
 #include "QRDInterface.h"
 
 template <>
@@ -442,29 +442,18 @@ void PersistentConfig::UpdateEnumeratedProtocolDevices()
   }
 }
 
-bool PersistentConfig::SetStyle()
+void PersistentConfig::SetStyle()
 {
-  for(int i = 0; i < StyleData::numAvailable; i++)
-  {
-    if(UIStyle == rdcstr(StyleData::availStyles[i].styleID))
-    {
-      QStyle *style = StyleData::availStyles[i].creator();
-      // A style sheet set at QApplication level survives QStyle replacement. Clear it
-      // before installing the next style so UE/Starship rules cannot bleed into other themes.
-      qApp->setStyleSheet(QString());
-      Formatter::setPalette(style->standardPalette());
-      QApplication::setStyle(style);
-      // The line-art icons are the theme's text colour, so the copies rendered for the previous
-      // theme are now the wrong colour. Drop them; every icon re-renders on next use.
-      Resources::RefreshIcons();
-      return true;
-    }
-  }
+  QStyle *style = new UEStyle();
 
-  if(UIStyle != "")
-    qCritical() << "Unrecognised UI style" << QString(UIStyle);
-
-  return false;
+  // A style sheet set at QApplication level survives QStyle replacement. Clear it before
+  // installing the style so a stale sheet from a previous run cannot be layered on top.
+  qApp->setStyleSheet(QString());
+  Formatter::setPalette(style->standardPalette());
+  QApplication::setStyle(style);
+  // The line-art icons are the theme's text colour, so a copy rendered with a different
+  // palette would be the wrong colour. Drop them; every icon re-renders on next use.
+  Resources::RefreshIcons();
 }
 
 PersistentConfig::PersistentConfig()

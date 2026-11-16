@@ -12,16 +12,6 @@ The settings are saved in the application-specific settings directory (On window
 General options
 ---------------
 
-  | :guilabel:`Visual theme of the UI` Default: ``Light`` or ``Dark`` depending on native color theme.
-
-This allows you to choose what theme to use in RenderDoc. By default when first starting either the light or dark native RenderDoc theme will be selected, but you can change that or switch to any other supported theme here.
-
-.. note::
-
-  The theme won't fully apply until the next restart, although most elements will update immediately to give you a preview.
-
----------------
-
   | :guilabel:`Global font scale` Default: ``100%``
 
 This option will apply a global font scale to all fonts in the UI. This will only apply to text elements, and other UI elements will take their scale from the system's DPI scaling configuration.

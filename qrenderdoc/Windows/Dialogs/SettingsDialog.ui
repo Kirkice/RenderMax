@@ -94,26 +94,6 @@
           <string>General</string>
          </property>
          <layout class="QGridLayout" name="gridLayout_5">
-          <item row="0" column="0">
-           <widget class="QLabel" name="UIStyle_label">
-            <property name="text">
-             <string>Visual theme of the UI</string>
-            </property>
-           </widget>
-          </item>
-          <item row="0" column="1">
-           <widget class="QComboBox" name="UIStyle">
-            <property name="toolTip">
-             <string>Selects the theme to display the UI in. These themes are available:&lt;br&gt;</string>
-            </property>
-            <property name="insertPolicy">
-             <enum>QComboBox::NoInsert</enum>
-            </property>
-            <property name="sizeAdjustPolicy">
-             <enum>QComboBox::AdjustToContents</enum>
-            </property>
-           </widget>
-          </item>
           <item row="1" column="0">
            <widget class="QLabel" name="label_20">
             <property name="toolTip">

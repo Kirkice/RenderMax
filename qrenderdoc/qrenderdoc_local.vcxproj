@@ -747,7 +747,6 @@
     <ClCompile Include="Widgets\MarkerBreadcrumbs.cpp" />
     <ClCompile Include="Code\CaptureContext.cpp" />
     <ClCompile Include="Styles\RDStyle\RDStyle.cpp" />
-    <ClCompile Include="Styles\StyleData.cpp" />
     <ClCompile Include="Styles\RDTweakedNativeStyle\RDTweakedNativeStyle.cpp" />
     <ClCompile Include="Styles\UEStyle\UEStyle.cpp" />
     <ClCompile Include="Widgets\CustomPaintWidget.cpp" />
@@ -1091,7 +1090,6 @@
       <Message>MOC %(Filename).h</Message>
       <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
     </CustomBuild>
-    <ClInclude Include="Styles\StyleData.h" />
     <ClInclude Include="Styles\UEStyle\UEStyle.h" />
     <ClInclude Include="Code\qprocessinfo.h" />
     <ClInclude Include="Code\MiniQtHelper.h" />

@@ -32,7 +32,6 @@
 #include "Code/Interface/QRDInterface.h"
 #include "Code/QRDUtils.h"
 #include "Code/pyrenderdoc/PythonContext.h"
-#include "Styles/StyleData.h"
 #include "Widgets/OrderedListEditor.h"
 #include "Widgets/ReplayOptionsSelector.h"
 #include "CaptureDialog.h"
@@ -49,17 +48,6 @@ SettingsDialog::SettingsDialog(ICaptureContext &ctx, QWidget *parent)
   m_ReplayOptions = new ReplayOptionsSelector(m_Ctx, false, this);
 
   ui->replayOptionsLayout->insertWidget(0, m_ReplayOptions);
-
-  QString styleChooseTooltip = ui->UIStyle->toolTip();
-
-  for(int i = 0; i < StyleData::numAvailable; i++)
-    styleChooseTooltip += lit("<br>- ") + StyleData::availStyles[i].styleDescription;
-
-  ui->UIStyle->setToolTip(styleChooseTooltip);
-  ui->UIStyle_label->setToolTip(styleChooseTooltip);
-
-  for(int i = 0; i < StyleData::numAvailable; i++)
-    ui->UIStyle->addItem(StyleData::availStyles[i].styleName);
 
   QFontDatabase fontdb;
 
@@ -158,15 +146,6 @@ SettingsDialog::SettingsDialog(ICaptureContext &ctx, QWidget *parent)
 
   ui->pages->setMinimumWidth(ui->pages->sizeHintForColumn(0));
   ui->pages->adjustSize();
-
-  for(int i = 0; i < StyleData::numAvailable; i++)
-  {
-    if(StyleData::availStyles[i].styleID == m_Ctx.Config().UIStyle)
-    {
-      ui->UIStyle->setCurrentIndex(i);
-      break;
-    }
-  }
 
   ui->saveDirectory->setText(m_Ctx.Config().DefaultCaptureSaveDirectory);
   ui->tempDirectory->setText(m_Ctx.Config().TemporaryCaptureDirectory);
@@ -1580,53 +1559,4 @@ void SettingsDialog::on_Android_MaxConnectTimeout_valueChanged(double timeout)
       (uint32_t)ui->Android_MaxConnectTimeout->value();
 
   RENDERDOC_SaveConfigSettings();
-}
-
-void SettingsDialog::on_UIStyle_currentIndexChanged(int index)
-{
-  if(index < 0 || index >= StyleData::numAvailable)
-    return;
-
-  // don't do anything until the dialog is initialised and visible
-  if(!isVisible())
-    return;
-
-  QString oldStyle = m_Ctx.Config().UIStyle;
-  QString newStyle = StyleData::availStyles[index].styleID;
-
-  if(oldStyle == newStyle)
-    return;
-
-  QMessageBox::StandardButton ret = RDDialog::question(
-      this, tr("Switch to new theme?"),
-      tr("Would you like to switch to the new theme now?<br><br>Some parts of a theme might "
-         "require a full application restart to properly apply."),
-      RDDialog::YesNoCancel, QMessageBox::Yes);
-
-  if(ret == QMessageBox::Cancel)
-  {
-    // change the index back. Since we haven't changed the style yet, this will early out above
-    // instead of recursing.
-
-    for(int i = 0; i < StyleData::numAvailable; i++)
-    {
-      if(StyleData::availStyles[i].styleID == oldStyle)
-      {
-        ui->UIStyle->setCurrentIndex(i);
-        break;
-      }
-    }
-
-    return;
-  }
-
-  // set the style but don't change anything unless the user selected yes.
-  m_Ctx.Config().UIStyle = newStyle;
-
-  if(ret == QMessageBox::Yes)
-  {
-    m_Ctx.Config().SetStyle();
-  }
-
-  m_Ctx.Config().Save();
 }

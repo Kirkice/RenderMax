@@ -242,13 +242,6 @@ DECLARE_REFLECTION_STRUCT(BugReport);
 // Note that only public properties should be documented.
 #define CONFIG_SETTINGS()                                                                          \
                                                                                                    \
-  DOCUMENT(                                                                                        \
-      "The style to load for the UI. Possible values include 'Native', 'RDLight', 'RDDark', 'UEStyle'. " \
-      "Defaults to 'UEStyle', the dark Unreal-inspired editor theme. A stored style"               \
-      " that is no longer recognised also falls back to it."                                       \
-      ""                                                                                           \
-      ":type: str");                                                                               \
-  CONFIG_SETTING_VAL(public, QString, rdcstr, UIStyle, "UEStyle")                                  \
                                                                                                    \
   DOCUMENT(                                                                                        \
       "The path to the last capture to be opened, which is useful as a default location for "      \
@@ -1045,16 +1038,9 @@ loading. It can explicitly save and close before relaunching.
   DOCUMENT("Configures the internal number formatter class with the settings from this config.");
   void SetupFormatting();
 
-  DOCUMENT(R"(Sets the UI style to the value in :data:`UIStyle`.
-
-Changing the style after the application has started may not properly update everything, so to be
-sure the new style is applied, the application should be restarted.
-
-:return: ``True`` if the style was set successfully, ``False`` if there was a problem e.g. the value
-  of :data:`UIStyle` was unrecognised or empty.
-:rtype: bool
-)");
-  bool SetStyle();
+  DOCUMENT(R"(Installs the built-in UI style. This is the UE / Starship dark editor theme and is not
+configurable.)");
+  void SetStyle();
 
 private:
   bool Deserialize(const rdcstr &filename);
