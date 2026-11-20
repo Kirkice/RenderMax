@@ -12,7 +12,7 @@ namespace RenderMax.CaptureReplay
     [Serializable] public class SceneBuildReport
     {
         public string status = "building", scene;
-        public int events, meshes, translated, cameras;
+        public int events, meshes, translated, cameras, passGroups;
         public List<string> issues = new List<string>();
         public string limitation = "Phase 1 editable Standard Specular scene. Material semantics inferred; no capture-shader or pixel equivalence claimed. GPU instances, skinning, packed maps and non-float constant application may require reconstruction. Full typed constants retained as JSON. Missing camera poses are reported, not invented.";
     }
@@ -33,6 +33,7 @@ namespace RenderMax.CaptureReplay
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
             var root = new GameObject("RenderMax Capture");
             var drawsRoot = new GameObject("Draws"); drawsRoot.transform.SetParent(root.transform);
+            var passHierarchy = new CapturePassHierarchy(drawsRoot.transform, reader);
             var camerasRoot = new GameObject("Captured Views"); camerasRoot.transform.SetParent(root.transform);
             var report = new SceneBuildReport();
             var states = new List<CaptureDrawState>();
@@ -47,8 +48,10 @@ namespace RenderMax.CaptureReplay
                 {
                     if (EditorUtility.DisplayCancelableProgressBar("Replay: create capture scene", "Event " + entry.eventId, (float)report.events / Math.Max(1, reader.Manifest.draws.Length)))
                         throw new OperationCanceledException("Partial scene retained.");
-                    var go = new GameObject("E" + entry.eventId.ToString("D8")); go.transform.SetParent(drawsRoot.transform, false);
+                    var pass = passHierarchy.Read(reader, entry);
+                    var go = new GameObject("E" + entry.eventId.ToString("D8")); go.transform.SetParent(passHierarchy.GetParent(pass, report.issues), false);
                     var state = go.AddComponent<CaptureDrawState>(); state.eventId = entry.eventId; state.sourceDraw = entry.path;
+                    CapturePassHierarchy.Apply(state, pass);
                     states.Add(state); ++report.events;
                     try
                     {
@@ -172,6 +175,7 @@ namespace RenderMax.CaptureReplay
                 controller.orderedCommandBufferReplay = false;
                 controller.limitations = "Phase 1: native MeshRenderers with Standard Specular and live Unity camera. No CommandBuffer replay. Shader reconstruction belongs to phase 2.";
                 controller.Rebuild();
+                report.passGroups = passHierarchy.GroupCount;
                 report.scene = folder + "/CaptureReplay.unity";
                 EditorSceneManager.SaveScene(scene, report.scene);
                 File.WriteAllText(folder + "/ReplayReport.json", JsonUtility.ToJson(report, true));

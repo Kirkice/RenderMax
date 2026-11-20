@@ -166,7 +166,8 @@ bool IsMarkerGroup(const ActionDescription &action)
 }
 
 static void FlattenEvent(const ActionDescription &a, const SDFile &sdfile, uint32_t parentEventId,
-                         uint32_t depth, rdcarray<EventNode> &out)
+                         uint32_t depth, const QStringList &markerPath,
+                         const rdcarray<uint32_t> &markerIds, rdcarray<EventNode> &out)
 {
   EventNode node;
   node.eventId = a.eventId;
@@ -176,6 +177,21 @@ static void FlattenEvent(const ActionDescription &a, const SDFile &sdfile, uint3
   node.childCount = (uint32_t)a.children.size();
   node.flags = a.flags;
   node.name = FromRdcStr(a.GetName(sdfile));
+  node.markerPath = markerPath;
+  node.markerEventIds = markerIds;
+  // Only enclosing containers establish scope. A leaf SetMarker is not a push,
+  // and event IDs need not be monotonically increasing (synthetic pass markers).
+  if(IsMarkerGroup(a))
+  {
+    node.markerPath.push_back(node.name.isEmpty()
+                                  ? QStringLiteral("Unnamed marker E%1").arg(a.eventId)
+                                  : node.name);
+    node.markerEventIds.push_back(a.eventId);
+  }
+  node.passEventId = node.markerEventIds.empty() ? 0 : node.markerEventIds.back();
+  node.passId = node.passEventId == 0 ? QStringLiteral("ungrouped")
+                                    : QStringLiteral("marker:%1").arg(node.passEventId);
+  node.passName = node.markerPath.isEmpty() ? QStringLiteral("Ungrouped") : node.markerPath.back();
   node.numIndices = a.numIndices;
   node.numInstances = a.numInstances;
   out.push_back(node);
@@ -183,14 +199,14 @@ static void FlattenEvent(const ActionDescription &a, const SDFile &sdfile, uint3
   // Children are stored in the action tree in pre-order; recursing here yields a
   // flat pre-order list that preserves the browser ordering.
   for(const ActionDescription &child : a.children)
-    FlattenEvent(child, sdfile, a.eventId, depth + 1, out);
+    FlattenEvent(child, sdfile, a.eventId, depth + 1, node.markerPath, node.markerEventIds, out);
 }
 
 void FlattenEvents(const rdcarray<ActionDescription> &roots, const SDFile &sdfile,
                    rdcarray<EventNode> &out)
 {
   for(const ActionDescription &root : roots)
-    FlattenEvent(root, sdfile, 0, 0, out);
+    FlattenEvent(root, sdfile, 0, 0, QStringList(), rdcarray<uint32_t>(), out);
 }
 
 EventCounts CountEffects(const rdcarray<EventNode> &events)
@@ -225,6 +241,15 @@ QJsonObject EventNodeToJson(const EventNode &node)
   j[QStringLiteral("actionId")] = double(node.actionId);
   j[QStringLiteral("parentEventId")] = double(node.parentEventId);
   j[QStringLiteral("depth")] = double(node.depth);
+  j[QStringLiteral("passEventId")] = double(node.passEventId);
+  j[QStringLiteral("passId")] = node.passId;
+  j[QStringLiteral("passName")] = node.passName;
+  j[QStringLiteral("passNameSource")] = node.passEventId == 0 ? QStringLiteral("ungrouped") : QStringLiteral("marker");
+  QJsonArray path, ids;
+  for(const QString &name : node.markerPath) path.push_back(name);
+  for(uint32_t id : node.markerEventIds) ids.push_back(double(id));
+  j[QStringLiteral("markerPath")] = path;
+  j[QStringLiteral("markerEventIds")] = ids;
   j[QStringLiteral("name")] = node.name;
   j[QStringLiteral("flags")] = double((uint32_t)node.flags);
   j[QStringLiteral("numIndices")] = double(node.numIndices);

@@ -140,6 +140,12 @@ struct EventNode
   uint32_t parentEventId = 0;   // 0 for a root action
   uint32_t depth = 0;           // 0 for a root action
   uint32_t childCount = 0;
+  // Exact enclosing marker ancestry, not a guessed engine ShaderLab pass type.
+  uint32_t passEventId = 0;
+  QString passId;
+  QString passName;
+  QStringList markerPath;
+  rdcarray<uint32_t> markerEventIds;
   ActionFlags flags = ActionFlags::NoFlags;
   QString name;                 // from ActionDescription::GetName(structuredFile)
   uint32_t numIndices = 0;

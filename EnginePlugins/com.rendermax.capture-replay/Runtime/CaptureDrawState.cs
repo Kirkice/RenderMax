@@ -6,6 +6,10 @@ namespace RenderMax.CaptureReplay
     public sealed class CaptureDrawState : MonoBehaviour
     {
         public uint eventId;
+        public uint parentEventId, passEventId;
+        public string passId, passName, passNameSource;
+        public string[] markerPath;
+        public uint[] markerEventIds;
         public string status, sourceDraw;
         public bool translated;
         public GlobalConstantBufferDriver.VectorConstant[] constants;

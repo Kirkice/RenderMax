@@ -47,7 +47,7 @@ namespace RenderMax.CaptureReplay
                     var draw = reader.Read<DrawDescription>(entry.path);
                     string folder = destination + "/Draws/E" + entry.eventId.ToString("D8");
                     Directory.CreateDirectory(folder); AssetDatabase.Refresh();
-                    var imported = new ImportedDraw { eventId = entry.eventId, sourceDraw = entry.path };
+                    var imported = new ImportedDraw { eventId = entry.eventId, sourceDraw = entry.path, pass = reader.Read<CapturePassInfo>(entry.path) };
                     if (!string.IsNullOrEmpty(draw.mesh))
                     {
                         try

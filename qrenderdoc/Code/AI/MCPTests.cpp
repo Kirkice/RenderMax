@@ -1351,6 +1351,48 @@ TEST_CASE("MCP analysis domain model", "[mcp][analysis]")
   }
 }
 
+TEST_CASE("MCP exported event marker ancestry", "[mcp][analysis][asset-export]")
+{
+  using namespace MCP;
+  ActionDescription frame, shadow, shadowAgain, draw, nestedDraw, nested, loose, setMarker;
+  frame.eventId = 9000; frame.flags = ActionFlags::PushMarker; frame.customName = "Frame";
+  shadow.eventId = 9001; shadow.flags = ActionFlags::PushMarker; shadow.customName = "ShadowPass";
+  draw.eventId = 10; draw.flags = ActionFlags::Drawcall;
+  nested.eventId = 9002; nested.flags = ActionFlags::PushMarker; nested.customName = "Cascade 0";
+  nestedDraw.eventId = 11; nestedDraw.flags = ActionFlags::Drawcall;
+  nested.children.push_back(nestedDraw);
+  shadow.children.push_back(draw); shadow.children.push_back(nested);
+  shadowAgain.eventId = 9003; shadowAgain.flags = ActionFlags::PushMarker; shadowAgain.customName = "ShadowPass";
+  draw.eventId = 12; shadowAgain.children.push_back(draw);
+  frame.children.push_back(shadow); frame.children.push_back(shadowAgain);
+  setMarker.eventId = 20; setMarker.flags = ActionFlags::SetMarker; setMarker.customName = "Not a scope";
+  loose.eventId = 21; loose.flags = ActionFlags::Drawcall;
+  rdcarray<ActionDescription> roots; roots.push_back(frame); roots.push_back(setMarker); roots.push_back(loose);
+  SDFile sdfile; rdcarray<EventNode> events; FlattenEvents(roots, sdfile, events);
+  REQUIRE(events.size() == 9u);
+  CHECK(events[2].eventId == 10u);
+  CHECK(events[2].parentEventId == 9001u);
+  CHECK(events[2].passEventId == 9001u);
+  CHECK(events[2].passName == QStringLiteral("ShadowPass"));
+  CHECK(events[2].markerPath == (QStringList{QStringLiteral("Frame"), QStringLiteral("ShadowPass")}));
+  CHECK(events[4].eventId == 11u);
+  CHECK(events[4].passName == QStringLiteral("Cascade 0"));
+  CHECK(events[4].markerEventIds.size() == 3u);
+  CHECK(events[4].markerEventIds[2] == 9002u);
+  CHECK(events[6].eventId == 12u);
+  CHECK(events[6].passName == events[2].passName);
+  CHECK(events[6].passId != events[2].passId);
+  CHECK(events[8].passEventId == 0u);
+  CHECK(events[8].markerPath.isEmpty());
+  CHECK(events[8].passId == QStringLiteral("ungrouped"));
+  const QJsonObject json = EventNodeToJson(events[4]);
+  CHECK(json.value(QStringLiteral("parentEventId")).toInt() == 9002);
+  CHECK(json.value(QStringLiteral("passNameSource")).toString() == QStringLiteral("marker"));
+  REQUIRE(json.value(QStringLiteral("markerEventIds")).toArray().size() == 3);
+  CHECK(json.value(QStringLiteral("markerEventIds")).toArray()[0].toInt() == 9000);
+  CHECK(json.value(QStringLiteral("markerPath")).toArray()[2].toString() == QStringLiteral("Cascade 0"));
+}
+
 TEST_CASE("MCP pass graph and reverse search model", "[mcp][analysis]")
 {
   using namespace MCP;

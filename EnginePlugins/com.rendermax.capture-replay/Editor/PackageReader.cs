@@ -15,6 +15,13 @@ namespace RenderMax.CaptureReplay
         public DrawEntry[] draws;
     }
     [Serializable] public class ResourceReference { public string resourceId, path; }
+    [Serializable] public class CapturePassInfo
+    {
+        public uint eventId, parentEventId, passEventId;
+        public string passId, passName, passNameSource;
+        public string[] markerPath;
+        public uint[] markerEventIds;
+    }
     [Serializable] public class DrawDescription
     {
         public uint eventId;

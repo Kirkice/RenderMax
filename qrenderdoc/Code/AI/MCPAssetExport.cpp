@@ -1,6 +1,7 @@
 /* RenderMax asset package exporter. Original buffers are authoritative; CSV is decoded evidence. */
 #include "Code/precompiled.h"
 #include "MCPAssetExport.h"
+#include "MCPAnalysisModel.h"
 #include "MCPShaderTools.h"
 #include "MCPResourceTools.h"
 #include "MCPTools.h"
@@ -56,15 +57,12 @@ void Check(CallContext &call)
 {
   if(call.IsCancelled() || call.IsExpired()) throw std::runtime_error("Export cancelled or deadline exceeded; package is incomplete");
 }
-void Walk(const rdcarray<ActionDescription> &actions, QJsonArray &events, QList<const ActionDescription *> &draws)
+void Walk(const rdcarray<ActionDescription> &actions, QList<const ActionDescription *> &draws)
 {
   for(const ActionDescription &a : actions)
   {
-    events.push_back(QJsonObject{{QStringLiteral("eventId"), double(a.eventId)}, {QStringLiteral("name"), S(a.customName)},
-                                {QStringLiteral("flags"), QString::number(uint32_t(a.flags))}, {QStringLiteral("numIndices"), double(a.numIndices)},
-                                {QStringLiteral("numInstances"), double(a.numInstances)}});
     if(bool(a.flags & ActionFlags::Drawcall) || bool(a.flags & ActionFlags::Dispatch)) draws.push_back(&a);
-    Walk(a.children, events, draws);
+    Walk(a.children, draws);
   }
 }
 QString Buffer(Writer &w, IReplayController &r, ResourceId id)
@@ -303,7 +301,16 @@ ToolResult Export(QueryAdapter &adapter, const QJsonObject &args, CallContext &c
   w.Object(QStringLiteral("manifest.json"), QJsonObject{{QStringLiteral("format"), QStringLiteral("rendermax.asset-package")}, {QStringLiteral("schemaVersion"), QStringLiteral("1.0.0")}, {QStringLiteral("status"), QStringLiteral("inProgress")}});
   ToolResult result = adapter.DispatchBlock("renderdoc_exportAssets", call, [&](IReplayController &r) {
     QJsonArray events, draws, resources; QList<const ActionDescription *> actions;
-    Walk(r.GetRootActions(), events, actions);
+    rdcarray<EventNode> nodes;
+    FlattenEvents(r.GetRootActions(), r.GetStructuredFile(), nodes);
+    QHash<quint32, QJsonObject> eventMetadata;
+    for(const EventNode &node : nodes)
+    {
+      const QJsonObject metadata = EventNodeToJson(node);
+      events.push_back(metadata);
+      eventMetadata.insert(node.eventId, metadata);
+    }
+    Walk(r.GetRootActions(), actions);
     w.Object(QStringLiteral("events/index.json"), QJsonObject{{QStringLiteral("events"), events}});
     w.Object(QStringLiteral("capture.json"), QJsonObject{{QStringLiteral("filename"), snapshot.filename}, {QStringLiteral("api"), snapshot.api},
         {QStringLiteral("frameNumber"), double(snapshot.frameNumber)}, {QStringLiteral("scope"), whole ? QStringLiteral("capture") : QStringLiteral("draw")}});
@@ -368,10 +375,13 @@ ToolResult Export(QueryAdapter &adapter, const QJsonObject &args, CallContext &c
       for(const auto &t : textures) if(textureIds.contains(ID(t.resourceId))) { Check(call); Texture(w, r, t, a->eventId, textureRefs); }
       for(const auto &b : r.GetBuffers()) if(bufferIds.contains(ID(b.resourceId)))
         bufferRefs.push_back(QJsonObject{{QStringLiteral("resourceId"), ID(b.resourceId)}, {QStringLiteral("path"), Buffer(w, r, b.resourceId)}});
-      QJsonObject draw{{QStringLiteral("eventId"), double(a->eventId)}, {QStringLiteral("name"), S(a->customName)}, {QStringLiteral("shaders"), shaderRefs},
+      QJsonObject draw{{QStringLiteral("eventId"), double(a->eventId)}, {QStringLiteral("name"), S(a->GetName(r.GetStructuredFile()))}, {QStringLiteral("shaders"), shaderRefs},
         {QStringLiteral("pipeline"), dir + QStringLiteral("/pipeline.json")}, {QStringLiteral("constants"), dir + QStringLiteral("/constants.json")},
         {QStringLiteral("bindings"), dir + QStringLiteral("/bindings.json")}, {QStringLiteral("textures"), textureRefs}, {QStringLiteral("buffers"), bufferRefs},
         {QStringLiteral("kind"), bool(a->flags & ActionFlags::Dispatch) ? QStringLiteral("dispatch") : QStringLiteral("draw")}};
+      const QJsonObject metadata = eventMetadata.value(a->eventId);
+      for(const char *key : {"parentEventId", "depth", "passEventId", "passId", "passName", "passNameSource", "markerPath", "markerEventIds"})
+        draw[QString::fromLatin1(key)] = metadata.value(QString::fromLatin1(key));
       if(bool(a->flags & ActionFlags::Drawcall))
       {
         try { Mesh(w, r, *a, dir + QStringLiteral("/mesh")); draw[QStringLiteral("mesh")] = dir + QStringLiteral("/mesh/mesh.json"); }
